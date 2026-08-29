@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <Import Project="..\..\build\Vanguard.Version.props" />
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <RootNamespace>Vanguard.Server</RootNamespace>
+    <AssemblyName>Vanguard.Server</AssemblyName>
+    <OutputType>Library</OutputType>
+    <Version>$(VanguardVersion)</Version>
+    <Description>Vanguard server foundation for SPT/Fika.</Description>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="HarmonyX" Version="2.15.0" Private="false" />
+    <PackageReference Include="SPTarkov.Common" Version="4.0.13" Private="false" />
+    <PackageReference Include="SPTarkov.DI" Version="4.0.13" Private="false" />
+    <PackageReference Include="SPTarkov.Server.Core" Version="4.0.13" Private="false" />
+  </ItemGroup>
+</Project>

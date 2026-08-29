@@ -1,0 +1,12 @@
+Vanguard Operator static role/faction portrait set — Vanguard 0.7.0
+
+Contract:
+- JPEG only.
+- 640 x 800 pixels.
+- Each image must remain strictly below 100,000 bytes.
+- The gameplay role is the primary visual identity; BEAR/USEC is a secondary faction influence.
+- One BEAR and one USEC static portrait currently exist for each supported role:
+  Assault, Recon, Support, Veteran, Marksman, Breacher, Medic.
+- Runtime selection is deterministic from stable Operator identity within the matching role/faction pool.
+- The pool-based resolver is intentionally compatible with later additional variants and the planned
+  Vanguard semi-procedural portrait generator without making static media an authority over Operator data.

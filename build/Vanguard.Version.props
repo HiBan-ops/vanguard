@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project>
+  <PropertyGroup>
+    <VanguardVersion>0.7.0</VanguardVersion>
+    <VanguardBuildLabel>vanguard-0-7-0</VanguardBuildLabel>
+    <VanguardBuildVersionGeneratedDir>$(BaseIntermediateOutputPath)$(Configuration)\$(TargetFramework)\</VanguardBuildVersionGeneratedDir>
+    <VanguardBuildVersionGeneratedFile>$(VanguardBuildVersionGeneratedDir)VanguardBuildVersion.g.cs</VanguardBuildVersionGeneratedFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="$(VanguardBuildVersionGeneratedFile)" Visible="false" AutoGen="true" />
+    <VanguardBuildVersionLines Include="namespace $(RootNamespace)" />
+    <VanguardBuildVersionLines Include="{" />
+    <VanguardBuildVersionLines Include="    public static class VanguardBuildVersion" />
+    <VanguardBuildVersionLines Include="    {" />
+    <VanguardBuildVersionLines Include="        public const string Value = &quot;$(VanguardVersion)&quot;%3B" />
+    <VanguardBuildVersionLines Include="        public const string AssemblyValue = &quot;$(VanguardVersion).0&quot;%3B" />
+    <VanguardBuildVersionLines Include="        public const string BuildLabel = &quot;$(VanguardBuildLabel)&quot;%3B" />
+    <VanguardBuildVersionLines Include="        public const string ArmamentDeficitSquadPriorityStatusTag = &quot;VANGUARD_ARMAMENT_DEFICIT_SQUAD_PRIORITY_STATUS&quot;%3B" />
+    <VanguardBuildVersionLines Include="        public const string AuditConfigBindStatusTag = &quot;VANGUARD_AUDIT_CONFIG_BIND_OK&quot;%3B" />
+    <VanguardBuildVersionLines Include="        public const string AuditLoadGuardStatusTag = &quot;VANGUARD_AUDIT_LOAD_GUARD_OK&quot;%3B" />
+    <VanguardBuildVersionLines Include="        public const string AuditSettingsSyncStatusTag = &quot;VANGUARD_AUDIT_SETTINGS_SYNC_STATUS&quot;%3B" />
+    <VanguardBuildVersionLines Include="        public const string AuditStableBaselineStatusTag = &quot;VANGUARD_AUDIT_STABLE_BASELINE_OK&quot;%3B" />
+    <VanguardBuildVersionLines Include="        public const string AwarenessReadModelStatusTag = &quot;VANGUARD_AWARENESS_READMODEL_OK&quot;%3B" />
+    <VanguardBuildVersionLines Include="        public const string CareerTruthProbeStatusTag = &quot;VANGUARD_CAREER_TRUTH_PROBE_STATUS&quot;%3B" />
+    <VanguardBuildVersionLines Include="        public const string CareerXpProfileParityStatusTag = &quot;VANGUARD_CAREER_XP_PROFILE_PARITY_STATUS&quot;%3B" />
+    <VanguardBuildVersionLines Include="        public const string CareerXpCommitAndLevelProgressionStatusTag = &quot;VANGUARD_CAREER_XP_COMMIT_AND_LEVEL_PROGRESSION_STATUS&quot;%3B" />
+    <VanguardBuildVersionLines Include="        public const string ClientBootStatusTag = &quot;VANGUARD_CLIENT_BOOT_STATUS&quot;%3B" />
+    <VanguardBuildVersionLines Include="        public const string ContainerItemTransactionActivationStatusTag = &quot;VANGUARD_CONTAINER_ITEM_TRANSACTION_ACTIVATION_STATUS&quot;%3B" />
+    <VanguardBuildVersionLines Include="        public const string ContainerScoringAndSquadAllocationIntegrationStatusTag = &quot;VANGUARD_CONTAINER_SCORING_AND_SQUAD_ALLOCATION_INTEGRATION_STATUS&quot;%3B" />
+    <VanguardBuildVersionLines Include="        public const string CoopAuthorityConvergenceStatusTag = &quot;VANGUARD_COOP_AUTHORITY_CONVERGENCE_STATUS&quot;%3B" />
+    <VanguardBuildVersionLines Include="        public const string CoopFriendlyTargetGuardStatusTag = &quot;VANGUARD_COOP_FRIENDLY_TARGET_GUARD_OK&quot;%3B" />
+    <VanguardBuildVersionLines Include="        public const string CoopStructuralSquadBindStatusTag = &quot;VANGUARD_COOP_STRUCTURAL_SQUAD_BIND_OK&quot;%3B" />
+    <VanguardBuildVersionLines Include="        public const string ExecutionWindowStatusTag = &quot;VANGUARD_EXECUTION_WINDOW_STATUS&quot;%3B" />
+    <VanguardBuildVersionLines Include="        public const string F12AuthorityConvergenceStatusTag = &quot;VANGUARD_F12_AUTHORITY_CONVERGENCE_STATUS&quot;%3B" />
+    <VanguardBuildVersionLines Include="        public const string MobileMedicalLeaseStatusTag = &quot;VANGUARD_MOBILE_MEDICAL_LEASE_STATUS&quot;%3B" />
+    <VanguardBuildVersionLines Include="        public const string CoreRuntimeStatusTag = &quot;VANGUARD_CORE_RUNTIME_STATUS&quot;%3B" />
+    <VanguardBuildVersionLines Include="        public const string GrenadeWindowConvergenceStatusTag = &quot;VANGUARD_GRENADE_WINDOW_CONVERGENCE_STATUS&quot;%3B" />
+    <VanguardBuildVersionLines Include="        public const string MainSchedulerStatusTag = &quot;VANGUARD_MAIN_SCHEDULER_STATUS&quot;%3B" />
+    <VanguardBuildVersionLines Include="        public const string MovementActionRallyStatusTag = &quot;VANGUARD_MOVEMENT_ACTION_RALLY_STATUS&quot;%3B" />
+    <VanguardBuildVersionLines Include="        public const string MovementAuthorityReadOnlyStatusTag = &quot;VANGUARD_MOVEMENT_AUTHORITY_READ_ONLY_STATUS&quot;%3B" />
+    <VanguardBuildVersionLines Include="        public const string MovementBrokerDryRunStatusTag = &quot;VANGUARD_MOVEMENT_BROKER_DRY_RUN_STATUS&quot;%3B" />
+    <VanguardBuildVersionLines Include="        public const string MovementContractsStatusTag = &quot;VANGUARD_MOVEMENT_CONTRACTS_STATUS&quot;%3B" />
+    <VanguardBuildVersionLines Include="        public const string MovementDoctrineF12SyncStatusTag = &quot;VANGUARD_MOVEMENT_DOCTRINE_F12_SYNC_STATUS&quot;%3B" />
+    <VanguardBuildVersionLines Include="        public const string MovementExternalSuppressHardReturnStatusTag = &quot;VANGUARD_MOVEMENT_EXTERNAL_SUPPRESS_HARD_RETURN_STATUS&quot;%3B" />
+    <VanguardBuildVersionLines Include="        public const string MovementHardReturnActiveStatusTag = &quot;VANGUARD_MOVEMENT_HARD_RETURN_ACTIVE_STATUS&quot;%3B" />
+    <VanguardBuildVersionLines Include="        public const string MovementLeasePlanStatusTag = &quot;VANGUARD_MOVEMENT_LEASE_PLAN_STATUS&quot;%3B" />
+    <VanguardBuildVersionLines Include="        public const string MovementReturnAuthorityStatusTag = &quot;VANGUARD_MOVEMENT_RETURN_AUTHORITY_STATUS&quot;%3B" />
+    <VanguardBuildVersionLines Include="        public const string MovementSainBoundaryReturnActiveStatusTag = &quot;VANGUARD_MOVEMENT_SAIN_BOUNDARY_RETURN_ACTIVE_STATUS&quot;%3B" />
+    <VanguardBuildVersionLines Include="        public const string MovementSainSearchSuppressStatusTag = &quot;VANGUARD_MOVEMENT_SAIN_SEARCH_SUPPRESS_STATUS&quot;%3B" />
+    <VanguardBuildVersionLines Include="        public const string OffRaidUiStatusTag = &quot;VANGUARD_OFFRAID_UI_STATUS&quot;%3B" />
+    <VanguardBuildVersionLines Include="        public const string OperatorBattleInputNodeReleaseStatusTag = &quot;VANGUARD_OPERATOR_BATTLE_INPUT_NODE_RELEASE_STATUS&quot;%3B" />
+    <VanguardBuildVersionLines Include="        public const string OperatorDecisionSnapshotStatusTag = &quot;VANGUARD_OPERATOR_DECISION_SNAPSHOT_STATUS&quot;%3B" />
+    <VanguardBuildVersionLines Include="        public const string OperatorDirectEquipmentScreenStatusTag = &quot;VANGUARD_OPERATOR_DIRECT_EQUIPMENT_SCREEN_STATUS&quot;%3B" />
+    <VanguardBuildVersionLines Include="        public const string OperatorHudStatusTag = &quot;VANGUARD_OPERATOR_HUD_STATUS&quot;%3B" />
+    <VanguardBuildVersionLines Include="        public const string OperatorIntentDryRunStatusTag = &quot;VANGUARD_OPERATOR_INTENT_DRYRUN_STATUS&quot;%3B" />
+    <VanguardBuildVersionLines Include="        public const string OperatorInventoryExitReloadStatusTag = &quot;VANGUARD_OPERATOR_INVENTORY_EXIT_RELOAD_STATUS&quot;%3B" />
+    <VanguardBuildVersionLines Include="        public const string OperatorInventoryRaidCursorRestoreStatusTag = &quot;VANGUARD_OPERATOR_INVENTORY_RAID_CURSOR_RESTORE_STATUS&quot;%3B" />
+    <VanguardBuildVersionLines Include="        public const string OperatorLootPolicyUiClarityStatusTag = &quot;VANGUARD_OPERATOR_LOOT_POLICY_UI_CLARITY_STATUS&quot;%3B" />
+    <VanguardBuildVersionLines Include="        public const string OperatorPersistenceStatusTag = &quot;VANGUARD_OPERATOR_PERSISTENCE_STATUS&quot;%3B" />
+    <VanguardBuildVersionLines Include="        public const string OperatorRuntimeAuditStatusTag = &quot;VANGUARD_OPERATOR_RUNTIME_AUDIT_STATUS&quot;%3B" />
+    <VanguardBuildVersionLines Include="        public const string OperatorSkillAndMasteryPersistenceStatusTag = &quot;VANGUARD_OPERATOR_SKILL_AND_MASTERY_PERSISTENCE_STATUS&quot;%3B" />
+    <VanguardBuildVersionLines Include="        public const string OperatorThreatScannerPromotionLatchStatusTag = &quot;VANGUARD_OPERATOR_THREAT_SCANNER_PROMOTION_LATCH_OK&quot;%3B" />
+    <VanguardBuildVersionLines Include="        public const string PostLootCombatReadinessAuditStatusTag = &quot;VANGUARD_POST_LOOT_COMBAT_READINESS_AUDIT_OK&quot;%3B" />
+    <VanguardBuildVersionLines Include="        public const string RaidSpawnStatusTag = &quot;VANGUARD_RAID_SPAWN_STATUS&quot;%3B" />
+    <VanguardBuildVersionLines Include="        public const string SecondaryWeaponReplacementStatusTag = &quot;VANGUARD_SECONDARY_WEAPON_REPLACEMENT_STATUS&quot;%3B" />
+    <VanguardBuildVersionLines Include="        public const string RuntimeBoundaryConvergenceStatusTag = &quot;VANGUARD_RUNTIME_BOUNDARY_CONVERGENCE_STATUS&quot;%3B" />
+    <VanguardBuildVersionLines Include="        public const string RuntimeLivenessConvergenceStatusTag = &quot;VANGUARD_RUNTIME_LIVENESS_CONVERGENCE_STATUS&quot;%3B" />
+    <VanguardBuildVersionLines Include="        public const string SquadCohesionReadOnlyStatusTag = &quot;VANGUARD_SQUAD_COHESION_READ_ONLY_STATUS&quot;%3B" />
+    <VanguardBuildVersionLines Include="        public const string TacticalAuthoringStatusTag = &quot;VANGUARD_TACTICAL_AUTHORING_STATUS&quot;%3B" />
+    <VanguardBuildVersionLines Include="        public const string TravelContinuityRepairStatusTag = &quot;VANGUARD_TRAVEL_CONTINUITY_REPAIR_STATUS&quot;%3B" />
+    <VanguardBuildVersionLines Include="        public const string UnifiedOpportunisticLootReadModelStatusTag = &quot;VANGUARD_UNIFIED_OPPORTUNISTIC_LOOT_READ_MODEL_STATUS&quot;%3B" />
+    <VanguardBuildVersionLines Include="        public const string UtilityClaimedLootActivationStatusTag = &quot;VANGUARD_UTILITY_CLAIMED_LOOT_ACTIVATION_STATUS&quot;%3B" />
+    <VanguardBuildVersionLines Include="        public const string WeaponHandsAuditStatusTag = &quot;VANGUARD_WEAPON_HANDS_AUDIT_STATUS&quot;%3B" />
+    <VanguardBuildVersionLines Include="        public const string WorldContainerReadModelStatusTag = &quot;VANGUARD_WORLD_CONTAINER_READ_MODEL_STATUS&quot;%3B" />
+    <VanguardBuildVersionLines Include="        public const string ZeroLongWeaponAcquisitionCapacityStatusTag = &quot;VANGUARD_ZERO_LONG_WEAPON_ACQUISITION_CAPACITY_STATUS&quot;%3B" />
+    <VanguardBuildVersionLines Include="    }" />
+    <VanguardBuildVersionLines Include="}" />
+  </ItemGroup>
+
+  <Target Name="GenerateVanguardBuildVersionSource" BeforeTargets="BeforeCompile">
+    <MakeDir Directories="$(VanguardBuildVersionGeneratedDir)" />
+    <WriteLinesToFile File="$(VanguardBuildVersionGeneratedFile)" Lines="@(VanguardBuildVersionLines)" Overwrite="true" />
+  </Target>
+</Project>

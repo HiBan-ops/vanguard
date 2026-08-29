@@ -1,0 +1,12 @@
+<Project>
+  <PropertyGroup>
+    <!-- Copy this file to Directory.Build.props and point SptRoot to your local SPT installation. -->
+    <SptRoot>C:\Path\To\SPT</SptRoot>
+    <GameManagedPath>$(SptRoot)\EscapeFromTarkov_Data\Managed</GameManagedPath>
+    <BepInExPluginsPath>$(SptRoot)\BepInEx\plugins</BepInExPluginsPath>
+    <BepInExCorePath>$(SptRoot)\BepInEx\core</BepInExCorePath>
+    <BepInExPatchersPath>$(SptRoot)\BepInEx\patchers</BepInExPatchersPath>
+    <MoreBotsApiClientDllPath>$(SptRoot)\BepInEx\plugins\MoreBotsAPI\MoreBotsPlugin.dll</MoreBotsApiClientDllPath>
+    <MoreBotsApiPrepatchDllPath>$(SptRoot)\BepInEx\patchers\MoreBotsPrepatch.dll</MoreBotsApiPrepatchDllPath>
+  </PropertyGroup>
+</Project>
