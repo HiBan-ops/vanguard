@@ -1,10 +1,12 @@
 using System.Reflection;
 using HarmonyLib;
 using SPTarkov.Server.Core.Models.Common;
+using SPTarkov.Server.Core.Models.Eft.Common;
 using SPTarkov.Server.Core.Models.Eft.ItemEvent;
 using SPTarkov.Server.Core.Models.Eft.Profile;
 using SPTarkov.Server.Core.Models.Utils;
 using SPTarkov.Server.Core.Controllers;
+using SPTarkov.Server.Core.Helpers;
 using SPTarkov.Server.Core.Routers;
 using SPTarkov.Server.Core.Servers;
 using Vanguard.Server.Operators.Inventory.Services;
@@ -47,6 +49,12 @@ public static class VanguardOperatorInventoryServerPatches
         Harmony.Patch(saveProfile, prefix: new HarmonyMethod(typeof(VanguardOperatorInventoryServerPatches), nameof(SaveProfileAsyncPrefix)));
         Harmony.Patch(handleEvents, postfix: new HarmonyMethod(typeof(VanguardOperatorInventoryServerPatches), nameof(ItemEventRouterPostfix)));
 
+        // Native purchases are player-economy operations even while the inventory UI
+        // is presenting an Operator. Patch only the common SPT buy boundary so trader
+        // and Flea purchases debit the real player profile without changing sales or
+        // normal Operator item events.
+        PatchPlayerPurchaseMethod(AccessTools.Method(typeof(TradeHelper), nameof(TradeHelper.BuyItem)), logger);
+
         PatchPlayerUserBuildMethod(AccessTools.Method(typeof(BuildController), nameof(BuildController.GetUserBuilds)), logger);
         PatchPlayerUserBuildMethod(AccessTools.Method(typeof(BuildController), nameof(BuildController.SaveEquipmentBuild)), logger);
         PatchPlayerUserBuildMethod(AccessTools.Method(typeof(BuildController), nameof(BuildController.SaveWeaponBuild)), logger);
@@ -54,6 +62,79 @@ public static class VanguardOperatorInventoryServerPatches
         PatchPlayerUserBuildMethod(AccessTools.Method(typeof(BuildController), nameof(BuildController.RemoveBuild)), logger);
 
         enabled = true;
+    }
+
+
+    private static bool PatchPlayerPurchaseMethod<TLogger>(MethodInfo? method, ISptLogger<TLogger> logger)
+    {
+        if (method == null)
+        {
+            logger.Warning(VanguardServerDiagnosticsLog.Present("[VANGUARD_OPERATOR_NATIVE_PURCHASE_AUTHORITY_STATUS] native purchase authority patch target missing; compatibility fallback leaves TradeHelper.BuyItem native."));
+            return false;
+        }
+
+        Harmony.Patch(
+            method,
+            prefix: new HarmonyMethod(typeof(VanguardOperatorInventoryServerPatches), nameof(PlayerPurchaseAccessPrefix)),
+            finalizer: new HarmonyMethod(typeof(VanguardOperatorInventoryServerPatches), nameof(PlayerPurchaseAccessFinalizer)));
+        return true;
+    }
+
+    private static void PlayerPurchaseAccessPrefix(
+        ref PmcData __0,
+        MongoId __2,
+        MethodBase __originalMethod,
+        out PlayerPurchaseAccessState? __state)
+    {
+        __state = null;
+        VanguardOperatorInventoryModeService? service = ResolveService();
+        if (service == null || !service.IsActive(__2))
+        {
+            return;
+        }
+
+        IDisposable? scope = service.BeginPlayerPurchaseProfileAccess(
+            __2,
+            __originalMethod.Name,
+            out PmcData? playerPmcData,
+            out string? operatorId);
+        if (scope == null || playerPmcData == null || string.IsNullOrWhiteSpace(operatorId))
+        {
+            return;
+        }
+
+        // TradeHelper must receive the real player PMC. The active composite remains
+        // the UI projection only; the native item-event delta is mirrored back after
+        // SPT finishes the purchase.
+        __0 = playerPmcData;
+        __state = new PlayerPurchaseAccessState(scope, __2, operatorId, __originalMethod.Name);
+    }
+
+    private static Exception? PlayerPurchaseAccessFinalizer(
+        Exception? __exception,
+        ItemEventRouterResponse __4,
+        PlayerPurchaseAccessState? __state)
+    {
+        if (__state == null)
+        {
+            return __exception;
+        }
+
+        try
+        {
+            ResolveService()?.CompletePlayerPurchaseProfileAccess(
+                __state.RequestedProfileId,
+                __state.OperatorId,
+                __state.Operation,
+                __4,
+                __exception);
+        }
+        finally
+        {
+            __state.Scope.Dispose();
+        }
+
+        return __exception;
     }
 
 
@@ -140,6 +221,12 @@ public static class VanguardOperatorInventoryServerPatches
 
         return response;
     }
+
+    private sealed record PlayerPurchaseAccessState(
+        IDisposable Scope,
+        MongoId RequestedProfileId,
+        string OperatorId,
+        string Operation);
 
     private static VanguardOperatorInventoryModeService? ResolveService() => inventoryModeService;
 }

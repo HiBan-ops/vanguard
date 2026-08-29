@@ -8,7 +8,9 @@ using System.Text.Json.Nodes;
 using SPTarkov.Common.Extensions;
 using SPTarkov.DI.Annotations;
 using SPTarkov.Server.Core.Models.Common;
+using SPTarkov.Server.Core.Models.Eft.Common;
 using SPTarkov.Server.Core.Models.Eft.Profile;
+using SPTarkov.Server.Core.Models.Eft.ItemEvent;
 using SPTarkov.Server.Core.Models.Spt.Config;
 using SPTarkov.Server.Core.Models.Utils;
 using SPTarkov.Server.Core.Servers;
@@ -896,6 +898,128 @@ public sealed class VanguardOperatorInventoryModeService(
 
     public bool IsActive(MongoId requestedProfileId) => activeSessions.ContainsKey(requestedProfileId.ToString());
 
+    public IDisposable? BeginPlayerPurchaseProfileAccess(
+        MongoId requestedProfileId,
+        string operation,
+        out PmcData? playerPmcData,
+        out string? operatorId)
+    {
+        playerPmcData = null;
+        operatorId = null;
+        if (!activeSessions.TryGetValue(requestedProfileId.ToString(), out VanguardOperatorInventoryModeSession? session))
+        {
+            return null;
+        }
+
+        // The Operator inventory screen is a composite projection. Native commerce must
+        // execute against the real player profile so SPT's own payment service counts
+        // the player's wallet instead of a temporary copy that may have gone stale.
+        redirectBypassDepth.Value++;
+        try
+        {
+            SptProfile? playerProfile = saveServer.GetProfile(requestedProfileId);
+            playerPmcData = playerProfile?.CharacterData?.PmcData;
+            if (playerPmcData == null)
+            {
+                throw new InvalidOperationException($"Real player PMC unavailable for native purchase: {requestedProfileId}");
+            }
+
+            operatorId = session.OperatorId;
+            logger.Info(VanguardServerDiagnosticsLog.Present(
+                $"[VANGUARD_OPERATOR_NATIVE_PURCHASE_AUTHORITY_STATUS] player_profile_route_begin operation={operation}; requested={requestedProfileId}; operator={session.OperatorId}; inventoryProfile={session.OperatorInventoryProfileId}; redirectBypassDepth={redirectBypassDepth.Value}; playerWalletAuthority=true; operatorEquipmentAuthority=preserved"));
+            return new PlayerPurchaseRedirectBypassScope(this, requestedProfileId, session.OperatorId, operation);
+        }
+        catch (Exception exception)
+        {
+            redirectBypassDepth.Value = Math.Max(0, redirectBypassDepth.Value - 1);
+            logger.Error(VanguardServerDiagnosticsLog.Present(
+                $"[VANGUARD_OPERATOR_NATIVE_PURCHASE_AUTHORITY_STATUS] player_profile_route_failed operation={operation}; requested={requestedProfileId}; operator={session.OperatorId}; type={exception.GetType().Name}; message={exception.Message}; playerWalletAuthority=true; fallbackToComposite=false"));
+            throw;
+        }
+    }
+
+    public void CompletePlayerPurchaseProfileAccess(
+        MongoId requestedProfileId,
+        string expectedOperatorId,
+        string operation,
+        ItemEventRouterResponse output,
+        Exception? nativeException)
+    {
+        if (!activeSessions.TryGetValue(requestedProfileId.ToString(), out VanguardOperatorInventoryModeSession? session))
+        {
+            return;
+        }
+
+        if (!string.Equals(session.OperatorId, expectedOperatorId, StringComparison.OrdinalIgnoreCase))
+        {
+            logger.Warning(VanguardServerDiagnosticsLog.Present(
+                $"[VANGUARD_OPERATOR_NATIVE_PURCHASE_AUTHORITY_STATUS] player_projection_delta_skipped operation={operation}; requested={requestedProfileId}; expectedOperator={expectedOperatorId}; activeOperator={session.OperatorId}; reason=active_operator_changed"));
+            return;
+        }
+
+        try
+        {
+            if (output.ProfileChanges == null || !output.ProfileChanges.TryGetValue(requestedProfileId, out ProfileChange? profileChange))
+            {
+                logger.Warning(VanguardServerDiagnosticsLog.Present(
+                    $"[VANGUARD_OPERATOR_NATIVE_PURCHASE_AUTHORITY_STATUS] player_projection_delta_skipped operation={operation}; requested={requestedProfileId}; operator={session.OperatorId}; reason=profile_change_missing; nativeResult={(nativeException == null ? "completed" : "faulted")}"));
+                return;
+            }
+
+            // SPT has already mutated the real player profile and described that mutation
+            // in the item-event response. Apply only those native deltas to the temporary
+            // composite instead of replacing the whole stash; unrelated Operator-session
+            // edits therefore remain untouched.
+            SptProfile? playerProfile = saveServer.GetProfile(requestedProfileId);
+            if (playerProfile == null)
+            {
+                logger.Error(VanguardServerDiagnosticsLog.Present(
+                    $"[VANGUARD_OPERATOR_NATIVE_PURCHASE_AUTHORITY_STATUS] player_projection_delta_failed operation={operation}; requested={requestedProfileId}; operator={session.OperatorId}; reason=player_profile_missing"));
+                return;
+            }
+
+            JsonObject sessionNode = ProfileToNode(session.Profile);
+            JsonObject playerNode = ProfileToNode(playerProfile);
+            JsonObject sessionPmc = GetPmcObject(sessionNode);
+            JsonObject playerPmc = GetPmcObject(playerNode);
+            NativePurchaseDeltaResult delta = ApplyNativePurchaseInventoryDelta(
+                GetInventoryObject(sessionNode),
+                GetInventoryObject(playerNode),
+                profileChange.Items);
+
+            // Trader state belongs to the player's economy as well. Copy it from the
+            // native player transaction so later Flea loyalty checks in this same
+            // Operator session cannot observe an older composite value.
+            CopyPlayerOwnedDescriptorField(playerPmc, sessionPmc, "TradersInfo");
+            NormalizeCompleteSessionProfileNode(sessionNode, session.StorageProfileId, session.OperatorId, "native_purchase_delta");
+
+            SptProfile refreshedProfile = NodeToProfile(sessionNode);
+            activeSessions[requestedProfileId.ToString()] = session with
+            {
+                Profile = refreshedProfile,
+                ClientSessionProfileNode = CloneObject(sessionNode)
+            };
+
+            logger.Info(VanguardServerDiagnosticsLog.Present(
+                $"[VANGUARD_OPERATOR_NATIVE_PURCHASE_AUTHORITY_STATUS] player_projection_delta_applied operation={operation}; requested={requestedProfileId}; operator={session.OperatorId}; nativeResult={(nativeException == null ? "completed" : "faulted")}; warnings={output.Warnings?.Count ?? 0}; new={delta.NewItems}; changed={delta.ChangedItems}; deleted={delta.DeletedItems}; playerWalletAuthority=true; operatorEquipmentAuthority=preserved"));
+        }
+        catch (Exception exception)
+        {
+            // Projection reconciliation must never compensate or replay a completed SPT
+            // transaction. The real player profile remains the native economy truth and
+            // normal exit/reload still provides the final convergence path.
+            logger.Error(VanguardServerDiagnosticsLog.Present(
+                $"[VANGUARD_OPERATOR_NATIVE_PURCHASE_AUTHORITY_STATUS] player_projection_delta_failed operation={operation}; requested={requestedProfileId}; operator={session.OperatorId}; type={exception.GetType().Name}; message={exception.Message}; nativeResult={(nativeException == null ? "completed" : "faulted")}"));
+        }
+    }
+
+    private void EndPlayerPurchaseProfileAccess(MongoId requestedProfileId, string operatorId, string operation)
+    {
+        redirectBypassDepth.Value = Math.Max(0, redirectBypassDepth.Value - 1);
+        logger.Info(VanguardServerDiagnosticsLog.Present(
+            $"[VANGUARD_OPERATOR_NATIVE_PURCHASE_AUTHORITY_STATUS] player_profile_route_end operation={operation}; requested={requestedProfileId}; operator={operatorId}; redirectBypassDepth={redirectBypassDepth.Value}; playerWalletAuthority=true"));
+    }
+
     public IDisposable? BeginPlayerUserBuildProfileAccess(MongoId requestedProfileId, string operation)
     {
         if (!activeSessions.TryGetValue(requestedProfileId.ToString(), out VanguardOperatorInventoryModeSession? session))
@@ -1174,6 +1298,28 @@ public sealed class VanguardOperatorInventoryModeService(
 
             disposed = true;
             owner.redirectBypassDepth.Value = Math.Max(0, owner.redirectBypassDepth.Value - 1);
+        }
+    }
+
+    private sealed record NativePurchaseDeltaResult(int NewItems, int ChangedItems, int DeletedItems);
+
+    private sealed class PlayerPurchaseRedirectBypassScope(
+        VanguardOperatorInventoryModeService owner,
+        MongoId requestedProfileId,
+        string operatorId,
+        string operation) : IDisposable
+    {
+        private bool disposed;
+
+        public void Dispose()
+        {
+            if (disposed)
+            {
+                return;
+            }
+
+            disposed = true;
+            owner.EndPlayerPurchaseProfileAccess(requestedProfileId, operatorId, operation);
         }
     }
 
@@ -1899,6 +2045,110 @@ public sealed class VanguardOperatorInventoryModeService(
 
         clone.Remove("location");
         return clone;
+    }
+
+    private static NativePurchaseDeltaResult ApplyNativePurchaseInventoryDelta(
+        JsonObject sessionInventory,
+        JsonObject authoritativePlayerInventory,
+        ItemChanges? changes)
+    {
+        if (changes == null)
+        {
+            return new NativePurchaseDeltaResult(0, 0, 0);
+        }
+
+        JsonArray sessionItems = GetItemsArray(sessionInventory);
+        JsonArray playerItems = GetItemsArray(authoritativePlayerInventory);
+        int newCount = 0;
+        int changedCount = 0;
+        int deletedCount = 0;
+
+        foreach (var newItem in changes.NewItems ?? [])
+        {
+            string itemId = newItem.Id.ToString();
+            JsonObject? authoritativeItem = FindItemById(playerItems, itemId);
+            if (authoritativeItem == null)
+            {
+                continue;
+            }
+
+            JsonObject? existingItem = FindItemById(sessionItems, itemId);
+            if (existingItem != null)
+            {
+                ReplaceJsonObject(existingItem, authoritativeItem);
+            }
+            else
+            {
+                sessionItems.Add(authoritativeItem.DeepClone());
+            }
+
+            newCount++;
+        }
+
+        foreach (var changedItem in changes.ChangedItems ?? [])
+        {
+            string itemId = changedItem.Id.ToString();
+            JsonObject? authoritativeItem = FindItemById(playerItems, itemId);
+            if (authoritativeItem == null)
+            {
+                continue;
+            }
+
+            JsonObject? sessionItem = FindItemById(sessionItems, itemId);
+            if (sessionItem == null)
+            {
+                sessionItems.Add(authoritativeItem.DeepClone());
+                changedCount++;
+                continue;
+            }
+
+            // Native purchase changes on existing inventory items are predominantly
+            // stack-state updates such as currency debits or stacking a bought item.
+            // Copy `upd` from the real player item while keeping the active composite's
+            // parent/location so unrelated stash layout edits are not rolled back.
+            string? authoritativeUpdName = FindPropertyName(authoritativeItem, "upd");
+            if (authoritativeUpdName != null && authoritativeItem[authoritativeUpdName] != null)
+            {
+                sessionItem[FindPropertyName(sessionItem, "upd") ?? "upd"] = authoritativeItem[authoritativeUpdName]!.DeepClone();
+            }
+
+            changedCount++;
+        }
+
+        foreach (DeletedItem deletedItem in changes.DeletedItems ?? [])
+        {
+            string itemId = deletedItem.Id.ToString();
+            JsonObject? sessionItem = FindItemById(sessionItems, itemId);
+            if (sessionItem != null)
+            {
+                sessionItems.Remove(sessionItem);
+                deletedCount++;
+            }
+        }
+
+        SanitizeInventoryReferences(sessionInventory);
+        EnsureRootFieldsReferenceExistingItems(sessionInventory);
+        return new NativePurchaseDeltaResult(newCount, changedCount, deletedCount);
+    }
+
+    private static void ReplaceJsonObject(JsonObject target, JsonObject source)
+    {
+        target.Clear();
+        foreach (KeyValuePair<string, JsonNode?> property in source)
+        {
+            target[property.Key] = property.Value?.DeepClone();
+        }
+    }
+
+    private static void CopyPlayerOwnedDescriptorField(JsonObject playerPmc, JsonObject sessionPmc, string fieldName)
+    {
+        string? sourceName = FindPropertyName(playerPmc, fieldName);
+        if (sourceName == null || playerPmc[sourceName] == null)
+        {
+            return;
+        }
+
+        sessionPmc[FindPropertyName(sessionPmc, fieldName) ?? fieldName] = playerPmc[sourceName]!.DeepClone();
     }
 
     private static void CopyOperatorOwnedDescriptorField(JsonObject operatorPmc, JsonObject sessionPmc, string fieldName)

@@ -1,7 +1,5 @@
 # Vanguard
 
-![Vanguard overview banner](docs/media/spmod/vanguard-banner.png)
-
 > **Vanguard is not a faction. It is a network.**
 
 **Persistent Operators. Independent behavior. Shared survival.**
@@ -56,6 +54,10 @@ Vanguard coordinates the squad-level context required to keep persistent Operato
 - persistent Operator context.
 
 Individual combat intelligence remains primarily handled by **SAIN**. Vanguard builds squad context and persistence around the existing AI ecosystem rather than attempting to replace it wholesale.
+
+In Vanguard 0.7.0, each Operator starts from a private clone of the **currently loaded SAIN `Normal` personality**. Vanguard then layers the Operator's Persona and Specialty adjustments, plus a small set of Vanguard safety invariants, over that baseline. This means changes to your SAIN `Normal` tuning also influence Vanguard Operators, while Vanguard leaves SAIN's global `Normal` profile untouched.
+
+**Planned:** a future Vanguard architecture will use a **dedicated SAIN profile for Operators** rather than deriving from the standard `Normal` personality. This will keep Vanguard's Operator baseline separate from SAIN's preconfigured personality profiles.
 
 **Player-issued squad orders are not currently implemented.**
 
@@ -112,7 +114,7 @@ The first public release uses the following dependency model:
 
 | Component | Status |
 |---|---|
-| SPT 4.0.13 | Required |
+| SPT | Required |
 | MoreBotsAPI | Required |
 | BigBrain | Required |
 | Waypoints | Required |
@@ -121,7 +123,7 @@ The first public release uses the following dependency model:
 | Fika Headless | Required only for dedicated-Headless topology |
 | Looting Bots | Optional / recommended and tested |
 
-**Exact tested dependency versions are published with the Vanguard 0.7.0 release.**
+**Exact supported versions are frozen against the final release candidate and published with the release.**
 
 Vanguard currently reserves MoreBotsAPI role IDs:
 
@@ -215,47 +217,15 @@ These are **post-release roadmap goals**, not current Vanguard features. No deli
 
 ## Building from source
 
-This repository contains the source used for Vanguard 0.7.0. The private Vanguard development pipeline, KB, handoffs, runtime evidence and local machine configuration are intentionally not part of the public repository.
+The public repository is intended to contain the minimal source and build material required to reproduce Vanguard's released binaries.
 
-### Prerequisites
+**Release-freeze placeholder:** exact clean-checkout prerequisites, build commands and source/tag mapping are inserted only after the final normalized release source is validated.
 
-- .NET 9 SDK;
-- a local SPT installation matching the release-supported environment;
-- the release-required SPT client dependencies installed in that environment;
-- BigBrain installed for the client project reference;
-- MoreBotsAPI / MoreBotsPrepatch installed for the prepatch project reference.
-
-The repository does **not** redistribute EFT, SPT, BepInEx or third-party mod binaries.
-
-### Configure local paths
-
-Copy:
-
-`client-spt4/Directory.Build.props.example`
-
-to:
-
-`client-spt4/Directory.Build.props`
-
-Then edit only `SptRoot` so it points to your local SPT installation. `Directory.Build.props` is intentionally ignored by Git and must remain machine-local.
-
-### Build the three release projects
-
-From the repository root:
-
-```powershell
-dotnet build .\client-spt4\Vanguard.Client\Vanguard.Client.csproj -c Release -f netstandard2.1
-dotnet build .\server-spt4\Vanguard.Server\Vanguard.Server.csproj -c Release
-dotnet build .\client-spt4\Vanguard.MoreBotsPrePatch\Vanguard.MoreBotsPrePatch.csproj -c Release
-```
-
-All three projects import `build/Vanguard.Version.props`, which carries the shared Vanguard version/build identity.
-
-The authoritative Vanguard 0.7.0 release build was produced with zero compiler warnings and zero compiler errors.
+Internal development KBs, handoffs, runtime evidence and private project artifacts are intentionally excluded from the public repository.
 
 ## AI-assisted development
 
-AI tools have been used extensively throughout Vanguard development, including code generation, review, debugging, documentation and visual assets. Product direction, architecture, integration decisions, testing, validation and release authority remain under the author's control.
+AI tools have been used throughout Vanguard development, including code generation, review, debugging, documentation and visual assets. Product direction, architecture, code direction and integration decisions, testing, validation and release authority remain under the author's control.
 
 ## License and third-party software
 
