@@ -51,7 +51,7 @@ public sealed class VanguardCanonicalRaidHistoryService(ISptLogger<VanguardCanon
         int terminalTruthCount = histories.Sum(value => value.Raids.Count(raid => raid.TerminalDeathTruth is not null));
         int contextualAggressorCount = histories.Sum(value => value.Raids.Count(raid => !string.IsNullOrWhiteSpace(raid.TerminalDeathTruth?.LastAggressorProfileId)));
         logger.Info(VanguardServerDiagnosticsLog.Present(
-            $"[{StatusTag}] owner={Safe(storageProfileId)}; coverage={verification.CoverageState}; ledgerRead={verification.LedgerReadState}; sourceEntries={verification.SourceEntryCount}; verifiedEntries={verification.VerifiedEntryCount}; rejectedEntries={verification.RejectedEntryCount}; operators={histories.Length}; raidHistoryEntries={histories.Sum(value => value.Raids.Count)}; terminalTruthEntries={terminalTruthCount}; contextualLastAggressors={contextualAggressorCount}; careerParity={Bool(parity.IsMatch)}; parityMismatches={parity.MismatchCount}; directKillerAuthority=BotEventHandler.Kill_only; terminalDeathAuthority=Player.OnPlayerDeadStatic_plus_LastDamageType; lastAggressorSemantics=context_only_not_direct_killer; lastAggressorPromotedToKiller=false; ledgerSourceFingerprintChanged=false; terminalExtensionFingerprint=true; ordering=deterministic_not_chronological; mapInvented=false; startTimeInvented=false; careerXpMutation=false; legacyCareerMutation=false; achievementsMutation=false; personaEvidenceMutation=false; sainProjectionChanged=false; ledgerMutation=false; tag={StatusTag}"));
+            $"[{StatusTag}] owner={Safe(storageProfileId)}; coverage={verification.CoverageState}; ledgerRead={verification.LedgerReadState}; sourceEntries={verification.SourceEntryCount}; verifiedEntries={verification.VerifiedEntryCount}; rejectedEntries={verification.RejectedEntryCount}; operators={histories.Length}; raidHistoryEntries={histories.Sum(value => value.Raids.Count)}; terminalTruthEntries={terminalTruthCount}; contextualLastAggressors={contextualAggressorCount}; careerParity={Bool(parity.IsMatch)}; parityMismatches={parity.MismatchCount}; directKillerAuthority=BotEventHandler.Kill_only; terminalDeathAuthority=Player.OnPlayerDeadStatic_plus_LastDamageType; lastAggressorSemantics=context_only_not_direct_killer; lastAggressorPromotedToKiller=false; ledgerSourceFingerprintChanged=false; terminalExtensionFingerprint=true; ordering=newest_first_ledger_commit_utc; mapInvented=false; startTimeInvented=false; careerXpMutation=false; legacyCareerMutation=false; achievementsMutation=false; personaEvidenceMutation=false; sainProjectionChanged=false; ledgerMutation=false; tag={StatusTag}"));
 
         return new VanguardCanonicalRaidHistoryReadModel(
             VanguardCanonicalRaidHistorySchema.ProjectionVersion,
@@ -90,9 +90,13 @@ public sealed class VanguardCanonicalRaidHistoryService(ISptLogger<VanguardCanon
         VanguardCareerRaidLedgerEntry[] source = verification.SourceEntries
             .Where(entry => string.Equals(Normalize(entry.OperatorId), operatorId, StringComparison.OrdinalIgnoreCase))
             .ToArray();
+        // RaidSessionId is an identity key, not a clock. Order by persisted ledger commit time so "last raid"
+        // has a defensible meaning. Exit-boundary observation and ledger id only break ties deterministically;
+        // none of these values is promoted to an authoritative raid-start time.
         VanguardCareerRaidLedgerEntry[] verified = verification.VerifiedEntries
             .Where(entry => string.Equals(Normalize(entry.OperatorId), operatorId, StringComparison.OrdinalIgnoreCase))
-            .OrderBy(entry => Normalize(entry.RaidSessionId), StringComparer.OrdinalIgnoreCase)
+            .OrderByDescending(entry => entry.CommittedAtUtc)
+            .ThenByDescending(entry => entry.ExitBoundaryObservedAtUtc)
             .ThenBy(entry => Normalize(entry.LedgerEntryId), StringComparer.OrdinalIgnoreCase)
             .ToArray();
 
@@ -198,6 +202,10 @@ public sealed class VanguardCanonicalRaidHistoryService(ISptLogger<VanguardCanon
             death,
             terminalDeathTruth,
             skillPoints,
+            // Schema v3 reserves a structured extension point, but 0.7.5 has no qualified producer for
+            // rescue/medical/notable-combat observations yet. Empty is intentional: Vanguard never invents
+            // narrative truth merely because the presentation contract can carry it.
+            Array.Empty<VanguardCanonicalRaidHistoryNotableEvent>(),
             deathSourceCoverage,
             entry.SourceFingerprint,
             entry.TerminalDeathTruthFingerprint);

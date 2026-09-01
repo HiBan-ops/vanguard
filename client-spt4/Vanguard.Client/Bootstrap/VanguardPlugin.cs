@@ -52,6 +52,9 @@ namespace Vanguard.Client.Bootstrap;
 [BepInDependency("com.chazut.orbit", BepInDependency.DependencyFlags.SoftDependency)]
 [BepInDependency("me.skwizzy.lootingbots", BepInDependency.DependencyFlags.SoftDependency)]
 [BepInDependency("com.SPT.custom", BepInDependency.DependencyFlags.SoftDependency)]
+// Menu Overhaul is optional. The soft dependency gives BepInEx a deterministic load-order hint when
+// both plugins are present, while Vanguard still compiles and runs without referencing its assembly.
+[BepInDependency(Vanguard.Client.Compatibility.VanguardMenuOverhaulCompat.PluginGuid, BepInDependency.DependencyFlags.SoftDependency)]
 public sealed class VanguardPlugin : BaseUnityPlugin
 #else
 public sealed class VanguardPlugin

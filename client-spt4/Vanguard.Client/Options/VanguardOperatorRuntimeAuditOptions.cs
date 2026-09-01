@@ -38,7 +38,6 @@ internal static class VanguardOperatorRuntimeAuditOptions
     private static ConfigEntry<string>? combatDiagnosticsScope;
     private static ConfigEntry<string>? performanceTelemetry;
     private static ConfigEntry<bool>? detailedDiagnosticPayloads;
-    private static ConfigEntry<bool>? enabled;
     private static ConfigEntry<bool>? movementProbe;
     private static ConfigEntry<bool>? brainProbe;
     private static ConfigEntry<bool>? sainProbe;
@@ -114,7 +113,7 @@ internal static class VanguardOperatorRuntimeAuditOptions
         }
 
         const string diagnosticsSection = "Vanguard - Diagnostics";
-        auditLevel = config.Bind(diagnosticsSection, "Audit level", "Operational", new ConfigDescription("Controls log volume only. Operational keeps important transitions, Diagnostic adds decisions/plans, Trace restores deep probes. Gameplay systems never depend on this value.", new AcceptableValueList<string>("Off", "Operational", "Diagnostic", "Trace")));
+        auditLevel = config.Bind(diagnosticsSection, "Audit level", "Operational", new ConfigDescription("Single authority for Vanguard diagnostic depth. Off disables diagnostic emission; Operational keeps important transitions without passive Operator snapshots; Diagnostic automatically enables bounded Operator runtime audit plus decisions/plans; Trace adds deep probes. Gameplay systems never depend on this value.", new AcceptableValueList<string>("Off", "Operational", "Diagnostic", "Trace")));
         combatDiagnosticsScope = config.Bind(diagnosticsSection, "Combat diagnostics scope", "Off", new ConfigDescription("Controls passive fire-production probes only. OperatorsOnly observes Vanguard Operators; AllBots is a temporary Trace investigation mode. This never changes combat behavior.", new AcceptableValueList<string>("Off", "OperatorsOnly", "AllBots")));
         performanceTelemetry = config.Bind(diagnosticsSection, "Performance telemetry", "SlowCallsOnly", new ConfigDescription("Off disables runtime timing logs, SlowCallsOnly aggregates real hotspots, Full retains detailed profiler summaries. Timing never changes gameplay.", new AcceptableValueList<string>("Off", "SlowCallsOnly", "Full")));
         detailedDiagnosticPayloads = config.Bind(diagnosticsSection, "Detailed route and lease payloads", false, "Emit large route/lease payloads in Diagnostic or Trace. Disabled by default to reduce allocations and synchronous log I/O.");
@@ -122,12 +121,11 @@ internal static class VanguardOperatorRuntimeAuditOptions
         RefreshDiagnosticRuntimePolicy();
 
         const string section = "Vanguard - Operator Audit (Legacy Detail Switches)";
-        enabled = config.Bind(section, "Enable passive Operator audit", false, "Enable read-only deep audit probes. This never drives AI actions; use Audit level=Trace for full detail.");
-        movementProbe = config.Bind(section, "Probe movement", true, "Log movement/path/speed observations when passive audit is enabled.");
-        brainProbe = config.Bind(section, "Probe BigBrain and vanilla brain", true, "Log active brain/layer/action observations when passive audit is enabled.");
-        sainProbe = config.Bind(section, "Probe SAIN", true, "Try to read SAIN state through safe reflection when passive audit is enabled.");
-        lootingBotsProbe = config.Bind(section, "Probe LootingBots", true, "Try to read LootingBots state through safe reflection when passive audit is enabled.");
-        orbitProbe = config.Bind(section, "Probe ORBIT", true, "Try to read ORBIT state through safe reflection when passive audit is enabled.");
+        movementProbe = config.Bind(section, "Probe movement", true, "Advanced filter for movement/path/speed observations while Audit level is Diagnostic or Trace. Support users normally only change Audit level.");
+        brainProbe = config.Bind(section, "Probe BigBrain and vanilla brain", true, "Advanced filter for active brain/layer/action observations while Audit level is Diagnostic or Trace. Support users normally only change Audit level.");
+        sainProbe = config.Bind(section, "Probe SAIN", true, "Advanced filter for safe SAIN-state reflection while Audit level is Diagnostic or Trace. Support users normally only change Audit level.");
+        lootingBotsProbe = config.Bind(section, "Probe LootingBots", true, "Advanced filter for safe LootingBots-state reflection while Audit level is Diagnostic or Trace. Support users normally only change Audit level.");
+        orbitProbe = config.Bind(section, "Probe ORBIT", true, "Advanced filter for safe ORBIT-state reflection while Audit level is Diagnostic or Trace. Support users normally only change Audit level.");
         summaryLog = config.Bind(section, "Summary logs", true, "Emit periodic compact summaries in addition to transition logs.");
         decisionSnapshotLog = config.Bind(section, "Decision snapshot logs", true, "Emit typed decision snapshot logs. The snapshot builder remains read-only.");
         intentDryRun = config.Bind(section, "Intent dry-run logs", true, "Emit read-only intent selection logs. No movement, combat, medical or loot action is executed.");
@@ -195,7 +193,6 @@ internal static class VanguardOperatorRuntimeAuditOptions
         Subscribe(combatDiagnosticsScope);
         Subscribe(performanceTelemetry);
         Subscribe(detailedDiagnosticPayloads);
-        Subscribe(enabled);
         Subscribe(movementProbe);
         Subscribe(brainProbe);
         Subscribe(sainProbe);
@@ -356,7 +353,7 @@ internal static class VanguardOperatorRuntimeAuditOptions
         }
 
 #if SPT_CLIENT
-        if (enabled == null)
+        if (auditLevel == null)
         {
             return;
         }
@@ -369,7 +366,6 @@ internal static class VanguardOperatorRuntimeAuditOptions
             performanceTelemetry!.Value = NormalizePerformanceTelemetry(settings.PerformanceTelemetry);
             detailedDiagnosticPayloads!.Value = settings.DetailedDiagnosticPayloads;
             VanguardClientDiagnosticsLog.SetAuditLevel(auditLevel.Value, "remote_raid_scope_sync");
-            enabled.Value = settings.Enabled;
             movementProbe!.Value = settings.MovementProbeEnabled;
             brainProbe!.Value = settings.BrainProbeEnabled;
             sainProbe!.Value = settings.SainProbeEnabled;
@@ -428,7 +424,7 @@ internal static class VanguardOperatorRuntimeAuditOptions
         }
 
 #if SPT_CLIENT
-        if (enabled == null)
+        if (auditLevel == null)
         {
             return;
         }
@@ -441,7 +437,6 @@ internal static class VanguardOperatorRuntimeAuditOptions
             performanceTelemetry!.Value = NormalizePerformanceTelemetry(settings.PerformanceTelemetry);
             detailedDiagnosticPayloads!.Value = settings.DetailedDiagnosticPayloads;
             VanguardClientDiagnosticsLog.SetAuditLevel(auditLevel.Value, "remote_sync");
-            enabled.Value = settings.Enabled;
             movementProbe!.Value = settings.MovementProbeEnabled;
             brainProbe!.Value = settings.BrainProbeEnabled;
             sainProbe!.Value = settings.SainProbeEnabled;
@@ -546,7 +541,7 @@ internal static class VanguardOperatorRuntimeAuditOptions
     public static bool GetEnabled()
     {
 #if SPT_CLIENT
-        return (enabled?.Value ?? false) || IsTrace();
+        return IsDiagnosticOrHigher();
 #else
         return false;
 #endif

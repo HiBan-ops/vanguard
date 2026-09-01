@@ -18,14 +18,14 @@ using Vanguard.Client.Runtime.Execution;
 using Vanguard.Client.Runtime.Movement;
 using Vanguard.Client.Runtime.Movement.Brain;
 
-// Responsibility: Builds the temporary Headless-side preview of player-authored tactical slots so the author can see placement before committing it.
+// Responsibility: Builds the temporary runtime-authority preview of player-authored tactical slots so the author can see placement before committing it.
 // Flow: Player-authored preview data is read from the live transport, validated against raid/world constraints, projected into transient preview objects, and removed when the preview expires or the raid resets.
-// Authority boundary: The Headless runtime may validate and render the preview, but persisted Tactical Authoring state remains owned by the authoring/store path and EFT/SAIN navigation data is never rewritten here.
+// Authority boundary: The active runtime authority (SPT local, Fika direct host, or Headless) may validate and render the preview, but persisted Tactical Authoring state remains owned by the authoring/store path and EFT/SAIN navigation data is never rewritten here.
 // Invariant: Preview state is disposable and non-authoritative: it must never survive its lifecycle window or silently turn an uncommitted edit into gameplay state.
 namespace Vanguard.Client.Runtime.TacticalAuthoring;
 
 /// <summary>
-/// Headless-authoritative, transient placement preview for player-authored Vanguard slots.
+/// Runtime-authority transient placement preview for player-authored Vanguard slots.
 /// It never changes the persisted authoring flags and never mutates EFT/SAIN cover graphs.
 /// </summary>
 internal static class VanguardTacticalAuthoringHeadlessPreviewService
@@ -55,7 +55,7 @@ internal static class VanguardTacticalAuthoringHeadlessPreviewService
 
     public static void ApplyAuthorSnapshots(IReadOnlyList<VanguardTacticalAuthoringLiveAuthorSnapshotDto>? snapshots, DateTimeOffset now)
     {
-        if (!VanguardFikaCompat.IsActualHeadlessProcess || snapshots == null)
+        if (!VanguardFikaCompat.IsRuntimeSettingsConsumerAuthority || snapshots == null)
         {
             return;
         }
@@ -133,7 +133,7 @@ internal static class VanguardTacticalAuthoringHeadlessPreviewService
 
     public static void Tick(DateTimeOffset now)
     {
-        if (!VanguardFikaCompat.IsActualHeadlessProcess)
+        if (!VanguardFikaCompat.IsRuntimeSettingsConsumerAuthority)
         {
             return;
         }
@@ -142,7 +142,7 @@ internal static class VanguardTacticalAuthoringHeadlessPreviewService
         {
             bootLogged = true;
             VanguardClientDiagnosticsLog.Info(StatusTag,
-                $"TACTICAL_AUTHORING_HEADLESS_PREVIEW_BOOT transient=true; persistedRuntimeConsumption=false; movementBackend=BigBrain; navAuthority=headless; actualHeadlessProcess={VanguardFikaCompat.IsActualHeadlessProcess}; raidHostedByHeadless={VanguardFikaCompat.IsRaidHostedByHeadless}; combatMedicalGrenadePreempt=true; build={VanguardBuildVersion.BuildLabel}");
+                $"TACTICAL_AUTHORING_HEADLESS_PREVIEW_BOOT transient=true; persistedRuntimeConsumption=false; movementBackend=BigBrain; navAuthority=runtime_consumer_authority; runtimeConsumerAuthority={VanguardFikaCompat.IsRuntimeSettingsConsumerAuthority}; actualHeadlessProcess={VanguardFikaCompat.IsActualHeadlessProcess}; raidHostedByHeadless={VanguardFikaCompat.IsRaidHostedByHeadless}; combatMedicalGrenadePreempt=true; build={VanguardBuildVersion.BuildLabel}");
         }
 
         CleanupPreemptedOrStale(now);
@@ -174,6 +174,21 @@ internal static class VanguardTacticalAuthoringHeadlessPreviewService
             return new List<VanguardTacticalAuthoringLiveHeadlessResultDto>();
         }
 
+        return BuildRuntimeAuthorityResultDtos();
+    }
+
+    public static List<VanguardTacticalAuthoringLiveHeadlessResultDto> BuildRuntimeAuthorityResults()
+    {
+        if (!VanguardFikaCompat.IsRuntimeSettingsConsumerAuthority)
+        {
+            return new List<VanguardTacticalAuthoringLiveHeadlessResultDto>();
+        }
+
+        return BuildRuntimeAuthorityResultDtos();
+    }
+
+    private static List<VanguardTacticalAuthoringLiveHeadlessResultDto> BuildRuntimeAuthorityResultDtos()
+    {
         return ResultsByOwner.Values.Select(result => new VanguardTacticalAuthoringLiveHeadlessResultDto
         {
             OwnerProfileId = result.OwnerProfileId,
@@ -194,9 +209,9 @@ internal static class VanguardTacticalAuthoringHeadlessPreviewService
     {
         context = default;
         reason = "none";
-        if (!VanguardFikaCompat.IsActualHeadlessProcess)
+        if (!VanguardFikaCompat.IsRuntimeSettingsConsumerAuthority)
         {
-            reason = "not_actual_headless_process";
+            reason = "not_runtime_consumer_authority";
             return false;
         }
 

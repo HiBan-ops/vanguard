@@ -3,6 +3,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
+using System.Threading.Tasks;
 using Comfort.Common;
 using EFT;
 using Vanguard.Client.Api;
@@ -41,6 +42,7 @@ internal sealed class VanguardRaidOperatorHudCandidateResolver
     private string lastObserverManifestResultSignature = string.Empty;
     private string lastResolverSummarySignature = string.Empty;
     private string observerRaidSessionId = string.Empty;
+    private Task<ObserverManifestLoadResult>? observerManifestTask;
 
     public IReadOnlyList<VanguardRaidOperatorHudIdentity> Resolve(Player localPlayer)
     {
@@ -179,6 +181,16 @@ internal sealed class VanguardRaidOperatorHudCandidateResolver
 
     private void EnsureObserverManifest(Player localPlayer, ISet<string> playerProfileIds)
     {
+        // The observer manifest is presentation-only data. SPT RequestHandler is synchronous, so
+        // performing this read inside RaidHud.Tick can block the Unity main thread for an entire
+        // HTTP round-trip. Mirror Vanguard's existing background-I/O pattern: do transport work
+        // off-thread, then consume the completed immutable DTO on a later HUD tick.
+        DrainObserverManifestTask();
+        if (observerManifestTask is not null)
+        {
+            return;
+        }
+
         float now = Time.realtimeSinceStartup;
         if (now < nextObserverManifestRefreshTime)
         {
@@ -217,21 +229,89 @@ internal sealed class VanguardRaidOperatorHudCandidateResolver
         }
 
         lastObserverManifestRequestSignature = requestSignature;
+        string[] capturedOwners = owners;
+        string capturedRaidSessionId = observerRaidSessionId;
+        observerManifestTask = Task.Run(() => LoadObserverManifest(capturedOwners, capturedRaidSessionId));
+    }
 
+    private ObserverManifestLoadResult LoadObserverManifest(string[] owners, string raidSessionId)
+    {
         try
         {
-            var response = apiClient.LoadRaidManifestForProfiles(owners, observerRaidSessionId);
-            if (!response.Success)
-            {
-                VanguardClientDiagnosticsLog.Warning(VanguardBuildVersion.OperatorHudStatusTag, $"manifest observer skipped reason={response.Reason ?? "unknown"}; owners={owners.Length}");
-                return;
-            }
-
-            RebuildManifestIndex(response);
+            return ObserverManifestLoadResult.Completed(apiClient.LoadRaidManifestForProfiles(owners, raidSessionId), owners.Length);
         }
         catch (Exception exception)
         {
-            VanguardClientDiagnosticsLog.Warning(VanguardBuildVersion.OperatorHudStatusTag, $"manifest observer failed: {exception.GetType().Name}: {exception.Message}");
+            return ObserverManifestLoadResult.Failed(owners.Length, exception);
+        }
+    }
+
+    private void DrainObserverManifestTask()
+    {
+        Task<ObserverManifestLoadResult>? task = observerManifestTask;
+        if (task is null || !task.IsCompleted)
+        {
+            return;
+        }
+
+        observerManifestTask = null;
+        ObserverManifestLoadResult result;
+        try
+        {
+            result = task.GetAwaiter().GetResult();
+        }
+        catch (Exception exception)
+        {
+            result = ObserverManifestLoadResult.Failed(0, exception);
+        }
+
+        if (result.ExceptionType is not null)
+        {
+            VanguardClientDiagnosticsLog.Warning(
+                VanguardBuildVersion.OperatorHudStatusTag,
+                $"manifest observer failed: {result.ExceptionType}: {result.ExceptionMessage}");
+            return;
+        }
+
+        VanguardRaidOperatorManifestForProfilesResponseDto response = result.Response!;
+        if (!response.Success)
+        {
+            VanguardClientDiagnosticsLog.Warning(
+                VanguardBuildVersion.OperatorHudStatusTag,
+                $"manifest observer skipped reason={response.Reason ?? "unknown"}; owners={result.OwnerCount}");
+            return;
+        }
+
+        RebuildManifestIndex(response);
+    }
+
+    private sealed class ObserverManifestLoadResult
+    {
+        private ObserverManifestLoadResult(
+            VanguardRaidOperatorManifestForProfilesResponseDto? response,
+            int ownerCount,
+            string? exceptionType,
+            string? exceptionMessage)
+        {
+            Response = response;
+            OwnerCount = ownerCount;
+            ExceptionType = exceptionType;
+            ExceptionMessage = exceptionMessage;
+        }
+
+        public VanguardRaidOperatorManifestForProfilesResponseDto? Response { get; }
+        public int OwnerCount { get; }
+        public string? ExceptionType { get; }
+        public string? ExceptionMessage { get; }
+
+        public static ObserverManifestLoadResult Completed(VanguardRaidOperatorManifestForProfilesResponseDto response, int ownerCount)
+        {
+            return new ObserverManifestLoadResult(response, ownerCount, null, null);
+        }
+
+        public static ObserverManifestLoadResult Failed(int ownerCount, Exception exception)
+        {
+            return new ObserverManifestLoadResult(null, ownerCount, exception.GetType().Name, exception.Message);
         }
     }
 

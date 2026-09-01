@@ -22,8 +22,9 @@ internal sealed class VanguardOperatorRuntimeAuditSnapshot
     public string Sain { get; init; } = string.Empty;
     public string LootingBots { get; init; } = string.Empty;
     public string Orbit { get; init; } = string.Empty;
+    public string AuthorityChain { get; init; } = string.Empty;
     public DateTimeOffset CapturedAtUtc { get; init; } = DateTimeOffset.UtcNow;
 
-    public string Signature => $"alive={Alive}|move={Movement}|brain={Brain}|sain={Sain}|loot={LootingBots}|orbit={Orbit}";
+    public string Signature => $"alive={Alive}|move={Movement}|brain={Brain}|sain={Sain}|loot={LootingBots}|orbit={Orbit}|authority={AuthorityChain}";
 }
 #endif

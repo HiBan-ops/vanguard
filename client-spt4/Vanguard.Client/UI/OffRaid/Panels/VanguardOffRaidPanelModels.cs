@@ -29,6 +29,16 @@ internal sealed class VanguardInfoRowModel
     public bool? Checked { get; init; }
     public Action<bool>? SetChecked { get; init; }
     public bool Enabled { get; init; } = true;
+
+    // Presentation metadata is deliberately generic rather than Raid-History-specific. It lets
+    // current raid facts form readable parent/detail blocks and gives future structured events
+    // (VisitAPI/relationship projections, rescue events, medical causes, notable encounters, etc.)
+    // enough room to render without changing the table contract again.
+    public float Height { get; init; } = 22f;
+    public int IndentLevel { get; init; }
+    public bool Emphasized { get; init; }
+    public bool WrapValue { get; init; }
+    public bool FullWidthValue { get; init; }
 }
 
 internal sealed class VanguardOffRaidPanelAction

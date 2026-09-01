@@ -196,13 +196,77 @@ internal static class VanguardOperatorInventoryProfileLoader
         SetIfMissing(moneyLimit, "resetInterval", 0);
         EnsureArray(result, "Bonuses");
         EnsureObject(result, "Hideout");
-        EnsureObject(result, "RagfairInfo");
+        NormalizeRagfairInfoForTechnicalProfile(result, index);
         EnsureObject(result, "WishList");
         EnsureStats(result);
         EnsureObject(result, "CheckedMagazines");
         EnsureArray(result, "CheckedChambers");
         EnsureObject(result, "TradersInfo");
         return result;
+    }
+
+    private static void NormalizeRagfairInfoForTechnicalProfile(JObject descriptor, int index)
+    {
+        JObject ragfairInfo = EnsureObject(descriptor, "RagfairInfo");
+        JArray offers = EnsureArray(ragfairInfo, "offers");
+        int normalizedDateCount = 0;
+
+        foreach (JObject offer in offers.OfType<JObject>())
+        {
+            normalizedDateCount += NormalizeUnixDateField(offer, "startTime");
+            normalizedDateCount += NormalizeUnixDateField(offer, "endTime");
+        }
+
+        if (normalizedDateCount == 0)
+        {
+            return;
+        }
+
+        // Preserve the player's complete Ragfair authority projection, including live
+        // offers. SPT can expose offer timestamps as Unix integers while EFT's strict
+        // CompleteProfileDescriptor expects DateTime values. Coerce only those numeric
+        // timestamp fields at the client-deserialization boundary; no offer or market
+        // entitlement data is removed or rewritten.
+        VanguardClientDiagnosticsLog.Info(
+            "VANGUARD_OPERATOR_SESSION_PROFILE_NORMALIZATION_STATUS",
+            $"ragfair_offer_dates_normalized index={index}; normalized={normalizedDateCount}; offersPreserved={offers.Count}; reason=unix_timestamp_to_eft_datetime_bridge");
+    }
+
+    private static int NormalizeUnixDateField(JObject owner, string fieldName)
+    {
+        JProperty? property = owner.Properties()
+            .FirstOrDefault(candidate => string.Equals(candidate.Name, fieldName, StringComparison.OrdinalIgnoreCase));
+        if (property?.Value is not JValue value || value.Type != JTokenType.Integer)
+        {
+            return 0;
+        }
+
+        long unixValue;
+        try
+        {
+            unixValue = value.Value<long>();
+        }
+        catch
+        {
+            return 0;
+        }
+
+        try
+        {
+            // Avoid Math.Abs(long.MinValue): malformed external data must not turn the
+            // technical-profile bridge itself into an overflow source. Compare the signed
+            // value directly while preserving the existing seconds/milliseconds heuristic.
+            bool useMilliseconds = unixValue >= 100000000000L || unixValue <= -100000000000L;
+            DateTimeOffset timestamp = useMilliseconds
+                ? DateTimeOffset.FromUnixTimeMilliseconds(unixValue)
+                : DateTimeOffset.FromUnixTimeSeconds(unixValue);
+            property.Value = new JValue(timestamp.UtcDateTime);
+            return 1;
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            return 0;
+        }
     }
 
     private static void StripDogTagCustomization(JObject descriptor)

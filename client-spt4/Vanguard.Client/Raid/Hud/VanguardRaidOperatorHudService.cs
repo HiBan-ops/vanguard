@@ -98,7 +98,9 @@ internal static class VanguardRaidOperatorHudService
                 return;
             }
 
-            EnsureBodyPartIconCache(owner);
+            // Body-part sprite extraction traverses the Fika PlayerUI prefab and is presentation-only.
+            // ResolveDestroyedBodyPartIconData initializes this cache lazily when a destroyed-part badge is actually needed,
+            // avoiding an unconditional prefab traversal on the first in-raid HUD tick.
 
             var identities = Resolver.Resolve(localPlayer);
             var allCandidates = identities

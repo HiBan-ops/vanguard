@@ -1,11 +1,14 @@
 #if SPT_CLIENT
 using System;
+using System.Collections;
 using System.Collections.Generic;
+using DrakiaXYZ.BigBrain.Brains;
 using EFT;
 using UnityEngine;
 using Vanguard.Client.Diagnostics;
 using Vanguard.Client.Options;
 using Vanguard.Client.Raid.Runtime;
+using Vanguard.Client.Runtime.Movement.Brain;
 
 // Responsibility: Builds the consolidated runtime audit snapshot used to diagnose Operator binding, authority, movement, combat and subsystem convergence.
 // Flow: On diagnostic cadence it gathers read-only facts from runtime stores/readers, normalizes them into one Operator-centric snapshot and emits only through the configured diagnostics presentation policy.
@@ -56,6 +59,7 @@ internal static class VanguardOperatorRuntimeAuditProbe
             Sain = VanguardOperatorRuntimeAuditOptions.GetSainProbeEnabled() ? ProbeSain(botOwner) : "disabled",
             LootingBots = VanguardOperatorRuntimeAuditOptions.GetLootingBotsProbeEnabled() ? ProbeLootingBots(botOwner) : "disabled",
             Orbit = VanguardOperatorRuntimeAuditOptions.GetOrbitProbeEnabled() ? ProbeOrbit(botOwner, record.BotProfileId) : "disabled",
+            AuthorityChain = ProbeAuthorityChain(botOwner, record.BotProfileId, realSpeed, now),
             CapturedAtUtc = now
         };
     }
@@ -110,7 +114,7 @@ internal static class VanguardOperatorRuntimeAuditProbe
 
     public static string Format(VanguardOperatorRuntimeAuditSnapshot snapshot, string kind)
     {
-        return $"{kind} operator={snapshot.OperatorId}; botProfile={snapshot.BotProfileId}; owner={snapshot.OwnerProfileId}; nick={snapshot.Nickname}; alive={snapshot.Alive}; pos={FormatVector(snapshot.Position)}; speed={snapshot.RealSpeed:0.00}; movement={snapshot.Movement}; brain={snapshot.Brain}; sain={snapshot.Sain}; looting={snapshot.LootingBots}; orbit={snapshot.Orbit}; verbose={VanguardOperatorRuntimeAuditOptions.GetVerboseTransitionLogEnabled()}";
+        return $"{kind} operator={snapshot.OperatorId}; botProfile={snapshot.BotProfileId}; owner={snapshot.OwnerProfileId}; nick={snapshot.Nickname}; alive={snapshot.Alive}; pos={FormatVector(snapshot.Position)}; speed={snapshot.RealSpeed:0.00}; authorityChain={snapshot.AuthorityChain}; movement={snapshot.Movement}; brain={snapshot.Brain}; sain={snapshot.Sain}; looting={snapshot.LootingBots}; orbit={snapshot.Orbit}; verbose={VanguardOperatorRuntimeAuditOptions.GetVerboseTransitionLogEnabled()}";
     }
 
     private static string MeaningfulSignature(VanguardOperatorRuntimeAuditSnapshot snapshot)
@@ -196,6 +200,89 @@ internal static class VanguardOperatorRuntimeAuditProbe
 
         object? isDead = VanguardOperatorRuntimeAuditReflection.GetDeep(botOwner, "GetPlayer", "IsDead");
         return isDead is bool dead ? !dead : botOwner != null;
+    }
+
+    private static string ProbeAuthorityChain(BotOwner? botOwner, string botProfileId, float realSpeed, DateTimeOffset now)
+    {
+        if (botOwner == null)
+        {
+            return "botOwner=none";
+        }
+
+        object? brain = VanguardOperatorRuntimeAuditReflection.GetPropertyOrField(botOwner, "Brain", "BotBrain", "BotBaseBrain");
+        object? baseBrain = VanguardOperatorRuntimeAuditReflection.GetPropertyOrField(brain, "BaseBrain") ?? brain;
+        string brainShortName = VanguardOperatorRuntimeAuditReflection.Text(VanguardOperatorRuntimeAuditReflection.InvokeNoArg(baseBrain, "ShortName"));
+        object? settings = VanguardOperatorRuntimeAuditReflection.GetDeep(botOwner, "Profile", "Info", "Settings");
+        string role = VanguardOperatorRuntimeAuditReflection.Text(VanguardOperatorRuntimeAuditReflection.GetPropertyOrField(settings, "Role"));
+
+        string activeLayerName = "none";
+        string activeLayerType = "none";
+        bool activeIsCustom = false;
+        try
+        {
+            object? activeLayer = BrainManager.GetActiveLayer(botOwner);
+            activeLayerName = activeLayer != null
+                ? VanguardOperatorRuntimeAuditReflection.FirstNonEmpty(
+                    VanguardOperatorRuntimeAuditReflection.Text(VanguardOperatorRuntimeAuditReflection.InvokeNoArg(activeLayer, "GetName")),
+                    VanguardOperatorRuntimeAuditReflection.LayerName(activeLayer))
+                : "none";
+            activeLayerType = VanguardOperatorRuntimeAuditReflection.TypeName(activeLayer);
+            activeIsCustom = BrainManager.IsCustomLayerActive(botOwner);
+        }
+        catch
+        {
+            // Read-only diagnostics must never alter or block bot brain execution.
+        }
+
+        bool vanguardLayerInstalled = false;
+        var installedLayers = new List<string>();
+        object? dictionary = VanguardOperatorRuntimeAuditReflection.GetPropertyOrField(baseBrain, "Dictionary_0");
+        if (dictionary is IDictionary layerDictionary)
+        {
+            foreach (DictionaryEntry entry in layerDictionary)
+            {
+                object? layer = entry.Value;
+                string layerName = VanguardOperatorRuntimeAuditReflection.LayerName(layer);
+                object? customLayer = VanguardOperatorRuntimeAuditReflection.InvokeNoArg(layer, "CustomLayer");
+                string customType = VanguardOperatorRuntimeAuditReflection.TypeName(customLayer);
+                if (string.Equals(customType, nameof(VanguardReturnMovementLayer), StringComparison.Ordinal))
+                {
+                    vanguardLayerInstalled = true;
+                }
+
+                string installed = customLayer != null ? $"{layerName}:{customType}" : layerName;
+                if (!installedLayers.Contains(installed) && installedLayers.Count < 24)
+                {
+                    installedLayers.Add(installed);
+                }
+            }
+        }
+
+        bool commandActive = VanguardReturnMovementCommandStore.TryGetActive(botProfileId, now, out var command);
+        string commandText = commandActive
+            ? $"active:true,request:{VanguardOperatorRuntimeAuditReflection.Compact(command.RequestKind, 40)},gen:{command.Generation}"
+            : "active:false";
+
+        object? sain = VanguardOperatorRuntimeAuditReflection.GetComponentFromBotOrPlayer(botOwner, "SAIN.Components.BotComponent");
+        bool sainTypeLoaded = VanguardOperatorRuntimeAuditReflection.TypeExists("SAIN.Components.BotComponent");
+        string sainState = sain != null ? "attached" : sainTypeLoaded ? "type_loaded_component_missing" : "type_missing";
+
+        bool vanguardActive = string.Equals(activeLayerType, nameof(VanguardReturnMovementLayer), StringComparison.Ordinal)
+            || string.Equals(activeLayerName, nameof(VanguardReturnMovementLayer), StringComparison.Ordinal);
+        string displacement = realSpeed > 0.05f ? "moving" : commandActive ? "commanded_stationary" : "stationary";
+
+        return VanguardOperatorRuntimeAuditReflection.JoinParts(
+            $"role={role}",
+            $"brainShort={brainShortName}",
+            $"vanguardInstalled={vanguardLayerInstalled.ToString().ToLowerInvariant()}",
+            $"activeLayer={activeLayerName}",
+            $"activeType={activeLayerType}",
+            $"activeCustom={activeIsCustom.ToString().ToLowerInvariant()}",
+            $"vanguardActive={vanguardActive.ToString().ToLowerInvariant()}",
+            $"sain={sainState}",
+            $"command={commandText}",
+            $"physical={displacement}",
+            $"layers={VanguardOperatorRuntimeAuditReflection.Compact(string.Join(",", installedLayers), 420)}");
     }
 
     private static string ProbeMovement(BotOwner? botOwner, float realSpeed)

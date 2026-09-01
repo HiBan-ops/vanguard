@@ -48,6 +48,7 @@ internal sealed class VanguardOperatorDossierPanel
                     : L("label.tracked_career_xp");
         string trackedExperienceValue = $"+{Math.Max(0L, career?.ExperienceEarnedSinceEnrollment ?? 0L):N0}" +
             (!xpCommitActive && IsPartialMigratedHistory(career?.HistoryCompleteness) ? L("dossier.xp.tracked_since_activation") : string.Empty);
+        VanguardCanonicalRaidHistoryEntryDto? latestRecordedRaid = GetChronologicalParticipatedRaids(canonicalRaidHistory).FirstOrDefault();
 
         var body = new StringBuilder();
         body.AppendLine(F("dossier.body.title", displayName));
@@ -133,14 +134,16 @@ internal sealed class VanguardOperatorDossierPanel
                 Title = L("dossier.section.career"),
                 Rows = new List<VanguardInfoRowModel>
                 {
+                    new() { Label = L("label.scope"), Value = F("dossier.career.cumulative_scope", verifiedCareer?.VerifiedRaidCount ?? 0), Emphasized = true, WrapValue = true, Height = 26f },
+                    new() { Label = L("label.latest_raid_recorded"), Value = BuildLatestRecordedRaidValue(latestRecordedRaid) },
                     new() { Label = totalExperienceLabel, Value = $"{Math.Max(totalExperience, 0):N0}" },
                     new() { Label = L("label.progression_level"), Value = levelProgress },
                     new() { Label = trackedExperienceLabel, Value = trackedExperienceValue },
                     new() { Label = L("label.raids_survivals_kia"), Value = $"{verifiedCareer?.VerifiedRaidCount ?? 0} / {verifiedCareer?.VerifiedSurvivedRaidCount ?? 0} / {verifiedCareer?.VerifiedKiaCount ?? 0}" },
                     new() { Label = L("label.kills"), Value = (verifiedCareer?.VerifiedKillCount ?? 0).ToString() },
-                    new() { Label = L("label.confirmed_victims"), Value = BuildConfirmedVictims(verifiedCareer?.ConfirmedVictims) },
-                    new() { Label = L("label.killed_by"), Value = BuildConfirmedDeathSources(verifiedCareer?.ConfirmedDeathSources) },
-                    new() { Label = L("label.session_skill_points"), Value = BuildSkillSessionSummary(verifiedCareer) }
+                    new() { Label = L("label.confirmed_victims"), Value = BuildConfirmedVictims(verifiedCareer?.ConfirmedVictims), WrapValue = true, Height = 36f },
+                    new() { Label = L("label.killed_by"), Value = BuildConfirmedDeathSources(verifiedCareer?.ConfirmedDeathSources), WrapValue = true, Height = 36f },
+                    new() { Label = L("label.session_skill_points"), Value = BuildSkillSessionSummary(verifiedCareer), WrapValue = true, Height = 36f }
                 }
             },
             new()
@@ -245,17 +248,7 @@ internal sealed class VanguardOperatorDossierPanel
 
     private static List<VanguardInfoRowModel> BuildCanonicalRaidHistoryRows(VanguardOperatorCanonicalRaidHistoryDto? history)
     {
-        if (history?.Raids == null || history.Raids.Count == 0)
-        {
-            return new List<VanguardInfoRowModel>
-            {
-                new() { Label = L("label.raid_records"), Value = L("dossier.history.none") }
-            };
-        }
-
-        var participatedRaids = history.Raids
-            .Where(raid => raid.Participated)
-            .ToList();
+        List<VanguardCanonicalRaidHistoryEntryDto> participatedRaids = GetChronologicalParticipatedRaids(history);
         if (participatedRaids.Count == 0)
         {
             return new List<VanguardInfoRowModel>
@@ -273,30 +266,61 @@ internal sealed class VanguardOperatorDossierPanel
             string outcome = raid.Died ? "KIA" : L("dossier.history.survival");
             rows.Add(new VanguardInfoRowModel
             {
-                Label = L("dossier.history.raid_label"),
-                Value = F("dossier.history.raid_result", outcome, killCount)
+                Label = BuildRaidHeaderLabel(index, raid),
+                Value = F("dossier.history.raid_result", outcome, killCount),
+                Emphasized = true,
+                Height = 24f
             });
 
-            if (!raid.Died)
-            {
-                continue;
-            }
-
-            string deathSource = raid.Death == null
-                ? string.Empty
-                : raid.Death.SelfInflicted
-                    ? L("dossier.history.self_inflicted_plain")
-                    : F("dossier.history.killed_by_plain", CombatantDisplay(raid.Death.KillerDisplayName, raid.Death.KillerSide, raid.Death.KillerRawRole));
-            string terminal = BuildTerminalDeathSummary(raid).TrimStart(' ', '·');
-            string details = string.Join(" · ", new[] { deathSource, terminal }.Where(value => !string.IsNullOrWhiteSpace(value)));
-            if (!string.IsNullOrWhiteSpace(details))
+            string victims = BuildRaidVictims(raid.ConfirmedKills);
+            if (!string.IsNullOrWhiteSpace(victims))
             {
                 rows.Add(new VanguardInfoRowModel
                 {
-                    Label = L("dossier.history.death_details"),
-                    Value = details
+                    Label = L("dossier.history.victims"),
+                    Value = victims,
+                    IndentLevel = 1,
+                    WrapValue = true,
+                    Height = 34f
                 });
             }
+
+            if (raid.Died)
+            {
+                string deathSource = raid.Death == null
+                    ? string.Empty
+                    : raid.Death.SelfInflicted
+                        ? L("dossier.history.self_inflicted_plain")
+                        : F("dossier.history.killed_by_plain", CombatantDisplay(raid.Death.KillerDisplayName, raid.Death.KillerSide, raid.Death.KillerRawRole));
+                string terminal = BuildTerminalDeathSummary(raid).TrimStart(' ', '·');
+                string details = string.Join(" · ", new[] { deathSource, terminal }.Where(value => !string.IsNullOrWhiteSpace(value)));
+                if (!string.IsNullOrWhiteSpace(details))
+                {
+                    rows.Add(new VanguardInfoRowModel
+                    {
+                        Label = L("dossier.history.death_details"),
+                        Value = details,
+                        IndentLevel = 1,
+                        WrapValue = true,
+                        Height = 34f
+                    });
+                }
+            }
+
+            string raidSkills = BuildRaidSkillSummary(raid.SkillSessionPoints);
+            if (!string.IsNullOrWhiteSpace(raidSkills))
+            {
+                rows.Add(new VanguardInfoRowModel
+                {
+                    Label = L("dossier.history.skills_gained"),
+                    Value = raidSkills,
+                    IndentLevel = 1,
+                    WrapValue = true,
+                    Height = 34f
+                });
+            }
+
+            AppendNotableEventRows(rows, raid.NotableEvents);
         }
 
         int remaining = participatedRaids.Count - shownCount;
@@ -310,6 +334,163 @@ internal sealed class VanguardOperatorDossierPanel
         }
 
         return rows;
+    }
+
+    // The server already emits newest-first history, but the client repeats the same deterministic ordering
+    // at the presentation boundary. This protects readability if an older server response or cached payload
+    // arrives out of order. Ledger commit time is the strongest persisted ordering fact; exit observation is
+    // only a fallback and is never presented as an authoritative raid-start timestamp.
+    private static List<VanguardCanonicalRaidHistoryEntryDto> GetChronologicalParticipatedRaids(VanguardOperatorCanonicalRaidHistoryDto? history)
+    {
+        return history?.Raids?
+            .Where(raid => raid.Participated)
+            .OrderByDescending(ResolveRaidSortTimestamp)
+            .ThenByDescending(raid => raid.ExitBoundaryObservedAtUtcTelemetry)
+            .ThenBy(raid => raid.SourceLedgerEntryId, StringComparer.OrdinalIgnoreCase)
+            .ToList()
+            ?? new List<VanguardCanonicalRaidHistoryEntryDto>();
+    }
+
+    // Centralize timestamp preference so Career's "latest raid" and Raid History cannot disagree about
+    // which raid is newest. A missing timestamp remains explicitly unknown rather than being invented.
+    private static DateTimeOffset ResolveRaidSortTimestamp(VanguardCanonicalRaidHistoryEntryDto raid)
+    {
+        if (raid.LedgerCommittedAtUtcTelemetry != default)
+        {
+            return raid.LedgerCommittedAtUtcTelemetry;
+        }
+
+        return raid.ExitBoundaryObservedAtUtcTelemetry != default
+            ? raid.ExitBoundaryObservedAtUtcTelemetry
+            : DateTimeOffset.MinValue;
+    }
+
+    private static string BuildLatestRecordedRaidValue(VanguardCanonicalRaidHistoryEntryDto? raid)
+    {
+        if (raid == null)
+        {
+            return L("dossier.history.timestamp_unavailable");
+        }
+
+        return F("dossier.history.recorded_at", FormatRaidTimestamp(ResolveRaidSortTimestamp(raid)));
+    }
+
+    private static string BuildRaidHeaderLabel(int index, VanguardCanonicalRaidHistoryEntryDto raid)
+    {
+        string position = index switch
+        {
+            0 => L("dossier.history.last_raid"),
+            1 => L("dossier.history.previous_raid"),
+            _ => F("dossier.history.older_raid", index)
+        };
+        return F("dossier.history.header_with_time", position, FormatRaidTimestamp(ResolveRaidSortTimestamp(raid)));
+    }
+
+    private static string FormatRaidTimestamp(DateTimeOffset timestamp)
+    {
+        if (timestamp == default || timestamp == DateTimeOffset.MinValue)
+        {
+            return L("dossier.history.timestamp_unavailable");
+        }
+
+        DateTimeOffset local = timestamp.ToLocalTime();
+        string format = VanguardOperatorsLocalizationService.CurrentLanguage == VanguardPresentationLanguage.French
+            ? "dd/MM/yyyy HH:mm"
+            : "yyyy-MM-dd HH:mm";
+        return local.ToString(format, System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    private static string BuildRaidVictims(List<VanguardCanonicalRaidHistoryKillDto>? kills)
+    {
+        if (kills == null || kills.Count == 0)
+        {
+            return string.Empty;
+        }
+
+        var grouped = kills
+            .GroupBy(kill => new
+            {
+                Name = kill.TargetDisplayName ?? string.Empty,
+                Side = kill.TargetSide ?? string.Empty,
+                Role = kill.TargetRawRole ?? string.Empty
+            })
+            .Select(group => new
+            {
+                Display = CombatantDisplay(group.Key.Name, group.Key.Side, group.Key.Role),
+                Count = group.Count()
+            })
+            .OrderByDescending(value => value.Count)
+            .ThenBy(value => value.Display, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        string shown = string.Join(" · ", grouped.Take(4).Select(value => $"{value.Display}{CountSuffix(value.Count)}"));
+        return grouped.Count > 4 ? F("dossier.more_others", shown, grouped.Count - 4) : shown;
+    }
+
+    private static string BuildRaidSkillSummary(List<VanguardCanonicalRaidHistorySkillPointDto>? skills)
+    {
+        if (skills == null || skills.Count == 0)
+        {
+            return string.Empty;
+        }
+
+        var positive = skills
+            .Where(skill => skill.PointsEarnedDuringSession > 0.0)
+            .OrderByDescending(skill => skill.PointsEarnedDuringSession)
+            .ThenBy(skill => skill.SkillId, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        if (positive.Count == 0)
+        {
+            return string.Empty;
+        }
+
+        double total = positive.Sum(skill => skill.PointsEarnedDuringSession);
+        string top = string.Join(" · ", positive.Take(4).Select(skill => $"{VanguardUiText.Value(skill.SkillId, L("general.undefined"))}: {skill.PointsEarnedDuringSession:0.##}"));
+        return F("dossier.skill.total", total) + (string.IsNullOrWhiteSpace(top) ? string.Empty : $" — {top}");
+    }
+
+    // Notable events are deliberately rendered as children of one raid, never as free-standing history rows.
+    // This preserves the causal/temporal association needed by later VisitAPI and relationship projections.
+    // The renderer receives structured facts; localization/narrative wording remains a presentation concern.
+    private static void AppendNotableEventRows(
+        List<VanguardInfoRowModel> rows,
+        List<VanguardCanonicalRaidHistoryNotableEventDto>? notableEvents)
+    {
+        if (notableEvents == null || notableEvents.Count == 0)
+        {
+            return;
+        }
+
+        foreach (VanguardCanonicalRaidHistoryNotableEventDto notableEvent in notableEvents
+                     .OrderBy(value => value.ObservedAtUtcTelemetry)
+                     .ThenBy(value => value.EventId, StringComparer.OrdinalIgnoreCase))
+        {
+            string summary = BuildNotableEventSummary(notableEvent);
+            if (string.IsNullOrWhiteSpace(summary))
+            {
+                continue;
+            }
+
+            rows.Add(new VanguardInfoRowModel
+            {
+                Label = L("dossier.history.notable_event"),
+                Value = summary,
+                IndentLevel = 1,
+                WrapValue = true,
+                FullWidthValue = true,
+                Height = 40f
+            });
+        }
+    }
+
+    private static string BuildNotableEventSummary(VanguardCanonicalRaidHistoryNotableEventDto notableEvent)
+    {
+        string kind = VanguardUiText.Value(notableEvent.Kind, L("dossier.history.notable_event_unknown"));
+        string actors = string.Join(", ", notableEvent.Actors?
+            .Select(actor => VanguardUiText.Value(actor.DisplayName, actor.OperatorId, actor.ProfileId, string.Empty))
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            ?? Enumerable.Empty<string>());
+        return string.IsNullOrWhiteSpace(actors) ? kind : $"{kind} · {actors}";
     }
 
     private static string BuildTerminalDeathSummary(VanguardCanonicalRaidHistoryEntryDto raid)

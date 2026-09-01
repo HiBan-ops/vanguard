@@ -15,6 +15,7 @@ using UnityEngine.UI;
 using Vanguard.Client.Api;
 using Vanguard.Client.Api.Dtos;
 using Vanguard.Client.Diagnostics;
+using Vanguard.Client.Compatibility;
 using Vanguard.Client.UI.OffRaid.Localization;
 using Vanguard.Client.UI.OffRaid.Foundation;
 using Vanguard.Client.UI.OffRaid.Panels;
@@ -32,6 +33,8 @@ namespace Vanguard.Client.UI.OffRaid;
 internal sealed class VanguardOffRaidUiController : MonoBehaviour
 {
     private const string MenuButtonName = "Vanguard_OffRaid_MenuButton";
+    private const string MenuIconObjectName = "Vanguard_MenuIcon";
+    private const string MenuIconResourceName = "Vanguard.Client.UI.OffRaid.Assets.vanguard_menu_icon_mask.png";
     private const string ScreenRootName = "Vanguard_OffRaid_ScreenRoot";
     private const int MaxActionButtons = 6;
     private const int MaxCardsPerPage = 8;
@@ -40,6 +43,22 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
     private const float ContextActionHeight = 0.034f;
     private const float CloseButtonBaseY = 0.045f;
     private const float TopButtonVisualMaxOffsetY = 0.050f;
+    // Menu Overhaul exposes live F12 positioning but no public button-registration API. Vanguard therefore
+    // samples the finished vanilla-menu geometry at a low frequency and follows it with its own button only.
+    // The fallback step is used only when the external button set cannot be observed safely.
+    private const float ExternalMenuLayoutRefreshSeconds = 0.25f;
+    private const float ExternalMenuFallbackVerticalStep = 60f;
+
+    // These are Menu Overhaul's vanilla ownership targets. They are names of EFT menu objects, not calls into
+    // Menu Overhaul implementation types, which keeps this bridge resilient to internal class refactors.
+    private static readonly string[] MenuOverhaulOwnedButtonNames =
+    {
+        "PlayButton",
+        "CharacterButton",
+        "TradeButton",
+        "HideoutButton",
+        "ExitButtonGroup"
+    };
 
     // Single visual source of truth for all Vanguard off-raid buttons.
     // Navigation buttons and contextual action buttons must use these values through CreateButton(),
@@ -53,6 +72,10 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
     private static readonly Color ButtonDisabledTextColor = new(0.66f, 0.70f, 0.62f, 1.00f);
     private static readonly Color ButtonHoverTextColor = new(0.06f, 0.07f, 0.05f, 1.00f);
     private static readonly Color ButtonLineColor = new(0.68f, 0.72f, 0.62f, 0.20f);
+
+    private static Sprite? menuIconSprite;
+    private static bool menuIconLoadAttempted;
+    private static bool menuIconStatusLogged;
 
     private readonly VanguardDashboardPanel dashboardPanel = new();
     private readonly VanguardContractsPanel contractsPanel = new();
@@ -78,6 +101,7 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
     private Component? exitButtonComponent;
     private GameObject? menuButtonObject;
     private float enforceMenuLabelUntilRealtime;
+    private float nextExternalMenuLayoutRefreshRealtime;
     private GameObject? screenRoot;
     private GameObject? headerBandRoot;
     private GameObject? infoTableScrollRoot;
@@ -169,6 +193,10 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
                 return;
             }
 
+            // The first real Vanguard menu initialization is a stable read-only boundary for
+            // observing the final Off-Raid Harmony topology without polling from the frame loop.
+            VanguardOffRaidHarmonyInteropAuditService.CaptureOnce();
+
             inheritedFont = ResolveInheritedFont(sourceButtonComponent.gameObject);
             EnsureMenuButton(sourceButtonComponent);
             EnsureScreenRoot(menuScreenComponent.transform);
@@ -179,7 +207,10 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
                 screenRoot.SetActive(false);
             }
 
-            VanguardClientDiagnosticsLog.Info(VanguardBuildVersion.OffRaidUiStatusTag, "Vanguard off-raid UI initialized on MenuScreen; menuLayout=two_column_safe_reflow.");
+            bool externalMenuLayout = VanguardMenuOverhaulCompat.IsInstalled;
+            VanguardClientDiagnosticsLog.Info(
+                VanguardBuildVersion.OffRaidUiStatusTag,
+                $"Vanguard off-raid UI initialized on MenuScreen; menuLayout={(externalMenuLayout ? "external_menu_overhaul_owned" : "two_column_safe_reflow")}; vanillaButtonsOwnedByVanguard={!externalMenuLayout}.");
         }
         catch (Exception exception)
         {
@@ -211,8 +242,15 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
 
         if (sourceButton.transform is RectTransform sourceRect && menuButtonObject.transform is RectTransform menuRect)
         {
-            CaptureOriginalMenuPositions(parent);
-            ApplyTwoColumnMenuLayout(parent, sourceRect, menuRect);
+            if (VanguardMenuOverhaulCompat.IsInstalled)
+            {
+                ApplyExternalMainMenuOwnedLayout(parent, sourceRect, menuRect);
+            }
+            else
+            {
+                CaptureOriginalMenuPositions(parent);
+                ApplyTwoColumnMenuLayout(parent, sourceRect, menuRect);
+            }
         }
         else
         {
@@ -221,17 +259,47 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
 
         menuButtonObject.SetActive(sourceButton.gameObject.activeSelf);
         enforceMenuLabelUntilRealtime = Time.realtimeSinceStartup + 2.0f;
+        nextExternalMenuLayoutRefreshRealtime = 0f;
     }
 
     private void LateUpdate()
     {
-        if (menuButtonObject == null || Time.realtimeSinceStartup > enforceMenuLabelUntilRealtime)
+        if (menuButtonObject == null)
         {
             return;
         }
 
-        ConfigureVanguardMenuButton(menuButtonObject);
-        if (sourceButtonComponent != null && sourceButtonComponent.transform.parent != null && sourceButtonComponent.transform is RectTransform sourceRect && menuButtonObject.transform is RectTransform menuRect)
+        float now = Time.realtimeSinceStartup;
+        bool enforceLabel = now <= enforceMenuLabelUntilRealtime;
+        bool externalMenuLayout = VanguardMenuOverhaulCompat.IsInstalled;
+
+        if (enforceLabel)
+        {
+            ConfigureVanguardMenuButton(menuButtonObject);
+        }
+
+        if (sourceButtonComponent == null
+            || sourceButtonComponent.transform.parent == null
+            || sourceButtonComponent.transform is not RectTransform sourceRect
+            || menuButtonObject.transform is not RectTransform menuRect)
+        {
+            return;
+        }
+
+        if (externalMenuLayout)
+        {
+            // Menu Overhaul can change horizontal offsets live through F12. Poll lightly while the
+            // injected button exists, but mutate only Vanguard's own RectTransform.
+            if (now >= nextExternalMenuLayoutRefreshRealtime && menuButtonObject.activeInHierarchy)
+            {
+                ApplyExternalMainMenuOwnedLayout(sourceButtonComponent.transform.parent, sourceRect, menuRect);
+                nextExternalMenuLayoutRefreshRealtime = now + ExternalMenuLayoutRefreshSeconds;
+            }
+
+            return;
+        }
+
+        if (enforceLabel)
         {
             ApplyTwoColumnMenuLayout(sourceButtonComponent.transform.parent, sourceRect, menuRect);
         }
@@ -535,6 +603,9 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
         {
             state = apiClient?.LoadState() ?? VanguardOperatorStateView.Empty("api_client_missing");
             VanguardOperatorInventoryModeClientState.RefreshFromServerStatus();
+            VanguardOperatorDirectInventoryLifecycle.TryRecoverOrphanedOpenOnMainMenu(
+                "offraid_ui_refresh",
+                VanguardOperatorInventoryModeClientState.IsActive);
             canonicalState = VanguardCanonicalOperatorState.Build(state);
             integrityReport = canonicalState.Analyze(state);
             statusMessage = state.Error == null
@@ -1268,7 +1339,7 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
         const float topPadding = 8f;
         const float bottomPadding = 12f;
         const float headerHeight = 27f;
-        const float rowHeight = 22f;
+        const float defaultRowHeight = 22f;
         const float sectionGap = 5f;
         float top = topPadding;
 
@@ -1287,19 +1358,61 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
 
             foreach (VanguardInfoRowModel row in section.Rows)
             {
+                float rowHeight = Math.Max(defaultRowHeight, row.Height);
                 GameObject rowObject = new("InfoRow", typeof(RectTransform), typeof(Image));
                 rowObject.transform.SetParent(infoTableRoot.transform, false);
                 SetTopRect((RectTransform)rowObject.transform, top, rowHeight);
-                rowObject.GetComponent<Image>().color = new Color(0.020f, 0.026f, 0.023f, 0.48f);
+                rowObject.GetComponent<Image>().color = row.Emphasized
+                    ? new Color(0.030f, 0.040f, 0.034f, 0.74f)
+                    : new Color(0.020f, 0.026f, 0.023f, 0.48f);
                 infoTableObjects.Add(rowObject);
 
-                TextMeshProUGUI label = CreateText(rowObject.transform, "Label", 13, TextAlignmentOptions.Left, new Color(0.78f, 0.78f, 0.68f));
-                SetRect(label.rectTransform, 0.070f, 0.04f, row.SetChecked != null ? 0.56f : 0.62f, 0.96f);
-                label.text = row.Label;
+                float indent = Math.Min(0.10f, Math.Max(0, row.IndentLevel) * 0.022f);
+                float labelMinX = 0.070f + indent;
+                Color labelColor = row.Emphasized
+                    ? new Color(0.84f, 0.88f, 0.76f)
+                    : new Color(0.78f, 0.78f, 0.68f);
+                Color valueColor = row.Emphasized
+                    ? new Color(0.80f, 0.88f, 0.82f)
+                    : new Color(0.72f, 0.80f, 0.78f);
 
-                TextMeshProUGUI value = CreateText(rowObject.transform, "Value", 13, TextAlignmentOptions.Right, new Color(0.72f, 0.80f, 0.78f));
-                SetRect(value.rectTransform, row.SetChecked != null ? 0.52f : 0.55f, 0.04f, row.SetChecked != null ? 0.89f : 0.95f, 0.96f);
+                TextMeshProUGUI label = CreateText(rowObject.transform, "Label", 13, TextAlignmentOptions.Left, labelColor);
+                TextMeshProUGUI value = CreateText(
+                    rowObject.transform,
+                    "Value",
+                    13,
+                    row.FullWidthValue ? TextAlignmentOptions.Left : TextAlignmentOptions.Right,
+                    valueColor);
+
+                if (row.FullWidthValue)
+                {
+                    SetRect(label.rectTransform, labelMinX, 0.56f, 0.95f, 0.96f);
+                    SetRect(value.rectTransform, labelMinX, 0.05f, 0.95f, 0.60f);
+                }
+                else
+                {
+                    SetRect(label.rectTransform, labelMinX, 0.04f, row.SetChecked != null ? 0.56f : 0.62f, 0.96f);
+                    SetRect(value.rectTransform, row.SetChecked != null ? 0.52f : 0.55f, 0.04f, row.SetChecked != null ? 0.89f : 0.95f, 0.96f);
+                }
+
+                label.text = row.Label;
                 value.text = row.Value;
+                if (row.Emphasized)
+                {
+                    label.fontStyle |= FontStyles.Bold;
+                    value.fontStyle |= FontStyles.Bold;
+                }
+
+                if (row.WrapValue || row.FullWidthValue)
+                {
+                    value.enableWordWrapping = true;
+                    value.overflowMode = TextOverflowModes.Overflow;
+                }
+                else
+                {
+                    value.enableWordWrapping = false;
+                    value.overflowMode = TextOverflowModes.Ellipsis;
+                }
 
                 if (row.SetChecked is Action<bool> setChecked && row.Checked is bool isChecked)
                 {
@@ -1736,12 +1849,20 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
         menuButtonObject.SetActive(sourceButtonComponent == null || sourceButtonComponent.gameObject.activeSelf || !vanillaMenuHidden);
         ConfigureVanguardMenuButton(menuButtonObject);
         enforceMenuLabelUntilRealtime = Time.realtimeSinceStartup + 6.0f;
+        nextExternalMenuLayoutRefreshRealtime = 0f;
         if (sourceButtonComponent != null
             && sourceButtonComponent.transform.parent != null
             && sourceButtonComponent.transform is RectTransform sourceRect
             && menuButtonObject.transform is RectTransform menuRect)
         {
-            ApplyTwoColumnMenuLayout(sourceButtonComponent.transform.parent, sourceRect, menuRect);
+            if (VanguardMenuOverhaulCompat.IsInstalled)
+            {
+                ApplyExternalMainMenuOwnedLayout(sourceButtonComponent.transform.parent, sourceRect, menuRect);
+            }
+            else
+            {
+                ApplyTwoColumnMenuLayout(sourceButtonComponent.transform.parent, sourceRect, menuRect);
+            }
         }
     }
 
@@ -1749,7 +1870,32 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
     {
         SetButtonLabel(buttonObject, VanguardOperatorsLocalizationService.Get("menu.button"));
         DisableTextLocalizationComponents(buttonObject);
-        RestoreVanillaLikeButtonVisuals(buttonObject);
+        if (VanguardMenuOverhaulCompat.IsInstalled)
+        {
+            ConfigureExternalMenuOwnedVisuals(buttonObject);
+        }
+        else
+        {
+            RestoreVanillaLikeButtonVisuals(buttonObject);
+        }
+
+        ConfigureVanguardMenuIcon(buttonObject);
+    }
+
+    private static void ConfigureExternalMenuOwnedVisuals(GameObject buttonObject)
+    {
+        // Menu Overhaul has no Vanguard icon registration surface. Preserve its background-free button
+        // presentation and leave the cloned icon geometry available; ConfigureVanguardMenuIcon replaces
+        // inherited artwork only inside Vanguard's own clone.
+        Transform? background = buttonObject.transform.Find("Background");
+        if (background != null)
+        {
+            background.gameObject.SetActive(false);
+        }
+
+        // Do not force inherited icon containers active here. Menu Overhaul owns the external
+        // presentation; ConfigureVanguardMenuIcon decides separately whether a canonical icon slot
+        // inside Vanguard's clone may be re-enabled for Vanguard-owned artwork.
     }
 
     private static void DisableTextLocalizationComponents(GameObject buttonObject)
@@ -1782,6 +1928,324 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
         {
             image.enabled = true;
         }
+    }
+
+    private static void ConfigureVanguardMenuIcon(GameObject buttonObject)
+    {
+        Sprite? iconSprite = ResolveVanguardMenuIconSprite();
+        if (iconSprite == null)
+        {
+            return;
+        }
+
+        VanguardMenuIconVisualState? existingState = buttonObject.GetComponent<VanguardMenuIconVisualState>();
+        if (existingState != null && existingState.TryRefresh(iconSprite))
+        {
+            return;
+        }
+
+        Transform? iconContainer = ResolveMenuIconContainer(buttonObject.transform);
+        Graphic? templateGraphic = ResolveMenuIconTemplate(buttonObject, iconContainer);
+        Image[] nativeIconImages = ResolveNativeMenuIconImages(buttonObject, iconContainer, templateGraphic);
+        if (nativeIconImages.Length > 0)
+        {
+            // Preserve EFT/Menu Overhaul's own animation carriers. Native button animation changes the
+            // active GameObjects/geometry for normal and hover states; replacing their sprites keeps
+            // those transitions authoritative instead of reproducing them in a Vanguard-only Image.
+            VanguardMenuIconVisualState state = existingState ?? buttonObject.AddComponent<VanguardMenuIconVisualState>();
+            state.BindNative(iconSprite, nativeIconImages);
+            LogMenuIconStatusOnce(
+                $"configured=true; mode=native_carriers; carriers={nativeIconImages.Length}; menuOverhaul={VanguardMenuOverhaulCompat.IsInstalled}; resource={MenuIconResourceName}");
+            return;
+        }
+
+        if (iconContainer == null)
+        {
+            LogMenuIconStatusOnce("configured=false; reason=native_icon_geometry_not_found");
+            return;
+        }
+
+        if (!EnsureMenuIconContainerAvailable(buttonObject.transform, iconContainer))
+        {
+            LogMenuIconStatusOnce("configured=false; reason=inactive_noncanonical_icon_container");
+            return;
+        }
+
+        // Conservative fallback only: if a future menu presentation exposes a canonical icon slot but
+        // no reusable native Image, create Vanguard-owned artwork inside that slot. This path cannot
+        // inherit state-specific native geometry, so native carriers are always preferred above.
+        var iconObject = new GameObject(MenuIconObjectName, typeof(RectTransform), typeof(CanvasRenderer), typeof(Image));
+        iconObject.layer = iconContainer.gameObject.layer;
+        iconObject.transform.SetParent(iconContainer, false);
+        var iconRect = (RectTransform)iconObject.transform;
+        iconRect.anchorMin = Vector2.zero;
+        iconRect.anchorMax = Vector2.one;
+        iconRect.offsetMin = Vector2.zero;
+        iconRect.offsetMax = Vector2.zero;
+        iconRect.pivot = new Vector2(0.5f, 0.5f);
+
+        Image iconImage = iconObject.GetComponent<Image>();
+        iconImage.sprite = iconSprite;
+        iconImage.preserveAspect = true;
+        iconImage.raycastTarget = false;
+
+        VanguardMenuIconVisualState fallbackState = existingState ?? buttonObject.AddComponent<VanguardMenuIconVisualState>();
+        fallbackState.BindFallback(iconSprite, iconImage);
+        LogMenuIconStatusOnce(
+            $"configured=true; mode=owned_fallback; carriers=1; menuOverhaul={VanguardMenuOverhaulCompat.IsInstalled}; resource={MenuIconResourceName}");
+    }
+
+    private static Sprite? ResolveVanguardMenuIconSprite()
+    {
+        if (menuIconLoadAttempted)
+        {
+            return menuIconSprite;
+        }
+
+        menuIconLoadAttempted = true;
+        try
+        {
+            using Stream? stream = Assembly.GetExecutingAssembly().GetManifestResourceStream(MenuIconResourceName);
+            if (stream == null)
+            {
+                LogMenuIconStatusOnce($"configured=false; reason=resource_missing; resource={MenuIconResourceName}");
+                return null;
+            }
+
+            using var memory = new MemoryStream();
+            stream.CopyTo(memory);
+            var texture = new Texture2D(2, 2, TextureFormat.RGBA32, false);
+            if (!ImageConversion.LoadImage(texture, memory.ToArray()))
+            {
+                LogMenuIconStatusOnce($"configured=false; reason=image_decode_failed; resource={MenuIconResourceName}");
+                Destroy(texture);
+                return null;
+            }
+
+            texture.name = "vanguard_menu_icon_mask";
+            texture.wrapMode = TextureWrapMode.Clamp;
+            texture.filterMode = FilterMode.Bilinear;
+            menuIconSprite = Sprite.Create(texture, new Rect(0f, 0f, texture.width, texture.height), new Vector2(0.5f, 0.5f), 100f);
+            menuIconSprite.name = texture.name;
+            return menuIconSprite;
+        }
+        catch (Exception exception)
+        {
+            VanguardClientDiagnosticsLog.Error(VanguardBuildVersion.OffRaidUiStatusTag, exception);
+            LogMenuIconStatusOnce($"configured=false; reason=resource_exception; resource={MenuIconResourceName}");
+            return null;
+        }
+    }
+
+    private static Transform? ResolveMenuIconContainer(Transform buttonRoot)
+    {
+        Transform? exact = buttonRoot.Find("SizeLabel/IconContainer") ?? buttonRoot.Find("IconContainer");
+        if (exact != null)
+        {
+            return exact;
+        }
+
+        foreach (Transform candidate in buttonRoot.GetComponentsInChildren<Transform>(true))
+        {
+            if (candidate != buttonRoot && candidate.name.Contains("IconContainer", StringComparison.OrdinalIgnoreCase))
+            {
+                return candidate;
+            }
+        }
+
+        return null;
+    }
+
+    private static bool EnsureMenuIconContainerAvailable(Transform buttonRoot, Transform? iconContainer)
+    {
+        if (iconContainer == null || iconContainer.gameObject.activeSelf)
+        {
+            return true;
+        }
+
+        Transform? canonical = buttonRoot.Find("SizeLabel/IconContainer") ?? buttonRoot.Find("IconContainer");
+        if (canonical != iconContainer)
+        {
+            // A fuzzy name match is useful for geometry discovery, but re-enabling an unknown hidden
+            // hierarchy would be an unnecessary presentation-side effect. Fail closed instead.
+            return false;
+        }
+
+        // This is Vanguard's cloned button, not Menu Overhaul's original button. Re-enabling the
+        // canonical icon slot is therefore bounded to Vanguard-owned presentation and does not move
+        // or mutate any externally owned main-menu RectTransform.
+        iconContainer.gameObject.SetActive(true);
+        return true;
+    }
+
+    private static Graphic? ResolveMenuIconTemplate(GameObject buttonObject, Transform? iconContainer)
+    {
+        if (iconContainer != null)
+        {
+            // Even inside an icon container, do not assume the first Image is the glyph. Some menu
+            // presentations add hover/plate/decorative Images there. Prefer only a sufficiently
+            // strong icon-like candidate; otherwise the bounded Vanguard-owned fallback is safer.
+            Image[] images = iconContainer.GetComponentsInChildren<Image>(true);
+            Image? bestImage = images
+                .OrderByDescending(ScoreMenuIconGraphic)
+                .ThenByDescending(image => image.sprite != null)
+                .FirstOrDefault();
+
+            // A container name is not enough authority to rewrite arbitrary artwork below it.
+            // If no child looks sufficiently like an icon glyph, leave native-carrier mode and
+            // use the bounded Vanguard-owned fallback instead.
+            return bestImage != null && ScoreMenuIconGraphic(bestImage) >= 50 ? bestImage : null;
+        }
+
+        Graphic? best = null;
+        int bestScore = 0;
+        foreach (Image graphic in buttonObject.GetComponentsInChildren<Image>(true))
+        {
+            if (graphic == null || graphic.gameObject == buttonObject)
+            {
+                continue;
+            }
+
+            int score = ScoreMenuIconGraphic(graphic);
+            if (score > bestScore)
+            {
+                best = graphic;
+                bestScore = score;
+            }
+        }
+
+        return bestScore >= 50 ? best : null;
+    }
+
+    private static int ScoreMenuIconGraphic(Graphic graphic)
+    {
+        string name = graphic.gameObject.name;
+        string parentName = graphic.transform.parent?.name ?? string.Empty;
+        int score = 0;
+
+        if (name.Contains("Icon", StringComparison.OrdinalIgnoreCase) || parentName.Contains("Icon", StringComparison.OrdinalIgnoreCase))
+        {
+            score += 100;
+        }
+
+        if (name.Contains("Symbol", StringComparison.OrdinalIgnoreCase) || parentName.Contains("Symbol", StringComparison.OrdinalIgnoreCase))
+        {
+            score += 70;
+        }
+
+        if (graphic is Image image && image.sprite != null)
+        {
+            score += 25;
+        }
+
+        if (graphic is TextMeshProUGUI text && text.text.Trim().Length > 2)
+        {
+            score -= 120;
+        }
+
+        string combined = name + "/" + parentName;
+        if (combined.Contains("Background", StringComparison.OrdinalIgnoreCase)
+            || combined.Contains("Plate", StringComparison.OrdinalIgnoreCase)
+            || combined.Contains("Label", StringComparison.OrdinalIgnoreCase)
+            || combined.Contains("Text", StringComparison.OrdinalIgnoreCase))
+        {
+            score -= 100;
+        }
+
+        if (combined.Contains("Hover", StringComparison.OrdinalIgnoreCase))
+        {
+            score -= 30;
+        }
+
+        if (graphic.gameObject.activeInHierarchy && graphic.enabled)
+        {
+            score += 15;
+        }
+
+        return score;
+    }
+
+    private static Image[] ResolveNativeMenuIconImages(GameObject buttonObject, Transform? iconContainer, Graphic? templateGraphic)
+    {
+        if (templateGraphic is not Image templateImage)
+        {
+            return Array.Empty<Image>();
+        }
+
+        IEnumerable<Image> candidates = iconContainer != null
+            ? iconContainer.GetComponentsInChildren<Image>(true)
+            : buttonObject.GetComponentsInChildren<Image>(true);
+
+        string templateSpriteName = templateImage.sprite?.name ?? string.Empty;
+        string templateIdentity = NormalizeMenuIconIdentity(templateImage.gameObject.name);
+        string templateParentIdentity = NormalizeMenuIconIdentity(templateImage.transform.parent?.name ?? string.Empty);
+
+        return candidates
+            .Where(image => image != null && image.gameObject != buttonObject)
+            .Where(image =>
+            {
+                if (image == templateImage)
+                {
+                    return true;
+                }
+
+                if (ScoreMenuIconGraphic(image) < 50)
+                {
+                    return false;
+                }
+
+                if (templateImage.sprite != null && image.sprite == templateImage.sprite)
+                {
+                    return true;
+                }
+
+                if (!string.IsNullOrEmpty(templateSpriteName)
+                    && string.Equals(image.sprite?.name, templateSpriteName, StringComparison.Ordinal))
+                {
+                    return true;
+                }
+
+                string candidateIdentity = NormalizeMenuIconIdentity(image.gameObject.name);
+                string candidateParentIdentity = NormalizeMenuIconIdentity(image.transform.parent?.name ?? string.Empty);
+                bool objectIdentityMatches = !string.IsNullOrEmpty(templateIdentity)
+                    && string.Equals(candidateIdentity, templateIdentity, StringComparison.Ordinal);
+                bool parentIdentityMatches = !string.IsNullOrEmpty(templateParentIdentity)
+                    && string.Equals(candidateParentIdentity, templateParentIdentity, StringComparison.Ordinal);
+                bool strongIconIdentity = templateIdentity.Contains("icon", StringComparison.Ordinal)
+                    || templateIdentity.Contains("symbol", StringComparison.Ordinal);
+
+                // State animations commonly place the same Icon object below different Normal/Hover
+                // parents. Requiring an identical parent would miss those inactive carriers and leave
+                // the original EFT glyph visible when the state switches. The score gate above still
+                // excludes background/plate/text artwork, so a strong matching icon identity may span
+                // state-specific parents without broadening authority to unrelated graphics.
+                return objectIdentityMatches && (parentIdentityMatches || strongIconIdentity);
+            })
+            .Distinct()
+            .ToArray();
+    }
+
+    private static string NormalizeMenuIconIdentity(string value)
+    {
+        string normalized = value.Trim().ToLowerInvariant();
+        string[] stateTokens = { "hover", "normal", "pressed", "selected", "disabled", "active", "inactive", "state" };
+        foreach (string token in stateTokens)
+        {
+            normalized = normalized.Replace(token, string.Empty);
+        }
+
+        return new string(normalized.Where(char.IsLetterOrDigit).ToArray());
+    }
+
+    private static void LogMenuIconStatusOnce(string message)
+    {
+        if (menuIconStatusLogged)
+        {
+            return;
+        }
+
+        menuIconStatusLogged = true;
+        VanguardClientDiagnosticsLog.Info("VANGUARD_OFFRAID_MENU_ICON_STATUS", message);
     }
 
     private void RegisterVanillaButtonVisuals(GameObject buttonObject, TextMeshProUGUI label, GameObject hoverPlate, TextMeshProUGUI hoverIcon)
@@ -2192,6 +2656,72 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
         }
     }
 
+    private static void ApplyExternalMainMenuOwnedLayout(Transform parent, RectTransform sourceRect, RectTransform menuRect)
+    {
+        // Menu Overhaul owns the vanilla buttons. Observe its resulting geometry and append Vanguard
+        // below the lowest managed button without disabling layouts, moving siblings or invoking its internals.
+        List<RectTransform> ownedRects = MenuOverhaulOwnedButtonNames
+            .Select(name => parent.Find(name))
+            .OfType<RectTransform>()
+            .Where(rect => rect != menuRect)
+            .ToList();
+
+        if (ownedRects.Count == 0)
+        {
+            CopyExternalButtonGeometry(sourceRect, menuRect, sourceRect.anchoredPosition + new Vector2(0f, -ExternalMenuFallbackVerticalStep));
+            return;
+        }
+
+        RectTransform lowest = ownedRects
+            .OrderBy(rect => rect.anchoredPosition.y)
+            .ThenBy(rect => rect.GetSiblingIndex())
+            .First();
+        float verticalStep = ResolveObservedExternalVerticalStep(ownedRects);
+        Vector2 targetPosition = new(lowest.anchoredPosition.x, lowest.anchoredPosition.y - verticalStep);
+        CopyExternalButtonGeometry(lowest, menuRect, targetPosition);
+    }
+
+    // Derive spacing from what is actually on screen instead of copying Menu Overhaul's current default.
+    // Using the median non-trivial gap makes the added button tolerate user F12 offsets and small future
+    // presentation changes while rejecting tiny transform noise. The clamp prevents pathological geometry
+    // from pushing Vanguard far outside the visible menu.
+    private static float ResolveObservedExternalVerticalStep(IReadOnlyList<RectTransform> rects)
+    {
+        float[] yValues = rects
+            .Select(rect => rect.anchoredPosition.y)
+            .Distinct()
+            .OrderByDescending(value => value)
+            .ToArray();
+        var steps = new List<float>();
+        for (int index = 1; index < yValues.Length; index++)
+        {
+            float delta = Mathf.Abs(yValues[index - 1] - yValues[index]);
+            if (delta >= 8f)
+            {
+                steps.Add(delta);
+            }
+        }
+
+        if (steps.Count == 0)
+        {
+            return ExternalMenuFallbackVerticalStep;
+        }
+
+        steps.Sort();
+        float observed = steps[steps.Count / 2];
+        return Mathf.Clamp(observed, 36f, 120f);
+    }
+
+    // Copy only anchor/pivot geometry required for Vanguard to live in the same coordinate system.
+    // Width, visual state, sibling order and every vanilla RectTransform remain under the external owner.
+    private static void CopyExternalButtonGeometry(RectTransform referenceRect, RectTransform menuRect, Vector2 anchoredPosition)
+    {
+        menuRect.anchorMin = referenceRect.anchorMin;
+        menuRect.anchorMax = referenceRect.anchorMax;
+        menuRect.pivot = referenceRect.pivot;
+        menuRect.anchoredPosition = anchoredPosition;
+    }
+
     private void ApplyTwoColumnMenuLayout(Transform parent, RectTransform playerRect, RectTransform menuRect)
     {
         DisableParentAutoLayout(parent);
@@ -2521,25 +3051,21 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
 
     private static void SetButtonLabel(GameObject buttonObject, string label)
     {
-        foreach (TextMeshProUGUI text in buttonObject.GetComponentsInChildren<TextMeshProUGUI>(true))
-        {
-            text.text = label;
-        }
-    }
+        TextMeshProUGUI[] labels = buttonObject.GetComponentsInChildren<TextMeshProUGUI>(true);
+        TextMeshProUGUI? visibleLabel = labels.FirstOrDefault(text =>
+            text.gameObject.name.Equals("Label", StringComparison.OrdinalIgnoreCase)
+            && text.transform.parent != null
+            && text.transform.parent.gameObject.name.Equals("SizeLabel", StringComparison.OrdinalIgnoreCase));
 
-    private static void TryClearButtonIcon(GameObject buttonObject)
-    {
-        foreach (Image image in buttonObject.GetComponentsInChildren<Image>(true))
-        {
-            if (image.gameObject == buttonObject)
-            {
-                continue;
-            }
+        // EFT uses SizeLabel as the native measurement envelope for the menu entry and nests the
+        // actually rendered text beneath it. Rewriting both TMP components collapses that envelope
+        // around VANGUARD and lets the icon overlap the first letter, so preserve SizeLabel verbatim.
+        visibleLabel ??= labels.FirstOrDefault(text =>
+            !text.gameObject.name.Equals("SizeLabel", StringComparison.OrdinalIgnoreCase));
 
-            if (image.GetComponentInChildren<TextMeshProUGUI>(true) == null)
-            {
-                image.enabled = false;
-            }
+        if (visibleLabel != null)
+        {
+            visibleLabel.text = label;
         }
     }
 
@@ -2651,6 +3177,159 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
         }
 
         return string.Empty;
+    }
+}
+
+internal sealed class VanguardMenuIconVisualState : MonoBehaviour, IPointerEnterHandler, IPointerExitHandler, IPointerDownHandler, IPointerUpHandler
+{
+    private static readonly Color32 NormalColor = new(0xD4, 0xAF, 0x37, 0xFF);
+    private static readonly Color32 HoverColor = new(0xF3, 0xD7, 0x79, 0xFF);
+    private static readonly Color32 PressedColor = new(0xA7, 0x83, 0x1F, 0xFF);
+    private static readonly Color32 DisabledColor = new(0xD4, 0xAF, 0x37, 0x80);
+
+    private Image[] nativeIconImages = Array.Empty<Image>();
+    private Image? fallbackIconImage;
+    private Button? button;
+    private bool pointerInside;
+    private bool pointerDown;
+    private Color32 lastColor;
+    private bool hasLastColor;
+
+    internal bool TryRefresh(Sprite sprite)
+    {
+        nativeIconImages = nativeIconImages.Where(image => image != null).Distinct().ToArray();
+        if (nativeIconImages.Length > 0)
+        {
+            ApplySpriteToNativeCarriers(sprite);
+            ApplyColor(force: true);
+            return true;
+        }
+
+        if (fallbackIconImage != null)
+        {
+            ConfigureFallbackImage(sprite, fallbackIconImage);
+            ApplyColor(force: true);
+            return true;
+        }
+
+        return false;
+    }
+
+    internal void BindNative(Sprite sprite, Image[] images)
+    {
+        nativeIconImages = (images ?? Array.Empty<Image>())
+            .Where(image => image != null)
+            .Distinct()
+            .ToArray();
+        fallbackIconImage = null;
+        button = GetComponent<Button>();
+        ApplySpriteToNativeCarriers(sprite);
+        ApplyColor(force: true);
+    }
+
+    internal void BindFallback(Sprite sprite, Image image)
+    {
+        nativeIconImages = Array.Empty<Image>();
+        fallbackIconImage = image;
+        button = GetComponent<Button>();
+        ConfigureFallbackImage(sprite, image);
+        ApplyColor(force: true);
+    }
+
+    private void ApplySpriteToNativeCarriers(Sprite sprite)
+    {
+        foreach (Image image in nativeIconImages)
+        {
+            if (image == null)
+            {
+                continue;
+            }
+
+            // Deliberately preserve enabled state, GameObject activity, RectTransform, material and
+            // preserveAspect. Those belong to EFT/Menu Overhaul's native button-state presentation.
+            image.sprite = sprite;
+        }
+    }
+
+    private static void ConfigureFallbackImage(Sprite sprite, Image image)
+    {
+        image.sprite = sprite;
+        image.enabled = true;
+        image.preserveAspect = true;
+        image.raycastTarget = false;
+    }
+
+    private void Update()
+    {
+        // Keep disabled tint coherent if another owner changes Button.interactable. No native
+        // hierarchy state, transform or activation is touched here.
+        ApplyColor();
+    }
+
+    public void OnPointerEnter(PointerEventData eventData)
+    {
+        pointerInside = true;
+        ApplyColor(force: true);
+    }
+
+    public void OnPointerExit(PointerEventData eventData)
+    {
+        pointerInside = false;
+        pointerDown = false;
+        ApplyColor(force: true);
+    }
+
+    public void OnPointerDown(PointerEventData eventData)
+    {
+        pointerDown = true;
+        ApplyColor(force: true);
+    }
+
+    public void OnPointerUp(PointerEventData eventData)
+    {
+        pointerDown = false;
+        ApplyColor(force: true);
+    }
+
+    private void OnDisable()
+    {
+        pointerInside = false;
+        pointerDown = false;
+        hasLastColor = false;
+    }
+
+    private void ApplyColor(bool force = false)
+    {
+        button ??= GetComponent<Button>();
+        bool interactable = button == null || button.IsInteractable();
+        Color32 desired = !interactable
+            ? DisabledColor
+            : pointerDown
+                ? PressedColor
+                : pointerInside
+                    ? HoverColor
+                    : NormalColor;
+
+        if (!force && hasLastColor && lastColor.Equals(desired))
+        {
+            return;
+        }
+
+        foreach (Image image in nativeIconImages)
+        {
+            if (image != null)
+            {
+                image.color = desired;
+            }
+        }
+
+        if (fallbackIconImage != null)
+        {
+            fallbackIconImage.color = desired;
+        }
+
+        lastColor = desired;
+        hasLastColor = true;
     }
 }
 

@@ -4,6 +4,7 @@ using SPTarkov.Server.Core.Models.Common;
 using SPTarkov.Server.Core.Models.Eft.Common;
 using SPTarkov.Server.Core.Models.Eft.ItemEvent;
 using SPTarkov.Server.Core.Models.Eft.Profile;
+using SPTarkov.Server.Core.Models.Eft.Trade;
 using SPTarkov.Server.Core.Models.Utils;
 using SPTarkov.Server.Core.Controllers;
 using SPTarkov.Server.Core.Helpers;
@@ -82,6 +83,7 @@ public static class VanguardOperatorInventoryServerPatches
 
     private static void PlayerPurchaseAccessPrefix(
         ref PmcData __0,
+        ProcessBuyTradeRequestData __1,
         MongoId __2,
         MethodBase __originalMethod,
         out PlayerPurchaseAccessState? __state)
@@ -105,9 +107,15 @@ public static class VanguardOperatorInventoryServerPatches
 
         // TradeHelper must receive the real player PMC. The active composite remains
         // the UI projection only; the native item-event delta is mirrored back after
-        // SPT finishes the purchase.
-        __0 = playerPmcData;
+        // SPT finishes the purchase. Payment references are canonicalized separately
+        // because EFT may keep a consumed currency stack id in the still-open Operator
+        // UI after the real player transaction has deleted that stack.
+        // Arm the finalizer state before any additional reconciliation work so the
+        // redirect-bypass scope is always released even if a compatibility edge case
+        // inside payment-reference canonicalization throws unexpectedly.
         __state = new PlayerPurchaseAccessState(scope, __2, operatorId, __originalMethod.Name);
+        service.CanonicalizePlayerPurchasePaymentReferences(__2, __1, playerPmcData, __originalMethod.Name);
+        __0 = playerPmcData;
     }
 
     private static Exception? PlayerPurchaseAccessFinalizer(

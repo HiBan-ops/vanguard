@@ -11,9 +11,11 @@ using SPTarkov.Server.Core.Models.Common;
 using SPTarkov.Server.Core.Models.Eft.Common;
 using SPTarkov.Server.Core.Models.Eft.Profile;
 using SPTarkov.Server.Core.Models.Eft.ItemEvent;
+using SPTarkov.Server.Core.Models.Eft.Trade;
 using SPTarkov.Server.Core.Models.Spt.Config;
 using SPTarkov.Server.Core.Models.Utils;
 using SPTarkov.Server.Core.Servers;
+using SPTarkov.Server.Core.Helpers;
 using SPTarkov.Server.Core.Utils;
 using Vanguard.Server.Operators.Inventory.Models;
 using Vanguard.Server.Operators.Inventory.Responses;
@@ -34,11 +36,13 @@ public sealed class VanguardOperatorInventoryModeService(
     VanguardOperatorStore operatorStore,
     SaveServer saveServer,
     VanguardSpt40LostOnDeathConfigProvider lostOnDeathConfigProvider,
+    PaymentHelper paymentHelper,
     JsonUtil jsonUtil,
     ISptLogger<VanguardOperatorInventoryModeService> logger)
 {
     private readonly ConcurrentDictionary<string, VanguardOperatorInventoryModeSession> activeSessions = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, SemaphoreSlim> profileLocks = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, ConcurrentDictionary<string, MongoId>> playerPurchaseCurrencyAliases = new(StringComparer.OrdinalIgnoreCase);
     private readonly AsyncLocal<int> redirectBypassDepth = new();
     private readonly LostOnDeathConfig lostOnDeathConfig = lostOnDeathConfigProvider.Value;
 
@@ -95,6 +99,7 @@ public sealed class VanguardOperatorInventoryModeService(
                 sessionProfile,
                 sessionProfileNode,
                 DateTimeOffset.UtcNow);
+            playerPurchaseCurrencyAliases.TryRemove(requested, out _);
             activeSessions.AddOrUpdate(requested, session, (_, _) => session);
 
             await CommitSessionAsync(session);
@@ -152,6 +157,7 @@ public sealed class VanguardOperatorInventoryModeService(
         {
             await CommitSessionAsync(session);
             activeSessions.TryRemove(requested, out _);
+            playerPurchaseCurrencyAliases.TryRemove(requested, out _);
             SptProfile? operatorProfile = await TryLoadInventoryProfileAsync(session.ProfilePath);
             VanguardOperatorInventorySummary summary = BuildSummary(session.OperatorId, session.OperatorDisplayName, session.OperatorInventoryProfileId, session.ProfilePath, operatorProfile);
             logger.Info(VanguardServerDiagnosticsLog.Present($"[VANGUARD_OPERATOR_EQUIPMENT_SESSION_STATUS] exit requested={requested}; storage={session.StorageProfileId}; operator={session.OperatorId}; inventoryProfile={session.OperatorInventoryProfileId}; committed=true"));
@@ -938,6 +944,108 @@ public sealed class VanguardOperatorInventoryModeService(
         }
     }
 
+    public void CanonicalizePlayerPurchasePaymentReferences(
+        MongoId requestedProfileId,
+        ProcessBuyTradeRequestData request,
+        PmcData playerPmcData,
+        string operation)
+    {
+        if (!activeSessions.TryGetValue(requestedProfileId.ToString(), out VanguardOperatorInventoryModeSession? session)
+            || request.SchemeItems == null
+            || request.SchemeItems.Count == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            // EFT's open Equipment Builds flow can retain the id of a specific currency
+            // stack after an earlier native purchase fully consumed that stack. SPT's
+            // PaymentService interprets an unknown scheme id as a currency template id; a
+            // stale stack id therefore becomes a bogus currency template and the native
+            // balance check reports zero even though the player still owns money elsewhere.
+            // Canonicalize only proven currency references to their template id, which is an
+            // input form already understood by SPT. PaymentService already aggregates a
+            // resolved money-stack id by its template before selecting the actual stacks to
+            // debit, so this preserves SPT's native stack-selection semantics. Counts and all
+            // native payment checks stay untouched, and non-currency barter references are
+            // never substituted.
+            ConcurrentDictionary<string, MongoId> aliases = playerPurchaseCurrencyAliases.GetOrAdd(
+                requestedProfileId.ToString(),
+                _ => new ConcurrentDictionary<string, MongoId>(StringComparer.OrdinalIgnoreCase));
+
+            var canonicalizations = new List<(IdWithCount Reference, MongoId CurrencyTpl)>();
+            int aliasHits = 0;
+            int unresolvedMissing = 0;
+            foreach (IdWithCount paymentReference in request.SchemeItems)
+            {
+                MongoId originalId = paymentReference.Id;
+                if (paymentHelper.IsMoneyTpl(originalId))
+                {
+                    continue;
+                }
+
+                MongoId? currencyTpl = null;
+                var playerItem = playerPmcData.Inventory?.Items?.FirstOrDefault(item => item.Id == originalId);
+                if (playerItem != null && paymentHelper.IsMoneyTpl(playerItem.Template))
+                {
+                    currencyTpl = playerItem.Template;
+                    aliases[originalId.ToString()] = playerItem.Template;
+                }
+                else
+                {
+                    var sessionItem = session.Profile.CharacterData?.PmcData?.Inventory?.Items?.FirstOrDefault(item => item.Id == originalId);
+                    if (sessionItem != null && paymentHelper.IsMoneyTpl(sessionItem.Template))
+                    {
+                        currencyTpl = sessionItem.Template;
+                        aliases[originalId.ToString()] = sessionItem.Template;
+                    }
+                    else if (aliases.TryGetValue(originalId.ToString(), out MongoId aliasedCurrencyTpl)
+                        && paymentHelper.IsMoneyTpl(aliasedCurrencyTpl))
+                    {
+                        currencyTpl = aliasedCurrencyTpl;
+                        aliasHits++;
+                    }
+                }
+
+                if (currencyTpl.HasValue)
+                {
+                    canonicalizations.Add((paymentReference, currencyTpl.Value));
+                    continue;
+                }
+
+                if (playerItem == null)
+                {
+                    unresolvedMissing++;
+                }
+            }
+
+            foreach ((IdWithCount reference, MongoId currencyTpl) in canonicalizations)
+            {
+                reference.Id = currencyTpl;
+            }
+
+            if (canonicalizations.Count > 0)
+            {
+                logger.Info(VanguardServerDiagnosticsLog.Present(
+                    $"[VANGUARD_OPERATOR_NATIVE_PURCHASE_AUTHORITY_STATUS] player_payment_references_canonicalized operation={operation}; requested={requestedProfileId}; operator={session.OperatorId}; schemeItems={request.SchemeItems.Count}; canonicalized={canonicalizations.Count}; aliasHits={aliasHits}; unresolvedMissing={unresolvedMissing}; strategy=native_money_tpl; playerWalletAuthority=true; nativePaymentChecksPreserved=true"));
+            }
+            else if (unresolvedMissing > 0)
+            {
+                logger.Warning(VanguardServerDiagnosticsLog.Present(
+                    $"[VANGUARD_OPERATOR_NATIVE_PURCHASE_AUTHORITY_STATUS] player_payment_reference_unresolved operation={operation}; requested={requestedProfileId}; operator={session.OperatorId}; schemeItems={request.SchemeItems.Count}; unresolvedMissing={unresolvedMissing}; action=left_native; nonCurrencySubstitution=false"));
+            }
+        }
+        catch (Exception exception)
+        {
+            // Canonicalization is a compatibility guard around the native transaction, not
+            // an alternative payment authority. Failure therefore falls through to SPT with
+            // the original request rather than inventing a balance or replaying payment.
+            logger.Warning(VanguardServerDiagnosticsLog.Present(
+                $"[VANGUARD_OPERATOR_NATIVE_PURCHASE_AUTHORITY_STATUS] player_payment_reference_canonicalization_failed operation={operation}; requested={requestedProfileId}; operator={session.OperatorId}; type={exception.GetType().Name}; message={exception.Message}; action=left_native; playerWalletAuthority=true; nativePaymentChecksPreserved=true"));
+        }
+    }
+
     public void CompletePlayerPurchaseProfileAccess(
         MongoId requestedProfileId,
         string expectedOperatorId,
@@ -1161,8 +1269,15 @@ public sealed class VanguardOperatorInventoryModeService(
             throw new InvalidOperationException($"Unable to load player profile {requestedProfileId} for Vanguard equipment session.");
         }
 
-        JsonObject sessionNode = ProfileToNode(playerProfile);
+        // Keep an untouched player descriptor beside the mutable Operator projection.
+        // The direct equipment screen needs Operator identity/equipment/health/skills,
+        // but every market entitlement must continue to describe the player.
+        // This explicit split prevents Operator career level from leaking into Flea
+        // minimum-level checks or trader loyalty/quest assortment evaluation.
+        JsonObject playerAuthorityNode = ProfileToNode(playerProfile);
+        JsonObject sessionNode = CloneObject(playerAuthorityNode);
         JsonObject operatorNode = ProfileToNode(operatorPersistentProfile);
+        JsonObject playerAuthorityPmc = GetPmcObject(playerAuthorityNode);
         ApplyOperatorIdentity(sessionNode, storageProfileId, operatorProfile);
         JsonObject playerInventory = GetInventoryObject(sessionNode);
         JsonObject operatorInventory = GetInventoryObject(operatorNode);
@@ -1174,8 +1289,9 @@ public sealed class VanguardOperatorInventoryModeService(
         CopyOperatorOwnedDescriptorField(operatorPmc, sessionPmc, "Skills");
         CopyOperatorOwnedDescriptorField(operatorPmc, sessionPmc, "Stats");
         CopyOperatorOwnedDescriptorField(operatorPmc, sessionPmc, "Customization");
+        ApplyPlayerMarketAuthorityProjection(playerAuthorityPmc, sessionPmc, operatorProfile);
         NormalizeCompleteSessionProfileNode(sessionNode, storageProfileId, operatorProfile.OperatorId, "session_build");
-        logger.Info(VanguardServerDiagnosticsLog.Present($"[VANGUARD_OPERATOR_EQUIPMENT_SESSION_STATUS] built storage={storageProfileId}; operator={operatorProfile.OperatorId}; model=complete-player-template-operator-equipment-player-stash; items={GetItemsArray(sessionInventory).Count}"));
+        logger.Info(VanguardServerDiagnosticsLog.Present($"[VANGUARD_OPERATOR_EQUIPMENT_SESSION_STATUS] built storage={storageProfileId}; operator={operatorProfile.OperatorId}; model=player-market-authority_operator-equipment-player-stash; items={GetItemsArray(sessionInventory).Count}"));
         return sessionNode;
     }
 
@@ -2138,6 +2254,43 @@ public sealed class VanguardOperatorInventoryModeService(
         {
             target[property.Key] = property.Value?.DeepClone();
         }
+    }
+
+    private void ApplyPlayerMarketAuthorityProjection(JsonObject playerPmc, JsonObject sessionPmc, VanguardOperatorProfile operatorProfile)
+    {
+        // The composite profile is a presentation/editing shell, never an economic
+        // identity. Preserve the player-owned inputs that EFT/SPT can consult while
+        // browsing or buying through trader/Flea screens opened from Equipment Builds.
+        // Operator Health/Skills/Stats/Customization and the hybrid inventory remain
+        // untouched, so this does not collapse the Operator into the player profile.
+        JsonObject playerInfo = GetOrCreateObject(playerPmc, "Info");
+        JsonObject sessionInfo = GetOrCreateObject(sessionPmc, "Info");
+        CopyPlayerOwnedDescriptorField(playerInfo, sessionInfo, "Level");
+        CopyPlayerOwnedDescriptorField(playerInfo, sessionInfo, "Experience");
+
+        // These nodes already originate from the player template today. Re-applying
+        // them explicitly documents and enforces the authority boundary so future
+        // Operator-profile expansion cannot silently make market visibility, trader
+        // loyalty, quest unlocks, examined-item state or Flea metadata Operator-owned.
+        foreach (string fieldName in new[]
+        {
+            "TradersInfo",
+            "Quests",
+            "TaskConditionCounters",
+            "RagfairInfo",
+            "UnlockedInfo",
+            "Encyclopedia",
+            "Bonuses",
+            "WishList"
+        })
+        {
+            CopyPlayerOwnedDescriptorField(playerPmc, sessionPmc, fieldName);
+        }
+
+        double playerLevel = ReadFiniteDoubleOrDefault(playerInfo, "Level", -1.0);
+        double effectiveLevel = ReadFiniteDoubleOrDefault(sessionInfo, "Level", -1.0);
+        logger.Info(VanguardServerDiagnosticsLog.Present(
+            $"[VANGUARD_OPERATOR_MARKET_AUTHORITY_STATUS] session_projection operator={operatorProfile.OperatorId}; playerLevel={playerLevel:0}; operatorCareerLevel={operatorProfile.Progression.Level}; effectiveMarketLevel={effectiveLevel:0}; levelAuthority=player; traderAuthority=player; questUnlockAuthority=player; ragfairAuthority=player; examinedItemAuthority=player; bonusAuthority=player; operatorEquipmentAuthority=preserved; operatorSkillsAuthority=preserved"));
     }
 
     private static void CopyPlayerOwnedDescriptorField(JsonObject playerPmc, JsonObject sessionPmc, string fieldName)

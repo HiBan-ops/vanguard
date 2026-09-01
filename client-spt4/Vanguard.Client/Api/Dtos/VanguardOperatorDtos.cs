@@ -536,6 +536,7 @@ internal sealed class VanguardCanonicalRaidHistoryEntryDto
     public VanguardCanonicalRaidHistoryDeathDto? Death { get; set; }
     public VanguardCanonicalRaidHistoryTerminalDeathTruthDto? TerminalDeathTruth { get; set; }
     public List<VanguardCanonicalRaidHistorySkillPointDto>? SkillSessionPoints { get; set; }
+    public List<VanguardCanonicalRaidHistoryNotableEventDto>? NotableEvents { get; set; }
     public string? DeathSourceCoverageState { get; set; }
     public string? SourceFingerprint { get; set; }
     public string? TerminalDeathTruthFingerprint { get; set; }
@@ -597,6 +598,30 @@ internal sealed class VanguardCanonicalRaidHistorySkillPointDto
     public string? SkillId { get; set; }
     public double Progress { get; set; }
     public double PointsEarnedDuringSession { get; set; }
+}
+
+// Transport-only mirror of the server's structured notable-event contract. Do not place localized sentences
+// here: event kind, evidence, actors and facts must remain machine-readable so different presentation layers
+// (Off-Raid UI, VisitAPI add-ons, relationship systems) can interpret the same verified observation.
+internal sealed class VanguardCanonicalRaidHistoryNotableEventDto
+{
+    public string? EventId { get; set; }
+    public string? Kind { get; set; }
+    public DateTimeOffset ObservedAtUtcTelemetry { get; set; }
+    public string? EvidenceState { get; set; }
+    public string? Source { get; set; }
+    public List<VanguardCanonicalRaidHistoryEventActorDto>? Actors { get; set; }
+    public Dictionary<string, string>? Facts { get; set; }
+}
+
+// Actor references are explicit rather than embedded in prose. This keeps future narratives able to resolve
+// an Operator, player/client, enemy or other participant without parsing a display string.
+internal sealed class VanguardCanonicalRaidHistoryEventActorDto
+{
+    public string? Role { get; set; }
+    public string? ProfileId { get; set; }
+    public string? OperatorId { get; set; }
+    public string? DisplayName { get; set; }
 }
 
 internal sealed class VanguardCanonicalRaidHistoryParityCheckDto

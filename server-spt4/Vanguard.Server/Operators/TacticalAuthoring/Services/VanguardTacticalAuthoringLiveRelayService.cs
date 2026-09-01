@@ -66,6 +66,39 @@ public sealed class VanguardTacticalAuthoringLiveRelayService
                 };
             }
 
+            if (string.Equals(role, "authority", StringComparison.OrdinalIgnoreCase))
+            {
+                // A direct runtime authority (SPT local or Fika player-host) is both an optional
+                // author and the consumer of the complete active-author set for this raid.
+                // Persisted tactical-authoring state is not touched here: this remains a transient relay.
+                ApplyAuthor(request.Author, now);
+                foreach (var result in request.HeadlessResults ?? [])
+                {
+                    ApplyResult(result, now);
+                }
+
+                var knownOwners = new HashSet<string>(
+                    (request.KnownOwnerProfileIds ?? []).Select(Normalize).Where(value => value.Length > 0),
+                    StringComparer.OrdinalIgnoreCase);
+                var localOwner = Normalize(request.Author?.OwnerProfileId);
+                if (localOwner.Length > 0)
+                {
+                    knownOwners.Add(localOwner);
+                }
+
+                return new VanguardTacticalAuthoringLiveExchangeResponse
+                {
+                    Success = true,
+                    Reason = "authority_exchange_ok",
+                    Authors = authors.Values
+                        .Where(author => author.Active && (knownOwners.Count == 0 || knownOwners.Contains(author.OwnerProfileId)))
+                        .OrderBy(author => author.OwnerProfileId, StringComparer.OrdinalIgnoreCase)
+                        .ToList(),
+                    HeadlessResults = [],
+                    ServerTimeUtc = now
+                };
+            }
+
             return new VanguardTacticalAuthoringLiveExchangeResponse
             {
                 Success = false,

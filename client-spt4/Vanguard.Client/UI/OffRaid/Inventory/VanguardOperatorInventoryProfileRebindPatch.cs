@@ -63,27 +63,48 @@ internal sealed class VanguardOperatorInventoryProfileRebindPatch : ModulePatch
                 return true;
             }
 
-            if (VanguardOperatorDirectEquipmentScreenEntry.TryOpenFromMainMenu(__instance, "vanilla_player_button", out string reason))
+            if (VanguardOperatorDirectEquipmentScreenEntry.TryOpenFromMainMenu(
+                    __instance,
+                    "vanilla_player_button",
+                    out string reason,
+                    out bool vanillaFallbackSafe))
             {
                 VanguardClientDiagnosticsLog.Info(
                     "VANGUARD_OPERATOR_PROFILE_REBIND_STATUS",
                     $"vanilla_player_redirected_to_direct_operator_inventory reason={reason}; operator={VanguardOperatorInventoryModeClientState.OperatorId ?? "<none>"}; inventoryProfile={VanguardOperatorInventoryModeClientState.InventoryProfileId ?? "<none>"}");
+                return false;
             }
-            else
+
+            if (vanillaFallbackSafe)
             {
                 VanguardClientDiagnosticsLog.Warning(
                     "VANGUARD_OPERATOR_PROFILE_REBIND_STATUS",
-                    $"vanilla_player_blocked_operator_inventory_not_opened reason={reason}; operator={VanguardOperatorInventoryModeClientState.OperatorId ?? "<none>"}; inventoryProfile={VanguardOperatorInventoryModeClientState.InventoryProfileId ?? "<none>"}");
+                    $"vanilla_player_fallback_after_recovered_operator_open_failure reason={reason}; inventoryModeActive={VanguardOperatorInventoryModeClientState.IsActive}");
+
+                // The Operator technical session has been closed and Vanguard's temporary UI state
+                // restored.  Resume EFT's original Player ShowScreen call instead of turning a
+                // recoverable interop failure into a dead Equipment button.
+                return true;
             }
 
-            // Never let the vanilla Player screen open against the cached player controller while
-            // Vanguard operator equipment mode is active. The direct screen path either opened the
-            // Operator inventory or leaves the user in a stable menu state for recovery/exit.
+            VanguardClientDiagnosticsLog.Warning(
+                "VANGUARD_OPERATOR_PROFILE_REBIND_STATUS",
+                $"vanilla_player_blocked_operator_inventory_not_opened reason={reason}; operator={VanguardOperatorInventoryModeClientState.OperatorId ?? "<none>"}; inventoryProfile={VanguardOperatorInventoryModeClientState.InventoryProfileId ?? "<none>"}");
+
+            // Keep the vanilla Player screen blocked while the Operator technical session is still
+            // active or another direct-inventory lifecycle is in flight. Opening it against the
+            // cached player controller in that state would mix player and Operator authorities.
             return false;
         }
         catch (Exception exception)
         {
-            VanguardClientDiagnosticsLog.Warning("VANGUARD_OPERATOR_PROFILE_REBIND_STATUS", $"vanilla Player screen guard failed; reason={exception.GetType().Name}: {exception.Message}");
+            VanguardClientDiagnosticsLog.Warning(
+                "VANGUARD_OPERATOR_PROFILE_REBIND_STATUS",
+                $"vanilla Player screen guard failed; reason={exception.GetType().Name}: {exception.Message}; vanillaFallbackSafe=false; disposition=fail_closed_unverified_recovery");
+
+            // An unexpected guard exception does not prove that the Operator technical session
+            // and temporary UI authority were fully restored. Only the explicit recovered-failure
+            // path above may resume EFT's original Player ShowScreen call.
             return false;
         }
     }

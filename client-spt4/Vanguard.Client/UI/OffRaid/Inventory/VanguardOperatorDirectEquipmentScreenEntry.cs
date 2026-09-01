@@ -57,6 +57,12 @@ internal static class VanguardOperatorDirectEquipmentScreenEntry
 #if SPT_CLIENT
     public static bool TryOpenFromMainMenu(object mainMenuController, string source, out string reason)
     {
+        return TryOpenFromMainMenu(mainMenuController, source, out reason, out _);
+    }
+
+    public static bool TryOpenFromMainMenu(object mainMenuController, string source, out string reason, out bool vanillaFallbackSafe)
+    {
+        vanillaFallbackSafe = false;
         reason = "unknown";
         if (!VanguardOperatorInventoryModeClientState.IsActive)
         {
@@ -94,7 +100,7 @@ internal static class VanguardOperatorDirectEquipmentScreenEntry
             if (!TryBuildOperatorInventoryScreen(mainMenuController, out object? screenController, out object? session, out object? operatorProfile, out object? inventoryController, out string? operatorProfileId, out reason))
             {
                 VanguardClientDiagnosticsLog.Warning("VANGUARD_OPERATOR_DIRECT_EQUIPMENT_SCREEN_STATUS", $"direct_entry_build_failed source={source}; reason={reason}");
-                RecoverFailedDirectOpen("build_failed", reason);
+                vanillaFallbackSafe = RecoverFailedDirectOpen("build_failed", reason);
                 return false;
             }
 
@@ -107,7 +113,7 @@ internal static class VanguardOperatorDirectEquipmentScreenEntry
             if (!TryShowScreen(screenController!, out reason))
             {
                 VanguardClientDiagnosticsLog.Warning("VANGUARD_OPERATOR_DIRECT_EQUIPMENT_SCREEN_STATUS", $"direct_entry_show_failed source={source}; reason={reason}");
-                RecoverFailedDirectOpen("show_failed", reason);
+                vanillaFallbackSafe = RecoverFailedDirectOpen("show_failed", reason);
                 return false;
             }
 
@@ -125,7 +131,7 @@ internal static class VanguardOperatorDirectEquipmentScreenEntry
             Exception root = Unwrap(exception);
             reason = root.GetType().Name + ":" + root.Message;
             VanguardClientDiagnosticsLog.Warning("VANGUARD_OPERATOR_DIRECT_EQUIPMENT_SCREEN_STATUS", $"direct_entry_exception source={source}; reason={reason}; wrapper={exception.GetType().Name}; stack={CompactStack(root)}");
-            RecoverFailedDirectOpen("exception", reason);
+            vanillaFallbackSafe = RecoverFailedDirectOpen("exception", reason);
             return false;
         }
         finally
@@ -557,30 +563,35 @@ internal static class VanguardOperatorDirectEquipmentScreenEntry
         }
     }
 
-    private static void RecoverFailedDirectOpen(string stage, string reason)
+    private static bool RecoverFailedDirectOpen(string stage, string reason)
     {
         try
         {
             if (!VanguardOperatorInventoryModeClientState.IsActive)
             {
-                return;
+                return false;
             }
 
             string? operatorId = VanguardOperatorInventoryModeClientState.OperatorId;
             VanguardClientDiagnosticsLog.Warning("VANGUARD_OPERATOR_DIRECT_EQUIPMENT_SCREEN_STATUS", $"direct_entry_recovery_exit_requested stage={stage}; reason={reason}; operator={operatorId ?? "<none>"}");
             VanguardOperatorDirectInventoryLifecycle.MarkFailedOpen($"direct_entry_recovery:{stage}", reason);
-            VanguardOperatorInventoryModeClientState.Exit(skipProfileReload: true);
+            var exitResponse = VanguardOperatorInventoryModeClientState.Exit(skipProfileReload: true);
+            bool inventoryModeCleared = exitResponse.Success && !VanguardOperatorInventoryModeClientState.IsActive;
             if (operatorItemUiContextActive && activeOperatorItemUiContextOwner is not null)
             {
                 RestorePlayerItemUiContext(activeOperatorItemUiContextOwner, $"direct_entry_recovery:{stage}");
             }
 
             VanguardOperatorDirectInventoryExitGuard.RestoreAfterFailedOpen($"direct_entry_recovery:{stage}");
-            VanguardClientDiagnosticsLog.Info("VANGUARD_OPERATOR_DIRECT_EQUIPMENT_SCREEN_STATUS", $"direct_entry_recovery_exit_completed stage={stage}; operator={operatorId ?? "<none>"}");
+            VanguardClientDiagnosticsLog.Info(
+                "VANGUARD_OPERATOR_DIRECT_EQUIPMENT_SCREEN_STATUS",
+                $"direct_entry_recovery_exit_completed stage={stage}; operator={operatorId ?? "<none>"}; vanillaFallbackSafe={inventoryModeCleared}");
+            return inventoryModeCleared;
         }
         catch (Exception exception)
         {
             VanguardClientDiagnosticsLog.Warning("VANGUARD_OPERATOR_DIRECT_EQUIPMENT_SCREEN_STATUS", $"direct_entry_recovery_exit_failed stage={stage}; reason={exception.GetType().Name}: {exception.Message}");
+            return false;
         }
     }
 

@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project>
   <PropertyGroup>
-    <VanguardVersion>0.7.0</VanguardVersion>
-    <VanguardBuildLabel>vanguard-0-7-0</VanguardBuildLabel>
+    <VanguardVersion>0.7.5</VanguardVersion>
+    <VanguardBuildLabel>vanguard-0-7-5</VanguardBuildLabel>
     <VanguardBuildVersionGeneratedDir>$(BaseIntermediateOutputPath)$(Configuration)\$(TargetFramework)\</VanguardBuildVersionGeneratedDir>
     <VanguardBuildVersionGeneratedFile>$(VanguardBuildVersionGeneratedDir)VanguardBuildVersion.g.cs</VanguardBuildVersionGeneratedFile>
   </PropertyGroup>

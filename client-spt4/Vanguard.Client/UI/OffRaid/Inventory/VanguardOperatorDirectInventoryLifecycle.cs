@@ -13,7 +13,6 @@ using HarmonyLib;
 namespace Vanguard.Client.UI.OffRaid.Inventory;
 
 /// <summary>
-/// <summary>
 /// Owns the full lifecycle of the direct Operator inventory screen.
 ///
 /// The vanilla InventoryScreen is not opened through MainMenuController.method_32()
@@ -85,6 +84,50 @@ internal static class VanguardOperatorDirectInventoryLifecycle
             reason = "ready";
             return true;
         }
+    }
+
+    /// <summary>
+    /// Reconciles the one safe stale-state case observed after a direct Operator inventory:
+    /// EFT is already back on the main menu and the server technical inventory session is
+    /// inactive, but the local lifecycle still says Open because the close callback was lost.
+    /// Closing/RebuildingMenu states are deliberately never repaired here.
+    /// </summary>
+    public static bool TryRecoverOrphanedOpenOnMainMenu(string source, bool inventoryModeActive)
+    {
+#if SPT_CLIENT
+        if (inventoryModeActive)
+        {
+            return false;
+        }
+
+        string screen = DescribeCurrentScreen();
+        if (!IsMainMenuScreenDescription(screen))
+        {
+            return false;
+        }
+
+        string? operatorId;
+        lock (Gate)
+        {
+            if (state != DirectInventoryLifecycleState.Open)
+            {
+                return false;
+            }
+
+            operatorId = activeOperatorId;
+            state = DirectInventoryLifecycleState.Idle;
+            activeOperatorId = null;
+            readyAfterUtc = DateTimeOffset.MinValue;
+            lastReason = "orphaned_open_recovered_on_main_menu";
+        }
+
+        VanguardClientDiagnosticsLog.Warning(
+            VanguardBuildVersion.OperatorDirectEquipmentScreenStatusTag,
+            $"direct_inventory_lifecycle_orphaned_open_recovered source={source}; operator={operatorId ?? "<none>"}; inventoryModeActive=False; screen={screen}");
+        return true;
+#else
+        return false;
+#endif
     }
 
     public static bool TryBeginOpen(string source, string? operatorId, out string reason)
@@ -214,6 +257,16 @@ internal static class VanguardOperatorDirectInventoryLifecycle
         {
             return $"screenDiagnosticsFailed={exception.GetType().Name}:{exception.Message}";
         }
+    }
+
+    private static bool IsMainMenuScreenDescription(string screen)
+    {
+        bool hasRootMenu = screen.IndexOf("root=Menu", StringComparison.OrdinalIgnoreCase) >= 0
+            || screen.IndexOf("root=MainMenu", StringComparison.OrdinalIgnoreCase) >= 0;
+        bool hasCurrentMenu = screen.IndexOf("current=Menu", StringComparison.OrdinalIgnoreCase) >= 0
+            || screen.IndexOf("current=MainMenu", StringComparison.OrdinalIgnoreCase) >= 0
+            || screen.IndexOf("MenuScreen", StringComparison.OrdinalIgnoreCase) >= 0;
+        return hasRootMenu && hasCurrentMenu;
     }
 
     private static object? ResolveCurrentScreenSingleton()

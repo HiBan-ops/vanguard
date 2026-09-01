@@ -94,5 +94,8 @@
 
   <ItemGroup>
     <EmbeddedResource Include="Assets\Operators\Portraits\Role\*.jpg" />
+    <EmbeddedResource Include="UI\OffRaid\Assets\vanguard_menu_icon_mask.png">
+      <LogicalName>Vanguard.Client.UI.OffRaid.Assets.vanguard_menu_icon_mask.png</LogicalName>
+    </EmbeddedResource>
   </ItemGroup>
 </Project>

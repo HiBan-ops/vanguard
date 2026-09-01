@@ -6,11 +6,11 @@ namespace Vanguard.Server.Operators.Responses;
 
 public static class VanguardCanonicalRaidHistorySchema
 {
-    public const int CurrentVersion = 2;
-    public const string ProjectionVersion = "canonical_raid_history_v2";
+    public const int CurrentVersion = 3;
+    public const string ProjectionVersion = "canonical_raid_history_v3";
     public const string CoverageBoundary = "forward_committed_entries_only_no_backfill_guarantee";
-    public const string RaidOrderingState = "deterministic_raid_session_id_then_ledger_entry_id_not_chronological";
-    public const string TimestampSemantics = "raw_process_telemetry_not_global_causal_order";
+    public const string RaidOrderingState = "newest_first_ledger_commit_utc_then_exit_boundary_then_ledger_entry_id";
+    public const string TimestampSemantics = "ledger_commit_utc_orders_display_exit_boundary_utc_is_raid_end_observation_not_authoritative_start";
     public const string LocationCoverageState = "location_not_persisted";
     public const string StartTimeCoverageState = "authoritative_start_not_persisted";
     public const string CareerXpCoverageState = "career_xp_not_persisted";
@@ -77,6 +77,7 @@ public sealed record VanguardCanonicalRaidHistoryEntry(
     VanguardCanonicalRaidHistoryDeath? Death,
     VanguardCanonicalRaidHistoryTerminalDeathTruth? TerminalDeathTruth,
     IReadOnlyList<VanguardCanonicalRaidHistorySkillPoint> SkillSessionPoints,
+    IReadOnlyList<VanguardCanonicalRaidHistoryNotableEvent> NotableEvents,
     string DeathSourceCoverageState,
     string SourceFingerprint,
     string TerminalDeathTruthFingerprint);
@@ -130,6 +131,24 @@ public sealed record VanguardCanonicalRaidHistorySkillPoint(
     string SkillId,
     double Progress,
     double PointsEarnedDuringSession);
+
+// Future narrative systems consume these as structured verified observations, not as localized prose.
+// Producers must supply an evidence state, typed actors and machine-readable facts so VisitAPI, relationship
+// logic and UI localization can derive different narratives from the same persisted truth.
+public sealed record VanguardCanonicalRaidHistoryNotableEvent(
+    string EventId,
+    string Kind,
+    DateTimeOffset ObservedAtUtcTelemetry,
+    string EvidenceState,
+    string Source,
+    IReadOnlyList<VanguardCanonicalRaidHistoryEventActor> Actors,
+    IReadOnlyDictionary<string, string> Facts);
+
+public sealed record VanguardCanonicalRaidHistoryEventActor(
+    string Role,
+    string ProfileId,
+    string OperatorId,
+    string DisplayName);
 
 public sealed record VanguardCanonicalRaidHistoryParityCheck(
     bool IsMatch,

@@ -1,36 +1,23 @@
-Vanguard 0.7.0 — public source manifest
+Vanguard 0.7.5 active public-source manifest
 
-Release source projects:
+Canonical public source roots:
 - client-spt4/Vanguard.Client
 - client-spt4/Vanguard.MoreBotsPrePatch
 - server-spt4/Vanguard.Server
-
-Shared build identity:
 - build/Vanguard.Version.props
 
-Repository files:
+Repository documentation/configuration:
 - README.md
 - LICENSE
 - MANIFEST.txt
 - .gitignore
 - client-spt4/Directory.Build.props.example
-- docs/media/spmod/vanguard-banner.png (already published in the repository)
 
-Intentionally excluded:
-- client-spt4/Directory.Build.props (developer machine paths)
-- generated bin/ and obj/ outputs
-- compiled Vanguard DLLs
-- EFT/SPT/BepInEx/third-party binaries
-- private Vanguard KB/history/evidence
-- private development pipeline/scripts
-- handoffs, build proofs, runtime logs and internal reports
-
-Build:
-- copy Directory.Build.props.example to Directory.Build.props locally;
-- configure SptRoot for the local SPT installation;
-- build the three release projects documented in README.md.
+Local-only file:
+- client-spt4/Directory.Build.props (developer machine paths; do not publish)
 
 Policy:
-- active source uses functional subsystem terminology;
-- historical development evidence is not part of this repository;
-- this repository is limited to source/reproducibility material plus the public overview asset already present under docs/media/spmod/.
+- functional subsystem nomenclature only in active/public source
+- historical development evidence remains outside the active/public source tree
+- local development pipeline and knowledge base are not part of the public source repository
+- release changes stay bounded to documented qualified contracts; historical evidence and local tooling remain outside the public repository
