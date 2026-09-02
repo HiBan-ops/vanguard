@@ -12,7 +12,7 @@ You build a roster, prepare Operators Off-Raid, deploy with them, survive togeth
 
 Vanguard is designed around Operators as independent combat entities rather than disposable followers waiting for constant player input.
 
-**Current release line:** Vanguard **0.7.5** for **SPT 4.0.13**. This update consolidates the first wave of post-release compatibility fixes, Off-Raid hardening, Tactical runtime improvements and Operator authority safeguards.
+**Current release line:** Vanguard **0.7.6** for **SPT 4.0.13**. Fixed Contract Market generation for high-level PMC profiles. Operator contract levels are no longer capped and now follow the EFT/SPT experience curve dynamically.
 
 ## What Vanguard adds
 
@@ -57,7 +57,7 @@ Vanguard coordinates the squad-level context required to keep persistent Operato
 
 Individual combat intelligence remains primarily handled by **SAIN**. Vanguard builds squad context and persistence around the existing AI ecosystem rather than attempting to replace it wholesale.
 
-In Vanguard 0.7.5, each Operator starts from a private clone of the **currently loaded SAIN `Normal` personality**. Vanguard then layers the Operator's Persona and Specialty adjustments, plus a small set of Vanguard safety invariants, over that baseline. This means changes to your SAIN `Normal` tuning also influence Vanguard Operators, while Vanguard leaves SAIN's global `Normal` profile untouched.
+In Vanguard 0.7.6, each Operator starts from a private clone of the **currently loaded SAIN `Normal` personality**. Vanguard then layers the Operator's Persona and Specialty adjustments, plus a small set of Vanguard safety invariants, over that baseline. This means changes to your SAIN `Normal` tuning also influence Vanguard Operators, while Vanguard leaves SAIN's global `Normal` profile untouched.
 
 **Planned:** a future Vanguard architecture will use a **dedicated SAIN profile for Operators** rather than deriving from the standard `Normal` personality. This will keep Vanguard's Operator baseline separate from SAIN's preconfigured personality profiles.
 
@@ -81,7 +81,7 @@ The basic workflow is intentionally simple:
 - repeat **Ctrl+Insert** for the positions you want inside the zone; For each slot, you can set priorities with percentage values
 - **Ctrl+S** — save the authored layout.
 
-Saved layouts are reused across raids. With the editor closed and automatic authored-zone occupancy enabled, Vanguard reloads the saved map and activates the relevant authored zone when its owner enters it. In Vanguard 0.7.5, persisted Tactical layouts are consumed by the active raid authority in **standalone/local play, Fika direct-host play and Fika Headless**. Author identity remains part of the live Tactical state, so another player's authored zone does not take control of your Operators.
+Saved layouts are reused across raids. With the editor closed and automatic authored-zone occupancy enabled, Vanguard reloads the saved map and activates the relevant authored zone when its owner enters it. In Vanguard 0.7.6, persisted Tactical layouts are consumed by the active raid authority in **standalone/local play, Fika direct-host play and Fika Headless**. Author identity remains part of the live Tactical state, so another player's authored zone does not take control of your Operators.
 
 Authored slots remain **tactical assignments, not RTS-style direct orders**. Combat, grenade safety, medical needs and other higher-priority authorities can temporarily interrupt a slot assignment; Vanguard can return the Operator to the slot when that assignment becomes valid again.
 
@@ -112,7 +112,7 @@ The release page will list the exact versions qualified for the shipping build.
 
 ## Requirements
 
-Vanguard 0.7.5 targets **SPT 4.0.13** and uses the following dependency model:
+Vanguard 0.7.6 targets **SPT 4.0.13** and uses the following dependency model:
 
 | Component | Status |
 |---|---|
@@ -138,7 +138,7 @@ Vanguard owns the persistent player-allied Operator squad domain. Mods that also
 
 Compatibility is therefore classified by authority and runtime evidence rather than by “it starts without crashing” alone.
 
-**Menu Overhaul is supported in Vanguard 0.7.5.** Vanguard integrates its own menu entry while leaving Menu Overhaul authoritative over the surrounding menu layout and presentation.
+**Menu Overhaul is supported in Vanguard 0.7.6.** Vanguard integrates its own menu entry while leaving Menu Overhaul authoritative over the surrounding menu layout and presentation.
 
 The SP-Mod page carries the release-specific compatibility matrix and exact tested versions.
 
@@ -223,7 +223,7 @@ These are **post-release roadmap goals**, not current Vanguard features. No deli
 
 The public repository is intended to contain the minimal source and build material required to reproduce Vanguard's released binaries.
 
-For Vanguard 0.7.5, build against an **SPT 4.0.13** installation. Copy `client-spt4/Directory.Build.props.example` to `client-spt4/Directory.Build.props`, set `SptRoot`, and keep that local file out of commits. The three shipping projects share their release identity through `build/Vanguard.Version.props`.
+For Vanguard 0.7.6, build against an **SPT 4.0.13** installation. Copy `client-spt4/Directory.Build.props.example` to `client-spt4/Directory.Build.props`, set `SptRoot`, and keep that local file out of commits. The three shipping projects share their release identity through `build/Vanguard.Version.props`.
 
 Internal development KBs, handoffs, runtime evidence and private project artifacts are intentionally excluded from the public repository.
 

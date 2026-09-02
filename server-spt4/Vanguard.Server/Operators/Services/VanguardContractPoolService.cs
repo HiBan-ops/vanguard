@@ -488,14 +488,33 @@ public sealed class VanguardContractPoolService(
         }
     }
 
-    private static int GenerateOperatorLevel(Random random, int playerLevel)
+    private int GenerateOperatorLevel(Random random, int playerLevel)
     {
-        var minimum = Math.Max(1, playerLevel - (playerLevel < 15 ? 2 : 5));
-        var maximum = Math.Min(60, playerLevel + (playerLevel < 15 ? 4 : 8));
+        int normalizedPlayerLevel = Math.Max(playerLevel, 1);
+
+        int minimum = Math.Max(
+            1,
+            normalizedPlayerLevel - (normalizedPlayerLevel < 15 ? 2 : 5));
+
+        int requestedMaximum =
+            normalizedPlayerLevel + (normalizedPlayerLevel < 15 ? 4 : 8);
+
         if (random.NextDouble() < 0.12)
         {
-            maximum = Math.Min(60, maximum + 5);
+            requestedMaximum += 5;
         }
+
+        // The loaded EFT/SPT experience curve owns the representable level ceiling; never replace it with a numeric cap.
+        VanguardOperatorExperienceWindow ceiling =
+            experienceCurve.ResolveLevelWindow(requestedMaximum);
+
+        int maximum = ceiling.IsAuthoritative
+            ? ceiling.Level
+            : requestedMaximum;
+
+        // Keep malformed or out-of-range profile levels fail-safe without inventing a fallback ceiling.
+        minimum = Math.Min(minimum, maximum);
+
         return random.Next(minimum, maximum + 1);
     }
 

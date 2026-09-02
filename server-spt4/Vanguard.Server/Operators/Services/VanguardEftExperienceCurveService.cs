@@ -42,7 +42,13 @@ public sealed class VanguardEftExperienceCurveService(
 
         level = Math.Min(level, table.Length);
         int minimum = GetExperienceForLevel(table, level);
-        int next = level < table.Length ? GetExperienceForLevel(table, level + 1) : minimum + Math.Max(1, table[^1]);
+        // The terminal EFT level has no next-level XP window: keep XP at the authoritative cumulative floor.
+        if (level >= table.Length)
+        {
+            return minimum;
+        }
+
+        int next = GetExperienceForLevel(table, level + 1);
         return next > minimum + 1 ? random.Next(minimum, next) : minimum;
     }
 
