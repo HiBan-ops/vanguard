@@ -202,7 +202,7 @@ public sealed class VanguardCanonicalRaidHistoryService(ISptLogger<VanguardCanon
             death,
             terminalDeathTruth,
             skillPoints,
-            // Schema v3 reserves a structured extension point, but 0.7.5 has no qualified producer for
+            // Schema v3 reserves a structured extension point, but the current schema has no qualified producer for
             // rescue/medical/notable-combat observations yet. Empty is intentional: Vanguard never invents
             // narrative truth merely because the presentation contract can carry it.
             Array.Empty<VanguardCanonicalRaidHistoryNotableEvent>(),

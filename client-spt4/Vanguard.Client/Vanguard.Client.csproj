@@ -82,6 +82,10 @@
       <HintPath>$(GameManagedPath)\UnityEngine.IMGUIModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <Reference Include="UnityEngine.TextRenderingModule">
+      <HintPath>$(GameManagedPath)\UnityEngine.TextRenderingModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
     <Reference Include="UnityEngine.ImageConversionModule">
       <HintPath>$(GameManagedPath)\UnityEngine.ImageConversionModule.dll</HintPath>
       <Private>false</Private>
@@ -96,6 +100,9 @@
     <EmbeddedResource Include="Assets\Operators\Portraits\Role\*.jpg" />
     <EmbeddedResource Include="UI\OffRaid\Assets\vanguard_menu_icon_mask.png">
       <LogicalName>Vanguard.Client.UI.OffRaid.Assets.vanguard_menu_icon_mask.png</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="UI\OffRaid\Assets\vanguard_offraid_command_surface.png">
+      <LogicalName>Vanguard.Client.UI.OffRaid.Assets.vanguard_offraid_command_surface.png</LogicalName>
     </EmbeddedResource>
   </ItemGroup>
 </Project>

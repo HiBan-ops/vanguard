@@ -177,7 +177,7 @@ internal static class VanguardTacticalAuthoringStore
         return mapFile;
     }
 
-    // 0.7.0 renamed two display-only JSON fields to player-neutral names. Existing authoring maps are
+    // A prior public schema renamed two display-only JSON fields to player-neutral names. Existing authoring maps are
     // still schema-compatible, so normalize only those property labels before deserialization instead of
     // rejecting or rewriting the rest of the file. The old labels are assembled from character codes so
     // Vanguard source itself does not retain the deprecated vocabulary. A normal Save writes only new names.

@@ -3,16 +3,8 @@
 // Responsibility: Defines the user/configuration surface for Runtime Settings Scope Catalog in the F12/runtime options.
 // Flow: BepInEx/F12 values are bound, normalized and exposed through getters/snapshots; raid-scoped settings are synchronized to the process that owns runtime execution.
 // Authority boundary: Configuration supplies policy inputs only; changing a value does not itself perform gameplay or persistence mutation.
-// Invariant: Defaults preserve the published 0.7.0 behavior and synchronized values remain bounded to their declared scope.
+// Invariant: Defaults preserve the established public behavior and synchronized values remain bounded to their declared scope.
 namespace Vanguard.Client.Options;
-
-internal enum VanguardRuntimeSettingScope
-{
-    Local = 0,
-    PlayerScoped = 1,
-    RaidScoped = 2,
-    LegacyUnused = 3
-}
 
 /// <summary>
 /// Authoritative F12 governance inventory. Tactical Authoring options stay in their dedicated

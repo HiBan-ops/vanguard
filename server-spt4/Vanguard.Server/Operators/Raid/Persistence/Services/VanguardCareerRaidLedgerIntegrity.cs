@@ -11,7 +11,7 @@ namespace Vanguard.Server.Operators.Raid.Persistence.Services;
 /// <summary>
 /// Identity and fingerprint authority for the durable Career raid ledger. New records use functional,
 /// schema-oriented identifiers. Compatibility checks deliberately validate the semantic fields of older
-/// identifiers so existing 0.6.7 profiles remain readable without carrying development lineage into new writes.
+/// identifiers so existing legacy profiles remain readable without carrying development lineage into new writes.
 /// Raw fingerprints always remain verifiable against the exact bytes represented by a stored entry.
 /// </summary>
 public static class VanguardCareerRaidLedgerIntegrity

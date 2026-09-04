@@ -555,23 +555,6 @@ internal static class VanguardExternalAuthorityAdapter
         return result;
     }
 
-    [Obsolete("Vanguard: stale SAIN exit is observation-only and must be arbitrated by VanguardMainIntentScheduler.")]
-    public static VanguardExternalPreemptResult RequestGeneralStaleSainExit(BotOwner? botOwner, OperatorDecisionSnapshot snapshot, string reason, TimeSpan ttl, DateTimeOffset now)
-    {
-        snapshot ??= OperatorDecisionSnapshot.Empty;
-        var before = ReadActivity(botOwner, snapshot, now, log: true, reason: "general_sain_stale_observe_only_" + Safe(reason));
-        var outcome = botOwner == null
-            ? VanguardExternalPreemptOutcome.FailedBotOwnerMissing
-            : VanguardExternalPreemptOutcome.RejectedCombatOwner;
-        string blockingReason = botOwner == null
-            ? "botowner_missing"
-            : "observe_only_scheduler_must_arbitrate";
-        var result = new VanguardExternalPreemptResult(outcome, before, before, "mutations=none;legacyApiNeutralized=true", blockingReason);
-        LogThrottled("generalSainStaleObserveOnly|" + Normalize(snapshot.BotProfileId) + "|" + Safe(reason), now, PreemptLogInterval,
-            $"VANGUARD_STALE_SAIN_LEGACY_API_NEUTRALIZED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; requestReason={Safe(reason)}; outcome={result.Outcome}; mutation=false; doctrine=observer_publishes_state_scheduler_owns_terminal_cleanup; tag={VanguardPrimaryExecutionContract.SainWindowStatusTag}; adapterTag={StatusTag}");
-        return result;
-    }
-
 
 
     public static VanguardExternalPreemptResult RequestCombatWindowNoProductionCleanup(BotOwner? botOwner, OperatorDecisionSnapshot snapshot, string reason, TimeSpan ttl, DateTimeOffset now)
@@ -664,23 +647,6 @@ internal static class VanguardExternalAuthorityAdapter
         return result;
     }
 
-    [Obsolete("Vanguard: no-fire recovery is observation-only; destructive hands/SAIN recovery is forbidden inside the protected combat window.")]
-    public static VanguardExternalPreemptResult RequestCombatNoFireRecovery(BotOwner? botOwner, OperatorDecisionSnapshot snapshot, string reason, TimeSpan ttl, DateTimeOffset now)
-    {
-        snapshot ??= OperatorDecisionSnapshot.Empty;
-        var before = ReadActivity(botOwner, snapshot, now, log: true, reason: "combat_no_fire_observe_only_" + Safe(reason));
-        var outcome = botOwner == null
-            ? VanguardExternalPreemptOutcome.FailedBotOwnerMissing
-            : VanguardExternalPreemptOutcome.RejectedCombatOwner;
-        string blockingReason = botOwner == null
-            ? "botowner_missing"
-            : "observe_only_no_destructive_recovery";
-        var result = new VanguardExternalPreemptResult(outcome, before, before, "mutations=none;legacyApiNeutralized=true", blockingReason);
-        LogThrottled("combatNoFireObserveOnly|" + Normalize(snapshot.BotProfileId) + "|" + Safe(reason), now, PreemptLogInterval,
-            $"VANGUARD_COMBAT_NO_FIRE_LEGACY_API_NEUTRALIZED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; requestReason={Safe(reason)}; outcome={result.Outcome}; mutation=false; doctrine=no_fire_is_progress_observation_not_hands_or_sain_reset; tag={VanguardPrimaryExecutionContract.SainWindowStatusTag}; adapterTag={StatusTag}");
-        return result;
-    }
-
 
     public static VanguardExternalPreemptResult RequestMedicalBreakContact(BotOwner? botOwner, OperatorDecisionSnapshot snapshot, string reason, TimeSpan ttl, DateTimeOffset now)
     {
@@ -717,25 +683,6 @@ internal static class VanguardExternalAuthorityAdapter
         var result = new VanguardExternalPreemptResult(VanguardExternalPreemptOutcome.Granted, before, after, "mutations=" + string.Join(",", mutations), reason);
         LogThrottled("medicalBreakContact|" + Normalize(snapshot.BotProfileId) + "|" + Safe(reason), now, PreemptLogInterval,
             $"VANGUARD_MEDICAL_BREAK_CONTACT_APPLIED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; requestReason={Safe(reason)}; outcome={result.Outcome}; {result.Summary}; tag={CombatBindCohesionRecoveryStatusTag}; adapterTag={StatusTag}");
-        return result;
-    }
-
-
-
-    [Obsolete("Vanguard: awareness must notify VanguardMainIntentScheduler; direct sector-alert mutations are forbidden.")]
-    public static VanguardExternalPreemptResult RequestSquadContactSectorAlert(BotOwner? botOwner, OperatorDecisionSnapshot snapshot, string contactTargetId, string reason, TimeSpan ttl, DateTimeOffset now)
-    {
-        snapshot ??= OperatorDecisionSnapshot.Empty;
-        var before = ReadActivity(botOwner, snapshot, now, log: true, reason: "squad_contact_sector_alert_observe_only_" + Safe(reason));
-        var outcome = botOwner == null
-            ? VanguardExternalPreemptOutcome.FailedBotOwnerMissing
-            : VanguardExternalPreemptOutcome.RejectedCombatOwner;
-        string blockingReason = botOwner == null
-            ? "botowner_missing"
-            : "scheduler_target_assignment_required";
-        var result = new VanguardExternalPreemptResult(outcome, before, before, "mutations=none;legacyApiNeutralized=true", blockingReason);
-        LogThrottled("squadContactSectorAlertNeutralized|" + Normalize(snapshot.BotProfileId) + "|" + Safe(contactTargetId), now, PreemptLogInterval,
-            $"VANGUARD_SQUAD_CONTACT_LEGACY_API_NEUTRALIZED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; contactTarget={Safe(contactTargetId)}; requestReason={Safe(reason)}; outcome={result.Outcome}; mutation=false; doctrine=awareness_notifies_scheduler_once_then_sain_executes; tag={VanguardPrimaryExecutionContract.SainWindowStatusTag}; adapterTag={StatusTag}");
         return result;
     }
 
@@ -1354,15 +1301,6 @@ internal static class VanguardExternalAuthorityAdapter
         }
 
         return VanguardExternalPreemptOutcome.Granted;
-    }
-
-
-    private static bool ShouldOverrideResidualCombatForMedical(OperatorDecisionSnapshot snapshot, VanguardExternalActivitySnapshot activity, string reason, out string overrideReason)
-    {
-        // Vanguard: stale SAIN combat is demoted by the general external activity classifier.
-        // The medical pipeline no longer needs a surgery-specific override to bypass combat.
-        overrideReason = "replaced_by_general_sain_stale_exit";
-        return false;
     }
 
     private static bool IsOrbitBlockingForHardReturn(VanguardExternalActivitySnapshot after)

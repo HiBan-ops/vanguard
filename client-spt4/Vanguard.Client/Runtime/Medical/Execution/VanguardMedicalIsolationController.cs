@@ -478,14 +478,6 @@ internal static class VanguardMedicalIsolationController
         LogThrottled(key + "|release|" + Safe(reason), now, $"VANGUARD_MEDICAL_ISOLATION_RELEASED botProfile={key}; reason={Safe(reason)}; {releaseSummary}; externalAuthority=returned; tag={StatusTag}");
     }
 
-
-    private static bool TryAcquireDirectStationaryIsolation(VanguardExecutionLeaseState lease, BotOwner botOwner, OperatorDecisionSnapshot snapshot, DateTimeOffset now, out IsolationState state, out string summary)
-    {
-        state = null!;
-        summary = "isolation=failed;reason=go_cover_required_direct_stationary_disabled";
-        return false;
-    }
-
     private static bool SameMedicalTarget(IsolationState state, VanguardExecutionLeaseState lease)
     {
         return string.Equals(Normalize(state.TargetPart), Normalize(lease.TargetPart), StringComparison.OrdinalIgnoreCase)

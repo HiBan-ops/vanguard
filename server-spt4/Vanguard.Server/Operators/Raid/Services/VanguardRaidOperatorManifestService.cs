@@ -264,11 +264,6 @@ public sealed class VanguardRaidOperatorManifestService(
             VanguardOperatorLootTargetPolicyService.NormalizeOrDefault(operatorProfile.LootTargetPolicy));
     }
 
-    private static bool IsRecovering(VanguardOperatorMedicalRecord? medical, DateTimeOffset now)
-    {
-        return medical?.RecoveryUntilUtc is DateTimeOffset until && until > now;
-    }
-
     private static string ResolveDisplayName(VanguardOperatorProfile operatorProfile, VanguardActiveServiceRecord activeRecord)
     {
         return Normalize(

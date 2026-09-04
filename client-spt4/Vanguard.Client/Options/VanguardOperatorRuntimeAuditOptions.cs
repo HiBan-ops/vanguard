@@ -9,7 +9,7 @@ using BepInEx.Configuration;
 // Responsibility: defines the F12-facing runtime diagnostics and raid-scoped behavioral tuning surface, then projects settings into the authority synchronization DTOs.
 // Flow: BepInEx/F12 values are bound, normalized and exposed through getters/snapshots; raid-scoped settings are synchronized to the process that owns runtime execution.
 // Authority boundary: diagnostic switches control observability only; behavioral settings become authoritative only through their documented player/raid synchronization path.
-// Invariant: defaults preserve the published 0.7.0 behavior, including Headless GC troubleshooting disabled by default and combat-pursuit cohesion at 32 m.
+// Invariant: defaults preserve the established public behavior, including Headless GC troubleshooting disabled by default and combat-pursuit cohesion at 32 m.
 
 namespace Vanguard.Client.Options;
 

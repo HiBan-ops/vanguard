@@ -94,6 +94,7 @@ public sealed class VanguardOperatorInventoryModeService(
                 storageProfileId,
                 operatorProfile.OperatorId,
                 displayName,
+                FirstNonEmpty(operatorProfile.Identity.Callsign, displayName),
                 inventoryProfileId,
                 profilePath,
                 sessionProfile,
@@ -114,6 +115,7 @@ public sealed class VanguardOperatorInventoryModeService(
                 StorageProfileId = storageProfileId,
                 OperatorId = session.OperatorId,
                 OperatorDisplayName = session.OperatorDisplayName,
+                OperatorCallsign = session.OperatorCallsign,
                 OperatorInventoryProfileId = session.OperatorInventoryProfileId,
                 Summary = summary
             };
@@ -170,6 +172,7 @@ public sealed class VanguardOperatorInventoryModeService(
                 StorageProfileId = session.StorageProfileId,
                 OperatorId = session.OperatorId,
                 OperatorDisplayName = session.OperatorDisplayName,
+                OperatorCallsign = session.OperatorCallsign,
                 OperatorInventoryProfileId = session.OperatorInventoryProfileId,
                 Summary = summary
             };
@@ -252,6 +255,7 @@ public sealed class VanguardOperatorInventoryModeService(
                 StorageProfileId = updatedSession.StorageProfileId,
                 OperatorId = updatedSession.OperatorId,
                 OperatorDisplayName = updatedSession.OperatorDisplayName,
+                OperatorCallsign = updatedSession.OperatorCallsign,
                 OperatorInventoryProfileId = updatedSession.OperatorInventoryProfileId,
                 Summary = summary
             };
@@ -838,6 +842,7 @@ public sealed class VanguardOperatorInventoryModeService(
             StorageProfileId = session.StorageProfileId,
             OperatorId = session.OperatorId,
             OperatorDisplayName = session.OperatorDisplayName,
+            OperatorCallsign = session.OperatorCallsign,
             OperatorInventoryProfileId = session.OperatorInventoryProfileId,
             Summary = summary
         };
@@ -3325,18 +3330,6 @@ public sealed class VanguardOperatorInventoryModeService(
         {
             ["_id"] = id,
             ["_tpl"] = tpl
-        };
-    }
-
-    private static JsonObject CreateChildItem(string id, string tpl, string parentId, string slotId)
-    {
-        return new JsonObject
-        {
-            ["_id"] = id,
-            ["_tpl"] = tpl,
-            ["parentId"] = parentId,
-            ["slotId"] = slotId,
-            ["upd"] = new JsonObject { ["StackObjectsCount"] = 1 }
         };
     }
 

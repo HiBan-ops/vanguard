@@ -4,7 +4,6 @@ using Vanguard.Client;
 using Vanguard.Client.Diagnostics;
 using Vanguard.Client.UI.OffRaid;
 using Vanguard.Client.UI.OffRaid.Inventory;
-using Vanguard.Client.UI.InRaid.Localization;
 using Vanguard.Client.Raid.Career;
 using Vanguard.Client.Raid.Patches;
 using Vanguard.Client.Raid.Services;
@@ -52,9 +51,9 @@ namespace Vanguard.Client.Bootstrap;
 [BepInDependency("com.chazut.orbit", BepInDependency.DependencyFlags.SoftDependency)]
 [BepInDependency("me.skwizzy.lootingbots", BepInDependency.DependencyFlags.SoftDependency)]
 [BepInDependency("com.SPT.custom", BepInDependency.DependencyFlags.SoftDependency)]
-// Menu Overhaul is optional. The soft dependency gives BepInEx a deterministic load-order hint when
-// both plugins are present, while Vanguard still compiles and runs without referencing its assembly.
-[BepInDependency(Vanguard.Client.Compatibility.VanguardMenuOverhaulCompat.PluginGuid, BepInDependency.DependencyFlags.SoftDependency)]
+// Preserve the already-validated optional load-order hint for the current external menu owner.
+// Main-menu compatibility itself is resolved generically from VanguardMainMenuInterop capabilities.
+[BepInDependency(Vanguard.Client.Compatibility.VanguardMainMenuInterop.PreferredLoadOrderPluginGuid, BepInDependency.DependencyFlags.SoftDependency)]
 public sealed class VanguardPlugin : BaseUnityPlugin
 #else
 public sealed class VanguardPlugin
@@ -81,6 +80,8 @@ public sealed class VanguardPlugin
 #if SPT_CLIENT
             VanguardOperatorRuntimeAuditOptions.Bind(Config);
             VanguardTacticalAuthoringOptions.Bind(Config);
+            VanguardOperatorInventorySessionIndicator.Bind(Config);
+            VanguardMainMenuPlacementOptions.Bind(Config);
             VanguardOperatorRuntimeAuditSyncService.Initialize();
             VanguardClientDiagnosticsLog.Operational(
                 "VANGUARD_STARTUP",
@@ -89,6 +90,8 @@ public sealed class VanguardPlugin
             EnablePatch("VanguardOffRaidMenuPatch", () => new VanguardOffRaidMenuPatch().Enable());
             EnablePatch("VanguardOperatorInventoryGetProfilesPatch", () => new VanguardOperatorInventoryGetProfilesPatch().Enable());
             EnablePatch("VanguardOperatorInventoryProfileRebindPatch", () => new VanguardOperatorInventoryProfileRebindPatch().Enable());
+            EnablePatch("VanguardOperatorContextualRagfairNavigationPatch", () => new VanguardOperatorContextualRagfairNavigationPatch().Enable());
+            EnablePatch("VanguardOperatorWeaponModdingNavigationPatch", () => new VanguardOperatorWeaponModdingNavigationPatch().Enable());
             EnablePatch("VanguardOperatorEditBuildControllerPatch", () => new VanguardOperatorEditBuildControllerPatch().Enable());
             EnablePatch("VanguardOperatorEquipmentBuildsControllerPatch", () => new VanguardOperatorEquipmentBuildsControllerPatch().Enable());
             EnablePatch("VanguardOperatorInventoryScreenReturnPatch", () => new VanguardOperatorInventoryScreenReturnPatch().Enable());
@@ -826,6 +829,17 @@ public sealed class VanguardPlugin
         if (VanguardHeadlessPostRaidQuiescenceService.IsActive)
         {
             return;
+        }
+
+        try
+        {
+            VanguardOperatorInventorySessionIndicator.Draw();
+        }
+        catch (Exception exception)
+        {
+            VanguardClientDiagnosticsLog.Warning(
+                VanguardBuildVersion.OperatorInventoryNavigationGuardStatusTag,
+                $"operator inventory session indicator failed closed: {exception.GetType().Name}: {exception.Message}; sessionUnaffected=true");
         }
 
         try

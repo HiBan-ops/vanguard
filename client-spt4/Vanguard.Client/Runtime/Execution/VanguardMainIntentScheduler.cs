@@ -3374,22 +3374,6 @@ internal static class VanguardMainIntentScheduler
         }
     }
 
-    private static void ExtendCombatHardSegment(VanguardPrimaryExecutionWindowState active, DateTimeOffset now, float requestedSeconds)
-    {
-        if (active == null)
-        {
-            return;
-        }
-
-        DateTimeOffset requested = now + TimeSpan.FromSeconds(Math.Max(1.0f, requestedSeconds));
-        DateTimeOffset cap = active.AbsoluteUntilUtc == DateTimeOffset.MinValue ? requested : active.AbsoluteUntilUtc;
-        DateTimeOffset candidate = Min(cap, requested);
-        if (active.HardUntilUtc == DateTimeOffset.MinValue || candidate > active.HardUntilUtc)
-        {
-            active.HardUntilUtc = candidate;
-        }
-    }
-
     private static DateTimeOffset Min(DateTimeOffset left, DateTimeOffset right)
     {
         if (left == DateTimeOffset.MinValue)

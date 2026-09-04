@@ -12,19 +12,67 @@ using HarmonyLib;
 using UnityEngine;
 #endif
 
-// Responsibility: bridges the Vanguard Operator inventory workflow into EFT equipment screens and coordinates the return path to the player profile/menu.
-// Flow: Producer code populates these shapes, policy/service code consumes them, and no orchestration is performed by the model itself.
-// Authority boundary: it drives UI/profile loading only; the server inventory-mode service remains authoritative for session/commit/exit state.
-// Invariant: any server-confirmed exit triggers player-profile restoration regardless of the separate best-effort direct-commit result.
+// Responsibility: owns the captured direct Operator InventoryScreen lifecycle, including persistent off-raid navigation, explicit completion, and player-authority restoration.
+// Flow: the initial Operator controllers are captured once; compatible navigation preserves that live context; Character creates a fresh one-shot InventoryScreen controller from it; explicit Main Menu or an unleased close performs commit, server exit, and the proven player-menu reload.
+// Authority boundary: client presentation/lifecycle orchestration only; server inventory mode and commit persistence remain authoritative on the server.
+// Invariant: closed EFT screen-controller instances are never re-queued; one captured Operator session can complete at most once, and any server-confirmed exit always restores player profile/menu authority even if the best-effort direct snapshot fails.
 
 namespace Vanguard.Client.UI.OffRaid.Inventory;
 
 internal static class VanguardOperatorDirectEquipmentScreenEntry
 {
+    private static readonly object ActiveSessionGate = new();
     private static bool openInProgress;
     private static bool closeInProgress;
     private static object? activeOperatorItemUiContextOwner;
     private static bool operatorItemUiContextActive;
+    private static ActiveDirectSessionContext? activeDirectSession;
+    private static int activeDirectSessionGeneration;
+
+    private sealed class ActiveDirectSessionContext
+    {
+        public ActiveDirectSessionContext(
+            object screenController,
+            object mainMenuController,
+            object? session,
+            object? operatorProfile,
+            object? inventoryController,
+            object? healthController,
+            string? operatorProfileId,
+            string? operatorId,
+            int generation)
+        {
+            ScreenController = screenController;
+            MainMenuController = mainMenuController;
+            Session = session;
+            OperatorProfile = operatorProfile;
+            InventoryController = inventoryController;
+            HealthController = healthController;
+            OperatorProfileId = operatorProfileId;
+            OperatorId = operatorId;
+            Generation = generation;
+        }
+
+        public object ScreenController { get; set; }
+
+        public object MainMenuController { get; }
+
+        public object? Session { get; }
+
+        public object? OperatorProfile { get; }
+
+        public object? InventoryController { get; }
+
+        public object? HealthController { get; }
+
+        public string? OperatorProfileId { get; }
+
+        public string? OperatorId { get; }
+
+        public int Generation { get; }
+
+        public bool CompletionStarted { get; set; }
+    }
 
     public static bool TryOpenFromCurrentMainMenu(string source, out string reason)
     {
@@ -97,7 +145,7 @@ internal static class VanguardOperatorDirectEquipmentScreenEntry
 
         try
         {
-            if (!TryBuildOperatorInventoryScreen(mainMenuController, out object? screenController, out object? session, out object? operatorProfile, out object? inventoryController, out string? operatorProfileId, out reason))
+            if (!TryBuildOperatorInventoryScreen(mainMenuController, out object? screenController, out object? session, out object? operatorProfile, out object? inventoryController, out object? healthController, out string? operatorProfileId, out reason))
             {
                 VanguardClientDiagnosticsLog.Warning("VANGUARD_OPERATOR_DIRECT_EQUIPMENT_SCREEN_STATUS", $"direct_entry_build_failed source={source}; reason={reason}");
                 vanillaFallbackSafe = RecoverFailedDirectOpen("build_failed", reason);
@@ -109,7 +157,15 @@ internal static class VanguardOperatorDirectEquipmentScreenEntry
                 inventoryController,
                 VanguardOperatorInventoryModeClientState.OperatorId,
                 "direct_entry_controller_built");
-            AttachCloseHandler(screenController!, mainMenuController, session, operatorProfile, inventoryController, operatorProfileId);
+            ActiveDirectSessionContext directSession = CaptureActiveDirectSession(
+                screenController!,
+                mainMenuController,
+                session,
+                operatorProfile,
+                inventoryController,
+                healthController,
+                operatorProfileId);
+            AttachCloseHandler(directSession);
             if (!TryShowScreen(screenController!, out reason))
             {
                 VanguardClientDiagnosticsLog.Warning("VANGUARD_OPERATOR_DIRECT_EQUIPMENT_SCREEN_STATUS", $"direct_entry_show_failed source={source}; reason={reason}");
@@ -141,12 +197,13 @@ internal static class VanguardOperatorDirectEquipmentScreenEntry
         }
     }
 
-    private static bool TryBuildOperatorInventoryScreen(object mainMenuController, out object? screenController, out object? session, out object? operatorProfile, out object? inventoryControllerForCommit, out string? operatorProfileId, out string reason)
+    private static bool TryBuildOperatorInventoryScreen(object mainMenuController, out object? screenController, out object? session, out object? operatorProfile, out object? inventoryControllerForCommit, out object? healthControllerForReturn, out string? operatorProfileId, out string reason)
     {
         screenController = null;
         session = null;
         operatorProfile = null;
         inventoryControllerForCommit = null;
+        healthControllerForReturn = null;
         operatorProfileId = null;
         reason = "unknown";
 
@@ -196,6 +253,7 @@ internal static class VanguardOperatorDirectEquipmentScreenEntry
         {
             return false;
         }
+        healthControllerForReturn = healthController;
         object? questController = ResolveMember(mainMenuController, "LocalQuestControllerClass");
         bool profileUpdaterBound = TryRegisterOperatorProfileUpdater(
             session,
@@ -264,23 +322,56 @@ internal static class VanguardOperatorDirectEquipmentScreenEntry
         return true;
     }
 
-    private static void AttachCloseHandler(object screenController, object mainMenuController, object? session, object? operatorProfile, object? inventoryController, string? operatorProfileId)
+    private static ActiveDirectSessionContext CaptureActiveDirectSession(
+        object screenController,
+        object mainMenuController,
+        object? session,
+        object? operatorProfile,
+        object? inventoryController,
+        object? healthController,
+        string? operatorProfileId)
+    {
+        ActiveDirectSessionContext context;
+        lock (ActiveSessionGate)
+        {
+            activeDirectSessionGeneration++;
+            context = new ActiveDirectSessionContext(
+                screenController,
+                mainMenuController,
+                session,
+                operatorProfile,
+                inventoryController,
+                healthController,
+                operatorProfileId,
+                VanguardOperatorInventoryModeClientState.OperatorId,
+                activeDirectSessionGeneration);
+            activeDirectSession = context;
+        }
+
+        VanguardClientDiagnosticsLog.Info(
+            VanguardBuildVersion.OperatorInventoryNavigationGuardStatusTag,
+            $"session_context_captured operator={context.OperatorId ?? "<none>"}; profile={context.OperatorProfileId ?? "<none>"}; generation={context.Generation}; screenController={context.ScreenController.GetType().FullName ?? context.ScreenController.GetType().Name}");
+        return context;
+    }
+
+    private static void AttachCloseHandler(ActiveDirectSessionContext context)
     {
         try
         {
-            EventInfo? closeEvent = screenController.GetType().GetEvent("OnClose", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            EventInfo? closeEvent = context.ScreenController.GetType().GetEvent("OnClose", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
             if (closeEvent == null || closeEvent.EventHandlerType == null)
             {
                 VanguardClientDiagnosticsLog.Warning("VANGUARD_OPERATOR_DIRECT_EQUIPMENT_SCREEN_STATUS", "direct_entry_close_handler_not_attached reason=OnClose_event_not_found");
                 return;
             }
 
-            Action closeAction = async () => await FinishOperatorEquipmentSessionAsync(mainMenuController, session, operatorProfile, inventoryController, operatorProfileId);
+            object screenControllerAtAttach = context.ScreenController;
+            Action closeAction = async () => await HandleDirectScreenClosedAsync(context, screenControllerAtAttach, "direct_entry_close");
             Delegate handler = closeEvent.EventHandlerType == typeof(Action)
                 ? closeAction
                 : Delegate.CreateDelegate(closeEvent.EventHandlerType, closeAction.Target, closeAction.Method);
-            closeEvent.AddEventHandler(screenController, handler);
-            VanguardClientDiagnosticsLog.Info("VANGUARD_OPERATOR_DIRECT_EQUIPMENT_SCREEN_STATUS", "direct_entry_close_handler_attached");
+            closeEvent.AddEventHandler(screenControllerAtAttach, handler);
+            VanguardClientDiagnosticsLog.Info("VANGUARD_OPERATOR_DIRECT_EQUIPMENT_SCREEN_STATUS", $"direct_entry_close_handler_attached generation={context.Generation}; screenController={FormatTypeName(screenControllerAtAttach.GetType())}");
         }
         catch (Exception exception)
         {
@@ -288,91 +379,451 @@ internal static class VanguardOperatorDirectEquipmentScreenEntry
         }
     }
 
-    private static async Task FinishOperatorEquipmentSessionAsync(object mainMenuController, object? session, object? operatorProfile, object? inventoryController, string? operatorProfileId)
+    private static async Task HandleDirectScreenClosedAsync(ActiveDirectSessionContext context, object screenController, string source)
     {
-        // EquipmentBuildsScreen is a native child flow of the direct Operator inventory.
-        // Its opening closes/hides InventoryScreen, but that transition is not a real
-        // Vanguard inventory exit and must not commit/reload the player profile.
-        if (VanguardOperatorEquipmentBuildsFlow.ShouldDeferDirectInventoryClose("direct_entry_close"))
+        bool staleController;
+        lock (ActiveSessionGate)
+        {
+            staleController = !ReferenceEquals(activeDirectSession, context)
+                || !ReferenceEquals(context.ScreenController, screenController);
+        }
+
+        if (staleController)
         {
             VanguardClientDiagnosticsLog.Info(
-                "VANGUARD_OPERATOR_DIRECT_EQUIPMENT_SCREEN_STATUS",
-                $"direct_entry_close_deferred operator={VanguardOperatorInventoryModeClientState.OperatorId ?? "<none>"}; reason=native_equipment_builds_subflow; commitRequested=false; playerReloadRequested=false");
+                VanguardBuildVersion.OperatorInventoryNavigationGuardStatusTag,
+                $"session_stale_screen_close_ignored source={source}; operator={context.OperatorId ?? "<none>"}; generation={context.Generation}; screenController={FormatTypeName(screenController.GetType())}; session_preserved={VanguardOperatorInventoryModeClientState.IsActive}");
             return;
+        }
+
+        await FinishOperatorEquipmentSessionAsync(context, source, explicitExit: false);
+    }
+
+    public static bool IsActiveOperatorInventoryScreenController(object? screenController)
+    {
+        lock (ActiveSessionGate)
+        {
+            return screenController != null
+                && activeDirectSession != null
+                && ReferenceEquals(activeDirectSession.ScreenController, screenController)
+                && VanguardOperatorInventoryModeClientState.IsActive;
+        }
+    }
+
+    public static bool TryReturnToActiveOperatorInventory(string source, out string reason)
+    {
+        reason = "unknown";
+        ActiveDirectSessionContext? context;
+        lock (ActiveSessionGate)
+        {
+            context = activeDirectSession;
+            if (context == null)
+            {
+                reason = "active_direct_session_context_missing";
+                return false;
+            }
+
+            if (context.CompletionStarted)
+            {
+                reason = "active_direct_session_completion_in_progress";
+                return false;
+            }
+        }
+
+        if (!VanguardOperatorInventoryModeClientState.IsActive)
+        {
+            reason = "inventory_mode_inactive";
+            return false;
+        }
+
+        VanguardClientDiagnosticsLog.Info(
+            VanguardBuildVersion.OperatorInventoryNavigationGuardStatusTag,
+            $"session_return_to_operator_inventory_begin source={source}; operator={context.OperatorId ?? "<none>"}; generation={context.Generation}; priorScreenController={FormatTypeName(context.ScreenController.GetType())}; strategy=fresh_inventory_screen_controller");
+
+        if (!TryCreateReturnInventoryScreenController(context, out object? freshScreenController, out string rebuildReason)
+            || freshScreenController == null)
+        {
+            reason = "fresh_operator_inventory_controller_build_failed:" + rebuildReason;
+            VanguardClientDiagnosticsLog.Warning(
+                VanguardBuildVersion.OperatorInventoryNavigationGuardStatusTag,
+                $"session_return_to_operator_inventory_failed source={source}; operator={context.OperatorId ?? "<none>"}; generation={context.Generation}; reason={reason}; session_preserved=True");
+            return false;
+        }
+
+        lock (ActiveSessionGate)
+        {
+            if (!ReferenceEquals(activeDirectSession, context) || context.CompletionStarted)
+            {
+                reason = "active_direct_session_changed_during_return";
+                return false;
+            }
+
+            context.ScreenController = freshScreenController;
+        }
+
+        VanguardOperatorEquipmentBuildsFlow.ReplaceDirectInventoryScreenController(
+            freshScreenController,
+            context.InventoryController,
+            context.OperatorId,
+            "character_route_fresh_controller");
+        AttachCloseHandler(context);
+
+        if (!TryShowScreen(freshScreenController, out string showReason))
+        {
+            reason = "fresh_operator_inventory_show_failed:" + showReason;
+            VanguardClientDiagnosticsLog.Warning(
+                VanguardBuildVersion.OperatorInventoryNavigationGuardStatusTag,
+                $"session_return_to_operator_inventory_failed source={source}; operator={context.OperatorId ?? "<none>"}; generation={context.Generation}; reason={reason}; session_preserved=True");
+            return false;
+        }
+
+        reason = "fresh_operator_inventory_controller_queued";
+        VanguardClientDiagnosticsLog.Info(
+            VanguardBuildVersion.OperatorInventoryNavigationGuardStatusTag,
+            $"session_return_to_operator_inventory_requested source={source}; operator={context.OperatorId ?? "<none>"}; generation={context.Generation}; reason={reason}; screenController={FormatTypeName(freshScreenController.GetType())}; reusedClosedController=False");
+        return true;
+    }
+
+    private static bool TryCreateReturnInventoryScreenController(
+        ActiveDirectSessionContext context,
+        out object? screenController,
+        out string reason)
+    {
+        screenController = null;
+        reason = "unknown";
+        try
+        {
+            if (context.Session == null)
+            {
+                reason = "session_not_found";
+                return false;
+            }
+
+            if (context.OperatorProfile == null)
+            {
+                reason = "operator_profile_not_found";
+                return false;
+            }
+
+            if (context.InventoryController == null)
+            {
+                reason = "operator_inventory_controller_not_found";
+                return false;
+            }
+
+            if (context.HealthController == null)
+            {
+                reason = "operator_health_controller_not_found";
+                return false;
+            }
+
+            object session = context.Session!;
+            object operatorProfile = context.OperatorProfile!;
+            object inventoryController = context.InventoryController!;
+            object healthController = context.HealthController!;
+
+            object? inventory = ResolveMember(inventoryController, "Inventory");
+            object? stash = inventory == null ? null : ResolveMember(inventory, "Stash");
+            if (stash == null)
+            {
+                reason = "operator_stash_not_found";
+                return false;
+            }
+
+            object? questController = ResolveMember(context.MainMenuController, "LocalQuestControllerClass");
+            object? achievementController = ResolveMember(context.MainMenuController, "AbstractAchievementControllerClass");
+            object? prestigeController = ResolveMember(context.MainMenuController, "AbstractPrestigeControllerClass");
+            object? inventoryTabGear = ResolveEnumValue("EInventoryTab", "Gear");
+            if (inventoryTabGear == null)
+            {
+                reason = "inventory_tab_gear_not_found";
+                return false;
+            }
+
+            ConfigureItemUiContext(
+                context.MainMenuController,
+                session,
+                operatorProfile,
+                inventoryController,
+                healthController,
+                questController,
+                "operator_return");
+
+            Type? screenType = ResolveInventoryScreenControllerType();
+            if (screenType == null)
+            {
+                reason = "inventory_screen_controller_type_not_found";
+                return false;
+            }
+
+            ConstructorInfo? screenConstructor = screenType.GetConstructors(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+                .FirstOrDefault(ctor => ctor.GetParameters().Length == 8);
+            if (screenConstructor == null)
+            {
+                reason = "inventory_screen_constructor_not_found";
+                return false;
+            }
+
+            screenController = screenConstructor.Invoke(new[]
+            {
+                session,
+                healthController,
+                inventoryController,
+                questController,
+                achievementController,
+                prestigeController,
+                stash,
+                inventoryTabGear
+            });
+
+            reason = "fresh_operator_inventory_controller_built";
+            VanguardClientDiagnosticsLog.Info(
+                VanguardBuildVersion.OperatorInventoryNavigationGuardStatusTag,
+                $"session_return_controller_rebuilt operator={context.OperatorId ?? "<none>"}; generation={context.Generation}; profile={context.OperatorProfileId ?? "<none>"}; screenController={FormatTypeName(screenController.GetType())}; inventoryController={FormatTypeName(inventoryController.GetType())}; reason={reason}");
+            return true;
+        }
+        catch (Exception exception)
+        {
+            Exception root = Unwrap(exception);
+            reason = root.GetType().Name + ":" + root.Message;
+            VanguardClientDiagnosticsLog.Warning(
+                VanguardBuildVersion.OperatorInventoryNavigationGuardStatusTag,
+                $"session_return_controller_rebuild_failed operator={context.OperatorId ?? "<none>"}; generation={context.Generation}; reason={reason}; stack={CompactStack(root)}");
+            return false;
+        }
+    }
+
+    public static bool TryBeginExplicitSessionExit(string source, out string reason)
+    {
+        reason = "unknown";
+        ActiveDirectSessionContext? context;
+        lock (ActiveSessionGate)
+        {
+            context = activeDirectSession;
+            if (context == null)
+            {
+                reason = "active_direct_session_context_missing";
+                return false;
+            }
+
+            if (context.CompletionStarted)
+            {
+                reason = "active_direct_session_completion_already_running";
+                return true;
+            }
+
+            context.CompletionStarted = true;
+        }
+
+        VanguardOperatorInventorySessionNavigation.BeginExplicitExit("MainMenu", source);
+        _ = FinishOperatorEquipmentSessionAsync(context, source, explicitExit: true, completionAlreadyClaimed: true);
+        reason = "explicit_operator_session_exit_started";
+        VanguardClientDiagnosticsLog.Info(
+            VanguardBuildVersion.OperatorInventoryNavigationGuardStatusTag,
+            $"session_explicit_exit_started source={source}; operator={context.OperatorId ?? "<none>"}; generation={context.Generation}; route=MainMenu");
+        return true;
+    }
+
+    public static void ClearActiveSessionContext(string source)
+    {
+        ActiveDirectSessionContext? context;
+        lock (ActiveSessionGate)
+        {
+            context = activeDirectSession;
+            activeDirectSession = null;
+        }
+
+        if (context != null)
+        {
+            VanguardClientDiagnosticsLog.Info(
+                VanguardBuildVersion.OperatorInventoryNavigationGuardStatusTag,
+                $"session_context_cleared source={source}; operator={context.OperatorId ?? "<none>"}; generation={context.Generation}; completionStarted={context.CompletionStarted}");
+        }
+    }
+
+    private static bool TryClaimSessionCompletion(ActiveDirectSessionContext context, string source, out string reason)
+    {
+        lock (ActiveSessionGate)
+        {
+            if (!ReferenceEquals(activeDirectSession, context))
+            {
+                reason = "session_context_no_longer_active";
+                return false;
+            }
+
+            if (context.CompletionStarted)
+            {
+                reason = "session_completion_already_started";
+                return false;
+            }
+
+            context.CompletionStarted = true;
+            reason = "session_completion_claimed";
+        }
+
+        VanguardClientDiagnosticsLog.Info(
+            VanguardBuildVersion.OperatorInventoryNavigationGuardStatusTag,
+            $"session_completion_claimed source={source}; operator={context.OperatorId ?? "<none>"}; generation={context.Generation}");
+        return true;
+    }
+
+    private static void ReleaseSessionCompletionClaimAfterFailure(ActiveDirectSessionContext context, string source, string reason)
+    {
+        bool released = false;
+        lock (ActiveSessionGate)
+        {
+            if (ReferenceEquals(activeDirectSession, context) && VanguardOperatorInventoryModeClientState.IsActive)
+            {
+                context.CompletionStarted = false;
+                released = true;
+            }
+        }
+
+        if (released)
+        {
+            VanguardOperatorInventorySessionNavigation.CancelExplicitExitAfterFailure(source, reason);
+            VanguardClientDiagnosticsLog.Warning(
+                VanguardBuildVersion.OperatorInventoryNavigationGuardStatusTag,
+                $"session_completion_claim_released source={source}; operator={context.OperatorId ?? "<none>"}; generation={context.Generation}; reason={reason}");
+        }
+    }
+
+    private static async Task FinishOperatorEquipmentSessionAsync(
+        ActiveDirectSessionContext context,
+        string source,
+        bool explicitExit,
+        bool completionAlreadyClaimed = false)
+    {
+        // Screen close is only a presentation transition while a preserved navigation
+        // lease is active. Equipment Builds retains its narrower controller-substitution
+        // lease, while the persistent-session policy generalizes the same transaction-preservation semantics to
+        // qualified off-raid routes such as Traders, Flea, Handbook, Chat and Settings.
+        if (!explicitExit)
+        {
+            if (VanguardOperatorInventorySessionNavigation.ShouldDeferDirectInventoryClose(source, out string navigationReason))
+            {
+                VanguardClientDiagnosticsLog.Info(
+                    "VANGUARD_OPERATOR_DIRECT_EQUIPMENT_SCREEN_STATUS",
+                    $"direct_entry_close_deferred operator={VanguardOperatorInventoryModeClientState.OperatorId ?? "<none>"}; reason={navigationReason}; commitRequested=false; playerReloadRequested=false");
+                return;
+            }
+
+            if (VanguardOperatorEquipmentBuildsFlow.ShouldDeferDirectInventoryClose(source))
+            {
+                VanguardClientDiagnosticsLog.Info(
+                    "VANGUARD_OPERATOR_DIRECT_EQUIPMENT_SCREEN_STATUS",
+                    $"direct_entry_close_deferred operator={VanguardOperatorInventoryModeClientState.OperatorId ?? "<none>"}; reason=native_equipment_builds_subflow; commitRequested=false; playerReloadRequested=false");
+                return;
+            }
         }
 
         if (closeInProgress)
         {
+            VanguardClientDiagnosticsLog.Info(
+                VanguardBuildVersion.OperatorInventoryNavigationGuardStatusTag,
+                $"session_completion_ignored source={source}; operator={context.OperatorId ?? "<none>"}; generation={context.Generation}; reason=close_already_in_progress");
             return;
         }
 
+        if (!completionAlreadyClaimed && !TryClaimSessionCompletion(context, source, out string claimReason))
+        {
+            VanguardClientDiagnosticsLog.Info(
+                VanguardBuildVersion.OperatorInventoryNavigationGuardStatusTag,
+                $"session_completion_ignored source={source}; operator={context.OperatorId ?? "<none>"}; generation={context.Generation}; reason={claimReason}");
+            return;
+        }
+
+        VanguardOperatorInventorySessionIndicator.BeginPlayerReconciliation(source);
+        bool reconciliationIndicatorStarted = true;
+        bool reconciliationIndicatorSuccess = false;
+        string reconciliationIndicatorReason = "completion_not_finished";
+
         closeInProgress = true;
+        bool serverExitSucceeded = false;
         try
         {
-            VanguardOperatorDirectInventoryLifecycle.MarkCloseStarted("direct_entry_close");
-            VanguardClientDiagnosticsLog.Info("VANGUARD_OPERATOR_DIRECT_EQUIPMENT_SCREEN_STATUS", $"direct_entry_closed commit_requested operator={VanguardOperatorInventoryModeClientState.OperatorId ?? "<none>"}; screen={VanguardOperatorDirectInventoryLifecycle.DescribeCurrentScreen()}");
-            await TryFlushOperationQueueAsync(session);
-            bool directCommitSucceeded = TryDirectCommitOperatorProfile(operatorProfile, inventoryController, operatorProfileId, session);
+            VanguardOperatorDirectInventoryLifecycle.MarkCloseStarted(source);
+            VanguardClientDiagnosticsLog.Info("VANGUARD_OPERATOR_DIRECT_EQUIPMENT_SCREEN_STATUS", $"direct_entry_closed commit_requested operator={VanguardOperatorInventoryModeClientState.OperatorId ?? context.OperatorId ?? "<none>"}; source={source}; explicitExit={explicitExit}; screen={VanguardOperatorDirectInventoryLifecycle.DescribeCurrentScreen()}");
+            await TryFlushOperationQueueAsync(context.Session);
+            bool directCommitSucceeded = TryDirectCommitOperatorProfile(context.OperatorProfile, context.InventoryController, context.OperatorProfileId, context.Session);
             var exitResponse = VanguardOperatorInventoryModeClientState.ExitForDirectCommitRefresh();
+            serverExitSucceeded = exitResponse.Success;
             bool playerRefreshSucceeded = false;
             if (!exitResponse.Success)
             {
                 VanguardClientDiagnosticsLog.Warning(
                     "VANGUARD_OPERATOR_PLAYER_STASH_REFRESH_STATUS",
-                    $"player_stash_refresh_skipped directCommit={directCommitSucceeded}; exitSuccess=False; reason={exitResponse.Reason ?? "no_response"}");
+                    $"player_stash_refresh_skipped directCommit={directCommitSucceeded}; exitSuccess=False; reason={exitResponse.Reason ?? "no_response"}; source={source}");
             }
             else if (!directCommitSucceeded)
             {
-                // Direct-commit is a best-effort client snapshot.  A successful inventory-mode exit
+                // Direct-commit is a best-effort client snapshot. A successful inventory-mode exit
                 // has already committed the authoritative server session and removed the player from
                 // Operator profile redirection, so it must still converge through the normal player
-                // profile/menu reload.  Skipping that reload leaves the already-shown MenuScreen in
-                // its temporary Operator guard state and can poison the next off-raid transaction.
+                // profile/menu reload.
                 VanguardClientDiagnosticsLog.Warning(
                     "VANGUARD_OPERATOR_PLAYER_STASH_REFRESH_STATUS",
-                    $"player_stash_refresh_continuing_after_direct_commit_failure exitSuccess=True; reason={exitResponse.Reason ?? "no_response"}; recovery=authoritative_exit_then_player_menu_reload");
+                    $"player_stash_refresh_continuing_after_direct_commit_failure exitSuccess=True; reason={exitResponse.Reason ?? "no_response"}; recovery=authoritative_exit_then_player_menu_reload; source={source}");
             }
 
-            // The Operator inventory is opened through a direct vanilla InventoryScreen controller,
-            // not through the normal player menu route.  The close path must first persist the
-            // Operator equipment and restore the player stash, then force a real off-raid menu/profile
-            // reload while still in the menu.  Raid-start input workarounds are intentionally absent.
-            RestorePlayerItemUiContext(mainMenuController, "direct_entry_close_pre_reload");
-            await VanguardOperatorDirectInventoryExitGuard.RestoreAfterCloseAsync("direct_entry_close_pre_reload");
+            RestorePlayerItemUiContext(context.MainMenuController, source + "_pre_reload");
+            await VanguardOperatorDirectInventoryExitGuard.RestoreAfterCloseAsync(source + "_pre_reload");
 
             string reloadResultReason;
             if (exitResponse.Success)
             {
-                VanguardOperatorInventoryExitReloadState.MarkExitReloadStarted("direct_entry_close");
-                VanguardOperatorDirectInventoryLifecycle.MarkMenuRebuildStarted("direct_entry_close");
-                playerRefreshSucceeded = await VanguardOperatorInventoryModeClientState.TryReloadMainMenuProfileAfterDirectCommitAsync(mainMenuController);
-                RestorePlayerItemUiContext(mainMenuController, "direct_entry_close_post_reload");
-                await VanguardOperatorDirectInventoryExitGuard.RestoreAfterCloseAsync("direct_entry_close_post_reload");
+                VanguardOperatorInventoryExitReloadState.MarkExitReloadStarted(source);
+                VanguardOperatorDirectInventoryLifecycle.MarkMenuRebuildStarted(source);
+                playerRefreshSucceeded = await VanguardOperatorInventoryModeClientState.TryReloadMainMenuProfileAfterDirectCommitAsync(context.MainMenuController);
+                RestorePlayerItemUiContext(context.MainMenuController, source + "_post_reload");
+                await VanguardOperatorDirectInventoryExitGuard.RestoreAfterCloseAsync(source + "_post_reload");
                 reloadResultReason = playerRefreshSucceeded
                     ? (directCommitSucceeded ? "player_menu_reloaded" : "player_menu_reloaded_after_exit_fallback")
                     : (directCommitSucceeded ? "player_menu_reload_failed" : "player_menu_reload_failed_after_exit_fallback");
-                VanguardOperatorInventoryExitReloadState.MarkExitReloadCompleted("direct_entry_close", playerRefreshSucceeded, reloadResultReason);
+                VanguardOperatorInventoryExitReloadState.MarkExitReloadCompleted(source, playerRefreshSucceeded, reloadResultReason);
             }
             else
             {
                 reloadResultReason = "inventory_mode_exit_failed";
-                VanguardOperatorInventoryExitReloadState.MarkExitReloadCompleted("direct_entry_close", false, reloadResultReason);
+                VanguardOperatorInventoryExitReloadState.MarkExitReloadCompleted(source, false, reloadResultReason);
             }
 
-            await VanguardOperatorDirectInventoryLifecycle.CompleteAfterMenuRebuildAsync("direct_entry_close", playerRefreshSucceeded, reloadResultReason);
-            VanguardClientDiagnosticsLog.Info("VANGUARD_OPERATOR_DIRECT_EQUIPMENT_SCREEN_STATUS", $"direct_entry_closed commit_completed playerStashRefresh={playerRefreshSucceeded}; itemUiContextRestored=True; exitGuardRestored=True; exitReloadState={VanguardOperatorInventoryExitReloadState.Describe()}; lifecycleReady={!VanguardOperatorDirectInventoryLifecycle.IsBusy}");
+            await VanguardOperatorDirectInventoryLifecycle.CompleteAfterMenuRebuildAsync(source, playerRefreshSucceeded, reloadResultReason);
+            reconciliationIndicatorSuccess = exitResponse.Success && playerRefreshSucceeded;
+            reconciliationIndicatorReason = reloadResultReason;
+            if (!exitResponse.Success)
+            {
+                // The explicit route was suppressed, so the user is still in the existing
+                // off-raid context. Restore the logical transaction state and allow a retry.
+                VanguardOperatorDirectInventoryLifecycle.MarkOpenShown(source + "_exit_failed", context.OperatorId);
+                ReleaseSessionCompletionClaimAfterFailure(context, source, reloadResultReason);
+            }
+
+            VanguardClientDiagnosticsLog.Info("VANGUARD_OPERATOR_DIRECT_EQUIPMENT_SCREEN_STATUS", $"direct_entry_closed commit_completed source={source}; explicitExit={explicitExit}; playerStashRefresh={playerRefreshSucceeded}; itemUiContextRestored=True; exitGuardRestored=True; exitReloadState={VanguardOperatorInventoryExitReloadState.Describe()}; lifecycleReady={!VanguardOperatorDirectInventoryLifecycle.IsBusy}");
         }
         catch (Exception exception)
         {
-            VanguardOperatorDirectInventoryLifecycle.MarkFailedOpen("direct_entry_close_exception", exception.GetType().Name + ":" + exception.Message);
-            VanguardClientDiagnosticsLog.Warning("VANGUARD_OPERATOR_DIRECT_EQUIPMENT_SCREEN_STATUS", $"direct_entry_close_commit_failed reason={exception.GetType().Name}: {exception.Message}");
+            reconciliationIndicatorSuccess = false;
+            reconciliationIndicatorReason = exception.GetType().Name + ":" + exception.Message;
+            VanguardOperatorDirectInventoryLifecycle.MarkFailedOpen(source + "_exception", reconciliationIndicatorReason);
+            ReleaseSessionCompletionClaimAfterFailure(context, source, reconciliationIndicatorReason);
+            VanguardClientDiagnosticsLog.Warning("VANGUARD_OPERATOR_DIRECT_EQUIPMENT_SCREEN_STATUS", $"direct_entry_close_commit_failed source={source}; explicitExit={explicitExit}; reason={exception.GetType().Name}: {exception.Message}");
         }
         finally
         {
+            if (reconciliationIndicatorStarted)
+            {
+                VanguardOperatorInventorySessionIndicator.EndPlayerReconciliation(source, reconciliationIndicatorSuccess, reconciliationIndicatorReason);
+            }
+
+            if (serverExitSucceeded)
+            {
+                ClearActiveSessionContext(source + "_completed");
+            }
+
             closeInProgress = false;
         }
     }
-
 
     private static bool TryDirectCommitOperatorProfile(object? operatorProfile, object? inventoryController, string? operatorProfileId, object? session)
     {

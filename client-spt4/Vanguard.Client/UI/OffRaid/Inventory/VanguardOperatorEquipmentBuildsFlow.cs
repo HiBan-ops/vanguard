@@ -23,6 +23,19 @@ internal static class VanguardOperatorEquipmentBuildsFlow
     private static bool nativeBuildsFlowActive;
     private static int transitionGeneration;
 
+    public static bool HasActiveNestedNavigationLease
+    {
+        get
+        {
+            lock (Gate)
+            {
+                return nativeBuildsFlowActive
+                    && directInventoryScreenController != null
+                    && VanguardOperatorInventoryModeClientState.IsActive;
+            }
+        }
+    }
+
     public static void CaptureDirectInventoryScreen(object? screenController, object? inventoryController, string? operatorId, string source)
     {
         lock (Gate)
@@ -38,6 +51,39 @@ internal static class VanguardOperatorEquipmentBuildsFlow
         VanguardClientDiagnosticsLog.Info(
             "VANGUARD_OPERATOR_EQUIPMENT_BUILDS_STATUS",
             $"direct_inventory_captured source={source}; operator={operatorId ?? "<none>"}; screenController={DescribeType(screenController)}; inventoryController={DescribeType(inventoryController)}; nativeBuildsFlowActive=false");
+    }
+
+    public static void ReplaceDirectInventoryScreenController(object? screenController, object? inventoryController, string? operatorId, string source)
+    {
+        string? effectiveOperatorId;
+        bool backendControllerChanged;
+        bool preservedBuildsFlow;
+        int generation;
+        lock (Gate)
+        {
+            if (!VanguardOperatorInventoryModeClientState.IsActive || screenController == null)
+            {
+                return;
+            }
+
+            backendControllerChanged = directInventoryBackendController != null
+                && inventoryController != null
+                && !ReferenceEquals(directInventoryBackendController, inventoryController);
+            directInventoryScreenController = screenController;
+            if (inventoryController != null)
+            {
+                directInventoryBackendController = inventoryController;
+            }
+
+            capturedOperatorId = operatorId ?? capturedOperatorId ?? VanguardOperatorInventoryModeClientState.OperatorId;
+            effectiveOperatorId = capturedOperatorId;
+            preservedBuildsFlow = nativeBuildsFlowActive;
+            generation = transitionGeneration;
+        }
+
+        VanguardClientDiagnosticsLog.Info(
+            "VANGUARD_OPERATOR_EQUIPMENT_BUILDS_STATUS",
+            $"direct_inventory_screen_controller_replaced source={source}; operator={effectiveOperatorId ?? "<none>"}; screenController={DescribeType(screenController)}; inventoryController={DescribeType(inventoryController)}; backendControllerChanged={backendControllerChanged}; nativeBuildsFlowPreserved={preservedBuildsFlow}; generation={generation}");
     }
 
     public static bool TryPrepareNativeBuildInventoryController(object? requestedInventoryController, string source, out object? effectiveInventoryController)

@@ -46,7 +46,8 @@ internal sealed class VanguardOperatorInventoryMenuGuardPatch : ModulePatch
             AccessTools.Property(playButton.GetType(), "Interactable")?.SetValue(playButton, false);
             MethodInfo? tooltipMethod = playButton.GetType().GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
                 .FirstOrDefault(method => method.Name == "SetDisabledTooltip" && method.GetParameters().Length >= 1);
-            string operatorName = VanguardOperatorInventoryModeClientState.OperatorDisplayName
+            string operatorName = VanguardOperatorInventoryModeClientState.OperatorCallsign
+                ?? VanguardOperatorInventoryModeClientState.OperatorDisplayName
                 ?? VanguardOperatorsLocalizationService.Get("general.operator");
             tooltipMethod?.Invoke(playButton, BuildArguments(tooltipMethod, VanguardOperatorsLocalizationService.Format("inventory.guard", operatorName)));
         }

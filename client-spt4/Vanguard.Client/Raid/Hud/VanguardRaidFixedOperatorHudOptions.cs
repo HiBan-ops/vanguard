@@ -9,7 +9,7 @@ using UnityEngine;
 // Responsibility: Defines the user/configuration surface for Raid Fixed Operator Hud Options in the raid Operator HUD.
 // Flow: BepInEx/F12 values are bound, normalized and exposed through getters/snapshots; raid-scoped settings are synchronized to the process that owns runtime execution.
 // Authority boundary: Configuration supplies policy inputs only; changing a value does not itself perform gameplay or persistence mutation.
-// Invariant: Defaults preserve the published 0.7.0 behavior and synchronized values remain bounded to their declared scope.
+// Invariant: Defaults preserve the established public behavior and synchronized values remain bounded to their declared scope.
 namespace Vanguard.Client.Raid.Hud;
 
 internal enum VanguardRaidFixedOperatorHudAnchor

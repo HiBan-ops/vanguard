@@ -13,6 +13,7 @@ public sealed record VanguardOperatorInventoryModeSession(
     string StorageProfileId,
     string OperatorId,
     string OperatorDisplayName,
+    string OperatorCallsign,
     string OperatorInventoryProfileId,
     string ProfilePath,
     SptProfile Profile,

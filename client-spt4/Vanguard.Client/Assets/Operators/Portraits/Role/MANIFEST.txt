@@ -1,4 +1,4 @@
-Vanguard Operator static role/faction portrait set — Vanguard 0.7.0
+Vanguard Operator static role/faction portrait set
 
 Contract:
 - JPEG only.

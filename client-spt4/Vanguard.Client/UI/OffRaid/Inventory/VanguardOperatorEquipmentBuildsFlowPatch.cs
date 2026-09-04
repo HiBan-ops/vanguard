@@ -220,7 +220,12 @@ internal sealed class VanguardOperatorInventoryScreenReturnPatch : ModulePatch
     private static void Postfix(object[] __args)
     {
         object? controller = __args.Length > 0 ? __args[0] : null;
-        VanguardOperatorEquipmentBuildsFlow.NotifyDirectInventoryShown(controller, "inventory_screen_show");
+        bool equipmentBuildsReturned = VanguardOperatorEquipmentBuildsFlow.NotifyDirectInventoryShown(controller, "inventory_screen_show");
+        if (VanguardOperatorDirectEquipmentScreenEntry.IsActiveOperatorInventoryScreenController(controller))
+        {
+            VanguardOperatorInventorySessionNavigation.NotifyOperatorInventoryShown(
+                equipmentBuildsReturned ? "inventory_screen_show_after_equipment_builds" : "inventory_screen_show");
+        }
     }
 }
 #else

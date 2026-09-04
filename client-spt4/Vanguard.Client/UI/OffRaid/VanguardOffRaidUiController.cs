@@ -16,6 +16,7 @@ using Vanguard.Client.Api;
 using Vanguard.Client.Api.Dtos;
 using Vanguard.Client.Diagnostics;
 using Vanguard.Client.Compatibility;
+using Vanguard.Client.Options;
 using Vanguard.Client.UI.OffRaid.Localization;
 using Vanguard.Client.UI.OffRaid.Foundation;
 using Vanguard.Client.UI.OffRaid.Panels;
@@ -35,30 +36,37 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
     private const string MenuButtonName = "Vanguard_OffRaid_MenuButton";
     private const string MenuIconObjectName = "Vanguard_MenuIcon";
     private const string MenuIconResourceName = "Vanguard.Client.UI.OffRaid.Assets.vanguard_menu_icon_mask.png";
+    private const string OffRaidBackgroundResourceName = "Vanguard.Client.UI.OffRaid.Assets.vanguard_offraid_command_surface.png";
     private const string ScreenRootName = "Vanguard_OffRaid_ScreenRoot";
     private const int MaxActionButtons = 6;
     private const int MaxCardsPerPage = 8;
-    private const float ContextActionFirstMinY = 0.310f;
-    private const float ContextActionStepY = 0.040f;
-    private const float ContextActionHeight = 0.034f;
+    // Contextual actions own the top of the right rail. Keeping the stack high leaves a stable
+    // detail region below it for the Operator hover panel introduced by the next UI iteration.
+    private const float ContextActionXMin = 0.760f;
+    private const float ContextActionXMax = 0.945f;
+    private const float ContextActionFirstMinY = 0.720f;
+    private const float ContextActionStepY = 0.055f;
+    private const float ContextActionHeight = 0.043f;
+    // Operator hover details live in a dedicated non-interactive panel below contextual actions.
+    // Keeping this surface inside the right rail prevents the detail view from ever covering the
+    // Operator card that owns the hover state, eliminating the former hover/overlay strobing loop.
+    private const float ContextDetailXMin = 0.760f;
+    private const float ContextDetailXMax = 0.945f;
+    private const float ContextDetailYMin = 0.135f;
+    private const float ContextDetailDefaultYMax = 0.705f;
+    private const float ContextDetailGap = 0.015f;
+    private const float ContextDetailMinHeight = 0.220f;
     private const float CloseButtonBaseY = 0.045f;
-    private const float TopButtonVisualMaxOffsetY = 0.050f;
-    // Menu Overhaul exposes live F12 positioning but no public button-registration API. Vanguard therefore
-    // samples the finished vanilla-menu geometry at a low frequency and follows it with its own button only.
-    // The fallback step is used only when the external button set cannot be observed safely.
-    private const float ExternalMenuLayoutRefreshSeconds = 0.25f;
-    private const float ExternalMenuFallbackVerticalStep = 60f;
-
-    // These are Menu Overhaul's vanilla ownership targets. They are names of EFT menu objects, not calls into
-    // Menu Overhaul implementation types, which keeps this bridge resilient to internal class refactors.
-    private static readonly string[] MenuOverhaulOwnedButtonNames =
-    {
-        "PlayButton",
-        "CharacterButton",
-        "TradeButton",
-        "HideoutButton",
-        "ExitButtonGroup"
-    };
+    private const float PrimaryNavigationYMin = 0.790f;
+    private const float PrimaryNavigationYMax = 0.835f;
+    private const float PrimaryNavigationXMin = 0.035f;
+    // Primary navigation follows the central information surface, not the full header width.
+    // This reserves the right rail for contextual actions/details without altering the banner.
+    private const float PrimaryNavigationXMax = 0.705f;
+    private const float PrimaryNavigationGap = 0.008f;
+    // Profile-based placement is absolute and Vanguard-only. Reapply the normalized target after external
+    // menu/layout refreshes and F12 slider edits without ever accumulating deltas or mutating another row.
+    private const float ProfiledMenuLayoutRefreshSeconds = 0.05f;
 
     // Single visual source of truth for all Vanguard off-raid buttons.
     // Navigation buttons and contextual action buttons must use these values through CreateButton(),
@@ -73,9 +81,60 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
     private static readonly Color ButtonHoverTextColor = new(0.06f, 0.07f, 0.05f, 1.00f);
     private static readonly Color ButtonLineColor = new(0.68f, 0.72f, 0.62f, 0.20f);
 
+    // Operator cards stay visually open against the authored Vanguard background: hierarchy comes from
+    // the card body, semantic status text and action-button fill rather than explicit rectangular frames.
+    // The body remains neutral unless the Operator needs medical attention, in which case the whole card
+    // shifts toward a dark desaturated red without turning into a bright warning tile.
+    private static readonly Color OperatorCardNormalColor = new(0.027f, 0.032f, 0.030f, 0.96f);
+    private static readonly Color OperatorCardNormalHoverColor = new(0.075f, 0.095f, 0.080f, 0.99f);
+    private static readonly Color OperatorCardInjuredColor = new(0.085f, 0.026f, 0.024f, 0.96f);
+    private static readonly Color OperatorCardInjuredHoverColor = new(0.145f, 0.045f, 0.040f, 0.99f);
+    // Card actions use a deliberately warmer filled surface so the control reads immediately against the
+    // black/grey card body without adding borders that would compete with the burned Vanguard background.
+    private static readonly Color OperatorCardButtonBackgroundColor = new(0.115f, 0.092f, 0.052f, 0.94f);
+    private static readonly Color OperatorCardButtonHoverBackgroundColor = new(0.245f, 0.190f, 0.095f, 0.98f);
+    private static readonly Color OperatorCardButtonPressedBackgroundColor = new(0.170f, 0.128f, 0.064f, 1.00f);
+    private static readonly Color OperatorCardButtonDisabledBackgroundColor = new(0.040f, 0.043f, 0.038f, 0.72f);
+    private static readonly Color OperatorCardContractStatusColor = new(0.90f, 0.62f, 0.24f, 1.00f);
+    private static readonly Color OperatorCardActiveStatusColor = new(0.43f, 0.86f, 0.42f, 1.00f);
+    private static readonly Color OperatorCardRestingStatusColor = new(0.88f, 0.74f, 0.30f, 1.00f);
+    private static readonly Color OperatorCardMedicalStatusColor = new(0.88f, 0.34f, 0.26f, 1.00f);
+    private static readonly Color OperatorCardStableStatusColor = new(0.62f, 0.78f, 0.66f, 1.00f);
+    // The detail panel now inherits its visual identity primarily from the general Vanguard surface.
+    // Keep only a restrained translucent body and text hierarchy here; no local frame/border language.
+    // The root itself remains transparent so Vanguard blends into EFT instead of presenting as a
+    // rectangular plate. Readability is provided by local runtime surfaces and the authored map layer.
+    private static readonly Color ScreenRootBackdropColor = new(0.000f, 0.000f, 0.000f, 0.00f);
+    // Contextual Operator details use a dark dossier/terminal treatment that belongs to the
+    // global Vanguard surface: layered tonal depth and scanline texture, but no standalone frame.
+    private static readonly Color OperatorDetailSurfaceColor = new(0.000f, 0.000f, 0.000f, 0.00f);
+    private static readonly Color OperatorDetailReadabilityFadeColor = new(0.008f, 0.012f, 0.011f, 1.00f);
+    private static readonly Color OperatorDetailHeaderWashColor = new(0.075f, 0.050f, 0.020f, 0.22f);
+    private static readonly Color OperatorDetailTextureColor = new(0.76f, 0.62f, 0.36f, 0.14f);
+    private static readonly Color OperatorDetailTextColor = new(0.82f, 0.86f, 0.78f, 1.00f);
+    // Vanguard bronze: the selected primary destination is identified by its upper rule only,
+    // preserving the restrained EFT-like button body while making current location unambiguous.
+    private static readonly Color PrimaryNavigationActiveLineColor = new(0.90f, 0.58f, 0.18f, 0.96f);
+    // The authored background carries the global Vanguard/Tarkov material identity. It remains on a
+    // dedicated transparent image layer so its burned alpha contour, not a rectangular UI plate,
+    // defines the visible perimeter. Runtime surfaces remain responsible only for readability/zoning.
+    private static readonly Color AuthoredBackgroundTintColor = new(0.92f, 0.95f, 0.92f, 0.78f);
+    private static readonly Color MainWorkSurfaceColor = new(0.008f, 0.018f, 0.018f, 0.28f);
+    private static readonly Color RightRailFadeStartColor = new(0.006f, 0.010f, 0.010f, 0.00f);
+    private static readonly Color RightRailFadeEndColor = new(0.008f, 0.011f, 0.010f, 0.62f);
+    private static readonly Color RightRailActionSurfaceColor = new(0.018f, 0.018f, 0.014f, 0.23f);
+    private static readonly Color RightRailCloseSurfaceColor = new(0.012f, 0.014f, 0.013f, 0.26f);
+    private static readonly Color NavigationSurfaceColor = new(0.008f, 0.016f, 0.016f, 0.24f);
+    private static readonly Color FooterSurfaceColor = new(0.008f, 0.014f, 0.014f, 0.18f);
+    private static readonly Color VanguardIdentityWatermarkColor = new(0.86f, 0.58f, 0.19f, 0.12f);
+
     private static Sprite? menuIconSprite;
+    private static Sprite? offRaidBackgroundSprite;
+    private static Sprite? operatorDetailTextureSprite;
+    private static Sprite? operatorDetailReadabilityFadeSprite;
     private static bool menuIconLoadAttempted;
     private static bool menuIconStatusLogged;
+    private static bool offRaidBackgroundStatusLogged;
 
     private readonly VanguardDashboardPanel dashboardPanel = new();
     private readonly VanguardContractsPanel contractsPanel = new();
@@ -101,7 +160,7 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
     private Component? exitButtonComponent;
     private GameObject? menuButtonObject;
     private float enforceMenuLabelUntilRealtime;
-    private float nextExternalMenuLayoutRefreshRealtime;
+    private float nextInteropMenuLayoutRefreshRealtime;
     private GameObject? screenRoot;
     private GameObject? headerBandRoot;
     private GameObject? infoTableScrollRoot;
@@ -127,6 +186,7 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
     private readonly List<GameObject> cardObjects = new();
     private readonly List<GameObject> infoTableObjects = new();
     private readonly List<Button> actionButtons = new();
+    private readonly Dictionary<VanguardOffRaidPanelKind, Image> primaryNavigationLines = new();
     // Direct references to the real "Label" child of each action button.
     // Do not resolve labels with GetComponentInChildren(includeInactive:true): the hover icon is also
     // a TextMeshProUGUI and can be returned first, which makes the label visible only on hover.
@@ -207,10 +267,17 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
                 screenRoot.SetActive(false);
             }
 
-            bool externalMenuLayout = VanguardMenuOverhaulCompat.IsInstalled;
+            bool profiledPlacement = VanguardMainMenuPlacementOptions.TryGetActivePlacement(
+                out string placementProfileId,
+                out float placementX,
+                out float placementY);
+            bool configuredMenuPluginLoaded = VanguardMainMenuPlacementOptions.HasAnyConfiguredPluginLoaded();
+            string visualStyleOwners = VanguardMainMenuInterop.DescribeActiveOwners(VanguardMainMenuInteropCapability.ExternalVisualStyleAuthority);
+            string visibilityLifecycleOwners = VanguardMainMenuInterop.DescribeActiveOwners(VanguardMainMenuInteropCapability.ExternalVisibilityLifecycle);
+            string menuLayout = profiledPlacement ? $"profile:{placementProfileId}" : configuredMenuPluginLoaded ? "safe_autonomous_fallback" : "vanguard_owned_two_column";
             VanguardClientDiagnosticsLog.Info(
                 VanguardBuildVersion.OffRaidUiStatusTag,
-                $"Vanguard off-raid UI initialized on MenuScreen; menuLayout={(externalMenuLayout ? "external_menu_overhaul_owned" : "two_column_safe_reflow")}; vanillaButtonsOwnedByVanguard={!externalMenuLayout}.");
+                $"Vanguard off-raid UI initialized on MenuScreen; menuLayout={menuLayout}; profileX={placementX:0.###}; profileY={placementY:0.###}; visualStyleOwners={visualStyleOwners}; visibilityLifecycleOwners={visibilityLifecycleOwners}; vanillaButtonsOwnedByVanguard={!profiledPlacement && !configuredMenuPluginLoaded}.");
         }
         catch (Exception exception)
         {
@@ -242,12 +309,21 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
 
         if (sourceButton.transform is RectTransform sourceRect && menuButtonObject.transform is RectTransform menuRect)
         {
-            if (VanguardMenuOverhaulCompat.IsInstalled)
+            if (VanguardMainMenuPlacementOptions.TryGetActivePlacement(out _, out float xPercent, out float yPercent))
             {
-                ApplyExternalMainMenuOwnedLayout(parent, sourceRect, menuRect);
+                ApplyProfiledVanguardButtonPosition(parent, menuRect, xPercent, yPercent);
+            }
+            else if (VanguardMainMenuPlacementOptions.HasAnyConfiguredPluginLoaded())
+            {
+                // Fail safe if a configured integration is present but its profile is temporarily disabled/invalid:
+                // move only Vanguard using the native one-row fallback rather than applying standalone geometry
+                // that owns Character/Trading/Hideout/Exit.
+                ApplyMenuButtonLayout(sourceButton.gameObject, menuButtonObject);
             }
             else
             {
+                // Explicit user requirement: no matching menu integration keeps the historical Vanguard standalone
+                // arrangement unchanged, including its existing two-column ownership of vanilla menu rows.
                 CaptureOriginalMenuPositions(parent);
                 ApplyTwoColumnMenuLayout(parent, sourceRect, menuRect);
             }
@@ -258,8 +334,9 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
         }
 
         menuButtonObject.SetActive(sourceButton.gameObject.activeSelf);
+        ConvergeInteropMenuButtonVisibility(sourceButton.gameObject, menuButtonObject);
         enforceMenuLabelUntilRealtime = Time.realtimeSinceStartup + 2.0f;
-        nextExternalMenuLayoutRefreshRealtime = 0f;
+        nextInteropMenuLayoutRefreshRealtime = 0f;
     }
 
     private void LateUpdate()
@@ -271,7 +348,6 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
 
         float now = Time.realtimeSinceStartup;
         bool enforceLabel = now <= enforceMenuLabelUntilRealtime;
-        bool externalMenuLayout = VanguardMenuOverhaulCompat.IsInstalled;
 
         if (enforceLabel)
         {
@@ -279,21 +355,39 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
         }
 
         if (sourceButtonComponent == null
-            || sourceButtonComponent.transform.parent == null
-            || sourceButtonComponent.transform is not RectTransform sourceRect
+            || sourceButtonComponent.transform.parent == null)
+        {
+            return;
+        }
+
+        // Some additive menu integrations temporarily hide/reveal the vanilla stack on every MenuScreen
+        // reconstruction. Keep Vanguard's own clone converged to the live primary button so repeated
+        // Operator inventory -> Main Menu returns cannot strand the entry in a stale hidden state.
+        ConvergeInteropMenuButtonVisibility(sourceButtonComponent.gameObject, menuButtonObject);
+
+        if (sourceButtonComponent.transform is not RectTransform sourceRect
             || menuButtonObject.transform is not RectTransform menuRect)
         {
             return;
         }
 
-        if (externalMenuLayout)
+        if (VanguardMainMenuPlacementOptions.TryGetActivePlacement(out _, out float xPercent, out float yPercent))
         {
-            // Menu Overhaul can change horizontal offsets live through F12. Poll lightly while the
-            // injected button exists, but mutate only Vanguard's own RectTransform.
-            if (now >= nextExternalMenuLayoutRefreshRealtime && menuButtonObject.activeInHierarchy)
+            if (now >= nextInteropMenuLayoutRefreshRealtime && menuButtonObject.activeInHierarchy)
             {
-                ApplyExternalMainMenuOwnedLayout(sourceButtonComponent.transform.parent, sourceRect, menuRect);
-                nextExternalMenuLayoutRefreshRealtime = now + ExternalMenuLayoutRefreshSeconds;
+                ApplyProfiledVanguardButtonPosition(sourceButtonComponent.transform.parent, menuRect, xPercent, yPercent);
+                nextInteropMenuLayoutRefreshRealtime = now + ProfiledMenuLayoutRefreshSeconds;
+            }
+
+            return;
+        }
+
+        if (VanguardMainMenuPlacementOptions.HasAnyConfiguredPluginLoaded())
+        {
+            if (now >= nextInteropMenuLayoutRefreshRealtime && menuButtonObject.activeInHierarchy)
+            {
+                ApplyMenuButtonLayout(sourceButtonComponent.gameObject, menuButtonObject);
+                nextInteropMenuLayoutRefreshRealtime = now + ProfiledMenuLayoutRefreshSeconds;
             }
 
             return;
@@ -327,20 +421,53 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
         rootRect.offsetMin = Vector2.zero;
         rootRect.offsetMax = Vector2.zero;
         var rootImage = screenRoot.GetComponent<Image>();
-        rootImage.color = new Color(0.02f, 0.025f, 0.022f, 0.00f);
+        rootImage.sprite = null;
+        rootImage.type = Image.Type.Simple;
+        rootImage.preserveAspect = false;
+        rootImage.color = ScreenRootBackdropColor;
+        rootImage.raycastTarget = false;
+
+        // The root remains transparent. The authored background spans the whole Vanguard workspace and
+        // uses its own alpha-burned contour to blend into EFT. It is never stretched: the source image
+        // and the workspace are both aspect-preserved, while local runtime surfaces provide legibility.
+        CreateAuthoredBackgroundSurface();
+        CreateCommandSurface("MainWorkSurface", 0.025f, 0.115f, 0.720f, 0.780f, MainWorkSurfaceColor);
+        CreateHorizontalFadeSurface("RightRailTransitionFade", 0.650f, 0.115f, 0.945f, 0.835f, RightRailFadeStartColor, RightRailFadeEndColor);
+        CreateCommandSurface("RightRailActionSurface", ContextActionXMin, 0.605f, ContextActionXMax, 0.785f, RightRailActionSurfaceColor);
+        CreateCommandSurface("PrimaryNavigationSurface", 0.025f, 0.785f, 0.720f, 0.840f, NavigationSurfaceColor);
+        CreateCommandSurface("FooterSurface", 0.025f, 0.020f, 0.945f, 0.105f, FooterSurfaceColor);
+        CreateCommandSurface("RightRailCloseSurface", ContextDetailXMin, 0.025f, ContextDetailXMax, 0.090f, RightRailCloseSurfaceColor);
 
         headerBandRoot = new GameObject("HeaderBand", typeof(RectTransform), typeof(Image));
         headerBandRoot.transform.SetParent(screenRoot.transform, false);
-        SetRect((RectTransform)headerBandRoot.transform, 0.025f, 0.805f, 0.715f, 0.975f);
+        // Keep the identity/header band compact so primary Vanguard navigation can live
+        // directly below it without consuming the right-side contextual-action rail.
+        SetRect((RectTransform)headerBandRoot.transform, 0.025f, 0.845f, 0.945f, 0.975f);
         Image headerBandImage = headerBandRoot.GetComponent<Image>();
         headerBandImage.color = new Color(0.015f, 0.020f, 0.018f, 0.72f);
         headerBandImage.raycastTarget = false;
 
+        // Reuse the canonical embedded Vanguard mark already shipped for the menu button. Tinting
+        // the mask here avoids introducing a second logo authority while giving the workstation a
+        // recognizable identity independent of page title.
+        Sprite? identityMarkSprite = ResolveVanguardMenuIconSprite();
+        if (identityMarkSprite != null)
+        {
+            var watermarkRoot = new GameObject("VanguardIdentityWatermark", typeof(RectTransform), typeof(Image));
+            watermarkRoot.transform.SetParent(screenRoot.transform, false);
+            SetRect((RectTransform)watermarkRoot.transform, 0.842f, 0.872f, 0.925f, 0.962f);
+            Image watermarkImage = watermarkRoot.GetComponent<Image>();
+            watermarkImage.sprite = identityMarkSprite;
+            watermarkImage.preserveAspect = true;
+            watermarkImage.color = VanguardIdentityWatermarkColor;
+            watermarkImage.raycastTarget = false;
+        }
+
         titleLabel = CreateText(screenRoot.transform, "Title", 28, TextAlignmentOptions.TopLeft, new Color(0.82f, 0.92f, 0.84f));
-        SetRect(titleLabel.rectTransform, 0.038f, 0.885f, 0.70f, 0.965f);
+        SetRect(titleLabel.rectTransform, 0.038f, 0.900f, 0.93f, 0.965f);
 
         subtitleLabel = CreateText(screenRoot.transform, "Subtitle", 15, TextAlignmentOptions.TopLeft, new Color(0.66f, 0.76f, 0.70f));
-        SetRect(subtitleLabel.rectTransform, 0.038f, 0.825f, 0.70f, 0.875f);
+        SetRect(subtitleLabel.rectTransform, 0.038f, 0.852f, 0.93f, 0.892f);
 
         bodyLabel = CreateText(screenRoot.transform, "Body", 15, TextAlignmentOptions.TopLeft, new Color(0.86f, 0.88f, 0.82f));
         SetRect(bodyLabel.rectTransform, 0.045f, 0.18f, 0.69f, 0.78f);
@@ -356,19 +483,14 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
         statusLabel = CreateText(screenRoot.transform, "Status", 14, TextAlignmentOptions.BottomLeft, new Color(0.75f, 0.80f, 0.72f));
         SetRect(statusLabel.rectTransform, 0.035f, 0.030f, 0.705f, 0.090f);
 
-        CreateTopButton("action.refresh", 0.745f, 0.705f, () => ExecuteUiAction("refresh", RefreshStateAndRender));
-        CreateTopButton("action.summary", 0.745f, 0.635f, () => ShowPanel(VanguardOffRaidPanelKind.Dashboard));
-        CreateTopButton("dashboard.contracts", 0.745f, 0.565f, () => ShowPanel(VanguardOffRaidPanelKind.Contracts));
-        CreateTopButton("dashboard.active", 0.745f, 0.495f, () => ShowPanel(VanguardOffRaidPanelKind.ActiveService));
-        CreateTopButton("dashboard.hospital", 0.745f, 0.425f, () => ShowPanel(VanguardOffRaidPanelKind.FieldHospital));
-        CreateTopButton("dashboard.billing", 0.745f, 0.355f, () => ShowPanel(VanguardOffRaidPanelKind.Billing));
+        CreatePrimaryNavigationRow();
         CreateTopButton("action.close", 0.745f, CloseButtonBaseY, HideScreen);
 
         for (int i = 0; i < MaxActionButtons; i++)
         {
             Button button = CreateButton(screenRoot.transform, $"Action_{i}", string.Empty);
             float yMin = ContextActionFirstMinY - (i * ContextActionStepY);
-            SetRect((RectTransform)button.transform, 0.760f, yMin, 0.945f, yMin + ContextActionHeight);
+            SetRect((RectTransform)button.transform, ContextActionXMin, yMin, ContextActionXMax, yMin + ContextActionHeight);
             actionButtons.Add(button);
             TextMeshProUGUI? label = FindButtonLabel(button.gameObject);
             if (label != null)
@@ -381,6 +503,79 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
 
         CreateTooltipRoot();
         CreateConfirmationRoot();
+    }
+
+    private void CreateAuthoredBackgroundSurface()
+    {
+        if (screenRoot == null)
+        {
+            return;
+        }
+
+        var authoredBackgroundRoot = new GameObject("AuthoredBackgroundSurface", typeof(RectTransform), typeof(Image));
+        authoredBackgroundRoot.transform.SetParent(screenRoot.transform, false);
+        SetRect((RectTransform)authoredBackgroundRoot.transform, 0.000f, 0.000f, 1.000f, 1.000f);
+
+        Image authoredBackgroundImage = authoredBackgroundRoot.GetComponent<Image>();
+        authoredBackgroundImage.sprite = ResolveOffRaidBackgroundSprite();
+        authoredBackgroundImage.type = Image.Type.Simple;
+        authoredBackgroundImage.preserveAspect = true;
+        authoredBackgroundImage.color = AuthoredBackgroundTintColor;
+        authoredBackgroundImage.raycastTarget = false;
+    }
+
+    private void CreateHorizontalFadeSurface(string name, float xMin, float yMin, float xMax, float yMax, Color leftColor, Color rightColor)
+    {
+        if (screenRoot == null)
+        {
+            return;
+        }
+
+        const int gradientWidth = 64;
+        var texture = new Texture2D(gradientWidth, 2, TextureFormat.RGBA32, false)
+        {
+            name = $"{name}_Texture",
+            wrapMode = TextureWrapMode.Clamp,
+            filterMode = FilterMode.Bilinear
+        };
+
+        for (int x = 0; x < gradientWidth; x++)
+        {
+            float t = x / (gradientWidth - 1f);
+            // SmoothStep avoids a perceptible linear band where the contextual rail begins.
+            Color color = Color.Lerp(leftColor, rightColor, t * t * (3f - (2f * t)));
+            texture.SetPixel(x, 0, color);
+            texture.SetPixel(x, 1, color);
+        }
+
+        texture.Apply(false, true);
+        Sprite sprite = Sprite.Create(texture, new Rect(0f, 0f, gradientWidth, 2f), new Vector2(0.5f, 0.5f), 100f);
+        sprite.name = $"{name}_Sprite";
+
+        var surface = new GameObject(name, typeof(RectTransform), typeof(Image));
+        surface.transform.SetParent(screenRoot.transform, false);
+        SetRect((RectTransform)surface.transform, xMin, yMin, xMax, yMax);
+        Image image = surface.GetComponent<Image>();
+        image.sprite = sprite;
+        image.type = Image.Type.Simple;
+        image.preserveAspect = false;
+        image.color = Color.white;
+        image.raycastTarget = false;
+    }
+
+    private void CreateCommandSurface(string name, float xMin, float yMin, float xMax, float yMax, Color color)
+    {
+        if (screenRoot == null)
+        {
+            return;
+        }
+
+        var surface = new GameObject(name, typeof(RectTransform), typeof(Image));
+        surface.transform.SetParent(screenRoot.transform, false);
+        SetRect((RectTransform)surface.transform, xMin, yMin, xMax, yMax);
+        Image image = surface.GetComponent<Image>();
+        image.color = color;
+        image.raycastTarget = false;
     }
 
     private void CreateInfoTableScrollRoot()
@@ -424,7 +619,74 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
         infoTableScrollRoot.SetActive(false);
     }
 
+    private void CreatePrimaryNavigationRow()
+    {
+        if (screenRoot == null)
+        {
+            return;
+        }
+
+        (VanguardOffRaidPanelKind Panel, string LocalizationKey, Action Action)[] entries =
+        {
+            (VanguardOffRaidPanelKind.Dashboard, "action.summary", () => ShowPanel(VanguardOffRaidPanelKind.Dashboard)),
+            (VanguardOffRaidPanelKind.Contracts, "dashboard.contracts", () => ShowPanel(VanguardOffRaidPanelKind.Contracts)),
+            (VanguardOffRaidPanelKind.ActiveService, "dashboard.active", () => ShowPanel(VanguardOffRaidPanelKind.ActiveService)),
+            (VanguardOffRaidPanelKind.FieldHospital, "dashboard.hospital", () => ShowPanel(VanguardOffRaidPanelKind.FieldHospital)),
+            (VanguardOffRaidPanelKind.Billing, "dashboard.billing", () => ShowPanel(VanguardOffRaidPanelKind.Billing))
+        };
+
+        primaryNavigationLines.Clear();
+        float totalGap = PrimaryNavigationGap * (entries.Length - 1);
+        float buttonWidth = (PrimaryNavigationXMax - PrimaryNavigationXMin - totalGap) / entries.Length;
+        for (int index = 0; index < entries.Length; index++)
+        {
+            float xMin = PrimaryNavigationXMin + (index * (buttonWidth + PrimaryNavigationGap));
+            float xMax = xMin + buttonWidth;
+            Button button = CreatePrimaryNavigationButton(entries[index].LocalizationKey, xMin, xMax, entries[index].Action);
+            Image? upperLine = button.transform.Find("UpperLine")?.GetComponent<Image>();
+            if (upperLine != null)
+            {
+                primaryNavigationLines[entries[index].Panel] = upperLine;
+            }
+        }
+
+        UpdatePrimaryNavigationSelection();
+    }
+
+    private Button CreatePrimaryNavigationButton(string localizationKey, float xMin, float xMax, Action action)
+    {
+        string label = L(localizationKey);
+        Button button = CreateButton(screenRoot!.transform, $"Nav_{localizationKey.Replace('.', '_')}", label);
+        SetRect((RectTransform)button.transform, xMin, PrimaryNavigationYMin, xMax, PrimaryNavigationYMax);
+        button.onClick.RemoveAllListeners();
+        button.onClick.AddListener(() => action());
+        RegisterPersistentLocalizedLabel(button, localizationKey);
+        return button;
+    }
+
+    private void UpdatePrimaryNavigationSelection()
+    {
+        VanguardOffRaidPanelKind selectedPanel = currentPanel == VanguardOffRaidPanelKind.OperatorDossier
+            ? VanguardOffRaidPanelKind.ActiveService
+            : currentPanel;
+
+        foreach (KeyValuePair<VanguardOffRaidPanelKind, Image> entry in primaryNavigationLines)
+        {
+            if (entry.Value != null)
+            {
+                entry.Value.color = entry.Key == selectedPanel
+                    ? PrimaryNavigationActiveLineColor
+                    : ButtonLineColor;
+            }
+        }
+    }
+
     private void CreateTopButton(string localizationKey, float xMin, float yMin, Action action)
+    {
+        CreateTopButton(localizationKey, xMin + 0.015f, yMin + 0.005f, 0.945f, yMin + 0.050f, action);
+    }
+
+    private void CreateTopButton(string localizationKey, float xMin, float yMin, float xMax, float yMax, Action action)
     {
         if (screenRoot == null)
         {
@@ -433,7 +695,7 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
 
         string label = L(localizationKey);
         Button button = CreateButton(screenRoot.transform, $"Nav_{localizationKey.Replace('.', '_')}", label);
-        SetRect((RectTransform)button.transform, xMin + 0.015f, yMin + 0.005f, 0.945f, yMin + TopButtonVisualMaxOffsetY);
+        SetRect((RectTransform)button.transform, xMin, yMin, xMax, yMax);
         button.onClick.RemoveAllListeners();
         button.onClick.AddListener(() => action());
         RegisterPersistentLocalizedLabel(button, localizationKey);
@@ -649,6 +911,7 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
         }
 
         RefreshPersistentLocalizedLabels();
+        UpdatePrimaryNavigationSelection();
         VanguardOffRaidPanelModel model = BuildCurrentPanel();
         titleLabel.text = model.Title;
         subtitleLabel.text = model.Subtitle;
@@ -758,6 +1021,7 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
                 Level = identity.Level,
                 StateLabel = canHire ? L("general.available") : limitReached ? L("general.limit_reached") : FriendlyValue(offer.MarketStatus, L("general.unavailable")),
                 AccentLabel = L("general.contract"),
+                AccentKind = OperatorCardAccentKind.Contract,
                 Placeholder = identity.Placeholder,
                 PortraitKey = identity.PortraitKey,
                 Tooltip = BuildContractTooltip(offer, identity, canHire, limitReached),
@@ -784,6 +1048,9 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
                 projection.Level);
             bool selected = projection.IsSelectedForRaid;
             bool eligible = selected || string.Equals(projection.EligibilityState, "eligible", StringComparison.OrdinalIgnoreCase);
+            VanguardOperatorMedicalProjectionDto? medicalProjection = state.MedicalProjections.FirstOrDefault(candidate =>
+                string.Equals(candidate.OperatorId, projection.OperatorId, StringComparison.OrdinalIgnoreCase));
+            bool needsMedicalAttention = IsMedicalAttentionRequired(medicalProjection);
             bool inventoryModeActive = VanguardOperatorInventoryModeClientState.IsActive;
             bool inventoryModeForThisOperator = inventoryModeActive
                 && string.Equals(VanguardOperatorInventoryModeClientState.OperatorId, projection.OperatorId, StringComparison.OrdinalIgnoreCase);
@@ -809,6 +1076,8 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
                 Level = identity.Level,
                 StateLabel = selected ? L("general.active") : L("general.rest"),
                 AccentLabel = (selected ? L("general.active") : L("general.rest")).ToUpperInvariant(),
+                AccentKind = selected ? OperatorCardAccentKind.Active : OperatorCardAccentKind.Resting,
+                Injured = needsMedicalAttention,
                 Placeholder = identity.Placeholder,
                 PortraitKey = identity.PortraitKey,
                 Tooltip = BuildServiceTooltip(projection, identity, eligible),
@@ -838,10 +1107,7 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
                 null,
                 projection.Level);
             int healthPercent = Mathf.Clamp((int)Math.Round(projection.CurrentHealthRatio * 100.0), 0, 100);
-            bool canTreat = projection.HealCost > 0
-                || projection.RecoveryCost > 0
-                || projection.CurrentHealthRatio < 0.999
-                || string.Equals(projection.RecoveryState, "recovering", StringComparison.OrdinalIgnoreCase);
+            bool canTreat = IsMedicalAttentionRequired(projection);
             cards.Add(new VanguardOperatorCardModel
             {
                 Title = identity.DisplayName,
@@ -852,6 +1118,8 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
                 Level = identity.Level,
                 StateLabel = $"{healthPercent}%",
                 AccentLabel = FriendlyValue(projection.MedicalStatus, projection.RecoveryState, L("general.medical")).ToUpperInvariant(),
+                AccentKind = canTreat ? OperatorCardAccentKind.Medical : OperatorCardAccentKind.Stable,
+                Injured = canTreat,
                 Placeholder = identity.Placeholder,
                 PortraitKey = identity.PortraitKey,
                 Tooltip = BuildHospitalTooltip(projection, identity, canTreat),
@@ -862,6 +1130,31 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
         }
 
         return cards;
+    }
+
+    private static bool IsMedicalAttentionRequired(VanguardOperatorMedicalProjectionDto? projection)
+    {
+        if (projection == null)
+        {
+            return false;
+        }
+
+        return projection.HealCost > 0
+            || projection.RecoveryCost > 0
+            || projection.CurrentHealthRatio < 0.999
+            || string.Equals(projection.RecoveryState, "recovering", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static Color ResolveOperatorCardStatusColor(OperatorCardAccentKind accentKind)
+    {
+        return accentKind switch
+        {
+            OperatorCardAccentKind.Contract => OperatorCardContractStatusColor,
+            OperatorCardAccentKind.Active => OperatorCardActiveStatusColor,
+            OperatorCardAccentKind.Resting => OperatorCardRestingStatusColor,
+            OperatorCardAccentKind.Medical => OperatorCardMedicalStatusColor,
+            _ => OperatorCardStableStatusColor
+        };
     }
 
     private void CreateOperatorCard(VanguardOperatorCardModel model, int index)
@@ -887,14 +1180,17 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
         SetRect((RectTransform)card.transform, xMin, yMin, xMax, yMax);
         cardObjects.Add(card);
 
+        Color cardNormalColor = model.Injured ? OperatorCardInjuredColor : OperatorCardNormalColor;
+        Color cardHoverColor = model.Injured ? OperatorCardInjuredHoverColor : OperatorCardNormalHoverColor;
+
         Image cardImage = card.GetComponent<Image>();
-        cardImage.color = new Color(0.035f, 0.043f, 0.038f, 0.94f);
+        cardImage.color = cardNormalColor;
         Button cardButton = card.GetComponent<Button>();
         var colors = cardButton.colors;
-        colors.normalColor = new Color(0.035f, 0.043f, 0.038f, 0.94f);
-        colors.highlightedColor = new Color(0.115f, 0.16f, 0.125f, 0.98f);
-        colors.pressedColor = new Color(0.06f, 0.09f, 0.075f, 1f);
-        colors.disabledColor = new Color(0.025f, 0.028f, 0.026f, 0.55f);
+        colors.normalColor = cardNormalColor;
+        colors.highlightedColor = cardHoverColor;
+        colors.pressedColor = model.Injured ? new Color(0.11f, 0.035f, 0.032f, 1f) : new Color(0.055f, 0.072f, 0.062f, 1f);
+        colors.disabledColor = model.Injured ? new Color(0.055f, 0.020f, 0.019f, 0.66f) : new Color(0.020f, 0.024f, 0.022f, 0.66f);
         cardButton.colors = colors;
 
         Action cardAction = model.CardExecute ?? model.Execute;
@@ -907,7 +1203,7 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
 
         var portrait = new GameObject("Portrait", typeof(RectTransform), typeof(Image));
         portrait.transform.SetParent(card.transform, false);
-        SetRect((RectTransform)portrait.transform, 0.075f, 0.315f, 0.925f, 0.940f);
+        SetRect((RectTransform)portrait.transform, 0.075f, 0.315f, 0.925f, 0.925f);
         Image portraitImage = portrait.GetComponent<Image>();
         portraitImage.color = new Color(0.08f, 0.10f, 0.09f, 0.98f);
         portraitImage.preserveAspect = true;
@@ -920,7 +1216,7 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
         if (portraitSprite != null)
         {
             portraitImage.sprite = portraitSprite;
-            portraitImage.color = Color.white;
+            portraitImage.color = model.Injured ? new Color(1.00f, 0.90f, 0.88f, 1.00f) : Color.white;
             portraitText.text = string.Empty;
         }
 
@@ -934,14 +1230,16 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
         SetRect(levelText.rectTransform, 0.02f, 0.05f, 0.98f, 0.95f);
         levelText.text = model.Level > 0 ? model.Level.ToString() : "-";
 
-        TextMeshProUGUI statusText = CreateText(card.transform, "Status", 10, TextAlignmentOptions.Center, new Color(0.68f, 0.82f, 0.70f));
-        SetRect(statusText.rectTransform, 0.48f, 0.86f, 0.96f, 0.98f);
+        TextMeshProUGUI statusText = CreateText(card.transform, "Status", 10, TextAlignmentOptions.TopRight, ResolveOperatorCardStatusColor(model.AccentKind));
+        SetRect(statusText.rectTransform, 0.56f, 0.935f, 0.965f, 0.995f);
         statusText.text = model.AccentLabel.ToUpperInvariant();
 
         var nameStrip = new GameObject("NameStrip", typeof(RectTransform), typeof(Image));
         nameStrip.transform.SetParent(card.transform, false);
         SetRect((RectTransform)nameStrip.transform, 0.035f, 0.178f, 0.965f, 0.315f);
-        nameStrip.GetComponent<Image>().color = new Color(0.09f, 0.075f, 0.055f, 0.96f);
+        nameStrip.GetComponent<Image>().color = model.Injured
+            ? new Color(0.125f, 0.045f, 0.040f, 0.96f)
+            : new Color(0.09f, 0.075f, 0.055f, 0.96f);
 
         TextMeshProUGUI nameText = CreateText(nameStrip.transform, "Name", 14, TextAlignmentOptions.Center, new Color(0.88f, 0.88f, 0.78f));
         SetRect(nameText.rectTransform, 0.02f, 0.05f, 0.98f, 0.95f);
@@ -959,19 +1257,13 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
         }
         else if (!string.IsNullOrWhiteSpace(model.ActionLabel))
         {
-            CreateCardActionButton(card.transform, "PrimaryAction", model.ActionLabel, model.Enabled, model.Execute, 0.035f, 0.020f, 0.795f, 0.128f);
+            // Single-action cards (notably Contracts/Hire and Hospital/Treat) use a centered button.
+            // Tooltip access remains on the whole card, so the former decorative question mark is unnecessary.
+            CreateCardActionButton(card.transform, "PrimaryAction", model.ActionLabel, model.Enabled, model.Execute, 0.180f, 0.020f, 0.820f, 0.128f);
         }
-
-        TextMeshProUGUI infoText = CreateText(card.transform, "QuestionMark", 15, TextAlignmentOptions.Center, new Color(0.64f, 0.76f, 0.86f));
-        SetRect(infoText.rectTransform, 0.820f, 0.020f, 0.980f, 0.128f);
-        infoText.text = hasSecondary ? string.Empty : "?";
 
         string tooltip = model.Tooltip;
-        AddTooltipTrigger(card, tooltip, xMin, yMin, xMax, yMax);
-        if (!hasSecondary)
-        {
-            AddTooltipTrigger(infoText.gameObject, tooltip, xMin, yMin, xMax, yMax);
-        }
+        AddTooltipTrigger(card, tooltip);
     }
 
     private void CreateCardActionButton(Transform parent, string name, string label, bool enabled, Action action, float xMin, float yMin, float xMax, float yMax)
@@ -981,17 +1273,17 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
         SetRect((RectTransform)buttonObject.transform, xMin, yMin, xMax, yMax);
 
         Image image = buttonObject.GetComponent<Image>();
-        image.color = enabled ? ButtonNormalBackgroundColor : ButtonDisabledBackgroundColor;
+        image.color = enabled ? OperatorCardButtonBackgroundColor : OperatorCardButtonDisabledBackgroundColor;
         image.raycastTarget = true;
 
         Button button = buttonObject.GetComponent<Button>();
         button.transition = Selectable.Transition.ColorTint;
         var colors = button.colors;
-        colors.normalColor = ButtonNormalBackgroundColor;
-        colors.highlightedColor = ButtonHoverBackgroundColor;
-        colors.pressedColor = ButtonPressedBackgroundColor;
-        colors.selectedColor = ButtonSelectedBackgroundColor;
-        colors.disabledColor = ButtonDisabledBackgroundColor;
+        colors.normalColor = OperatorCardButtonBackgroundColor;
+        colors.highlightedColor = OperatorCardButtonHoverBackgroundColor;
+        colors.pressedColor = OperatorCardButtonPressedBackgroundColor;
+        colors.selectedColor = OperatorCardButtonHoverBackgroundColor;
+        colors.disabledColor = OperatorCardButtonDisabledBackgroundColor;
         button.colors = colors;
         button.interactable = enabled && !actionInProgress;
         if (enabled)
@@ -1004,6 +1296,7 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
         buttonText.text = label;
         buttonText.enableWordWrapping = false;
         buttonText.overflowMode = TextOverflowModes.Ellipsis;
+
     }
 
     private void ClearCards()
@@ -1026,24 +1319,59 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
             return;
         }
 
-        tooltipRoot = new GameObject("Tooltip", typeof(RectTransform), typeof(Image));
+        tooltipRoot = new GameObject("OperatorDetailPanel", typeof(RectTransform), typeof(Image));
         tooltipRoot.transform.SetParent(screenRoot.transform, false);
-        tooltipRoot.GetComponent<Image>().color = new Color(0.018f, 0.022f, 0.021f, 0.985f);
-        tooltipLabel = CreateText(tooltipRoot.transform, "TooltipText", 12, TextAlignmentOptions.TopLeft, new Color(0.82f, 0.86f, 0.78f));
+        Image detailSurface = tooltipRoot.GetComponent<Image>();
+        detailSurface.color = OperatorDetailSurfaceColor;
+        detailSurface.raycastTarget = false;
+        PositionContextDetailPanel();
+
+        // Readability follows the information density instead of filling the entire contextual rail
+        // with a solid rectangle. A procedural vertical alpha fade keeps the text-bearing upper area
+        // dark enough while the unused lower portion dissolves back into the authored Vanguard surface.
+        var dossierReadabilityFadeRoot = new GameObject("OperatorDetailReadabilityFade", typeof(RectTransform), typeof(Image));
+        dossierReadabilityFadeRoot.transform.SetParent(tooltipRoot.transform, false);
+        SetRect((RectTransform)dossierReadabilityFadeRoot.transform, 0f, 0f, 1f, 1f);
+        Image dossierReadabilityFadeImage = dossierReadabilityFadeRoot.GetComponent<Image>();
+        dossierReadabilityFadeImage.sprite = ResolveOperatorDetailReadabilityFadeSprite();
+        dossierReadabilityFadeImage.type = Image.Type.Simple;
+        dossierReadabilityFadeImage.preserveAspect = false;
+        dossierReadabilityFadeImage.color = OperatorDetailReadabilityFadeColor;
+        dossierReadabilityFadeImage.raycastTarget = false;
+
+        // A faint terminal texture and a soft header wash establish dossier hierarchy without
+        // reintroducing a border language. Both layers are presentation-only and ignore pointer input.
+        var dossierTextureRoot = new GameObject("OperatorDetailTexture", typeof(RectTransform), typeof(Image));
+        dossierTextureRoot.transform.SetParent(tooltipRoot.transform, false);
+        SetRect((RectTransform)dossierTextureRoot.transform, 0f, 0f, 1f, 1f);
+        Image dossierTextureImage = dossierTextureRoot.GetComponent<Image>();
+        dossierTextureImage.sprite = ResolveOperatorDetailTextureSprite();
+        dossierTextureImage.type = Image.Type.Tiled;
+        dossierTextureImage.color = OperatorDetailTextureColor;
+        dossierTextureImage.raycastTarget = false;
+
+        var dossierHeaderWash = new GameObject("OperatorDetailHeaderWash", typeof(RectTransform), typeof(Image));
+        dossierHeaderWash.transform.SetParent(tooltipRoot.transform, false);
+        SetRect((RectTransform)dossierHeaderWash.transform, 0f, 0.805f, 1f, 1f);
+        Image dossierHeaderWashImage = dossierHeaderWash.GetComponent<Image>();
+        dossierHeaderWashImage.color = OperatorDetailHeaderWashColor;
+        dossierHeaderWashImage.raycastTarget = false;
+
+        tooltipLabel = CreateText(tooltipRoot.transform, "OperatorDetailText", 12, TextAlignmentOptions.TopLeft, OperatorDetailTextColor);
         tooltipLabel.richText = true;
-        SetRect(tooltipLabel.rectTransform, 0.045f, 0.045f, 0.955f, 0.955f);
+        SetRect(tooltipLabel.rectTransform, 0.065f, 0.045f, 0.940f, 0.955f);
         tooltipLabel.enableWordWrapping = true;
         tooltipLabel.overflowMode = TextOverflowModes.Overflow;
         tooltipRoot.SetActive(false);
     }
 
-    private void AddTooltipTrigger(GameObject target, string tooltip, float cardXMin, float cardYMin, float cardXMax, float cardYMax)
+    private void AddTooltipTrigger(GameObject target, string tooltip)
     {
         EventTrigger trigger = target.GetComponent<EventTrigger>() ?? target.AddComponent<EventTrigger>();
         trigger.triggers ??= new List<EventTrigger.Entry>();
 
         var enter = new EventTrigger.Entry { eventID = EventTriggerType.PointerEnter };
-        enter.callback.AddListener(_ => ShowTooltip(tooltip, cardXMin, cardYMin, cardXMax, cardYMax));
+        enter.callback.AddListener(_ => ShowTooltip(tooltip));
         trigger.triggers.Add(enter);
 
         var exit = new EventTrigger.Entry { eventID = EventTriggerType.PointerExit };
@@ -1051,7 +1379,7 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
         trigger.triggers.Add(exit);
     }
 
-    private void ShowTooltip(string tooltip, float cardXMin, float cardYMin, float cardXMax, float cardYMax)
+    private void ShowTooltip(string tooltip)
     {
         if (tooltipRoot == null || tooltipLabel == null)
         {
@@ -1059,15 +1387,28 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
         }
 
         tooltipLabel.text = tooltip;
-        // Keep contract/service details in the intentionally empty lower-center area.
-        // The previous card-adjacent overlay could hide neighboring contract cards.
-        const float tipXMin = 0.385f;
-        const float tipXMax = 0.685f;
-        const float tipYMin = 0.075f;
-        const float tipYMax = 0.415f;
-        SetRect((RectTransform)tooltipRoot.transform, tipXMin, tipYMin, tipXMax, tipYMax);
+        PositionContextDetailPanel();
         tooltipRoot.SetActive(true);
         tooltipRoot.transform.SetAsLastSibling();
+    }
+
+    private void PositionContextDetailPanel()
+    {
+        if (tooltipRoot == null)
+        {
+            return;
+        }
+
+        int activeContextActionCount = actionButtons.Count(button => button != null && button.gameObject.activeSelf);
+        float yMax = ContextDetailDefaultYMax;
+        if (activeContextActionCount > 0)
+        {
+            float lowestActionYMin = ContextActionFirstMinY - ((activeContextActionCount - 1) * ContextActionStepY);
+            yMax = lowestActionYMin - ContextDetailGap;
+        }
+
+        yMax = Mathf.Max(ContextDetailYMin + ContextDetailMinHeight, yMax);
+        SetRect((RectTransform)tooltipRoot.transform, ContextDetailXMin, ContextDetailYMin, ContextDetailXMax, yMax);
     }
 
     private void HideTooltip()
@@ -1223,10 +1564,10 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
     private static string BuildOperatorTooltip(VanguardCanonicalOperatorView identity, string context, IEnumerable<(string Label, string Value)> rows)
     {
         var builder = new System.Text.StringBuilder();
-        builder.AppendLine($"<b>{identity.DisplayName}</b>");
-        builder.AppendLine($"<color=#A9BDAE>{F("tooltip.level_line", identity.FactionLabel, identity.RoleLabel, identity.Level, context)}</color>");
-        builder.AppendLine("<color=#49534D>────────────────────────</color>");
-        builder.AppendLine($"<b>{L("tooltip.identity")}</b>");
+        builder.AppendLine($"<size=118%><color=#E4E8D8><b>{identity.DisplayName}</b></color></size>");
+        builder.AppendLine($"<size=88%><color=#A9BDAE>{F("tooltip.level_line", identity.FactionLabel, identity.RoleLabel, identity.Level, context)}</color></size>");
+        builder.AppendLine("<color=#725A32>────────────────────────</color>");
+        builder.AppendLine($"<size=92%><color=#D9953A><b>{L("tooltip.identity")}</b></color></size>");
         builder.AppendLine(F("tooltip.row", L("label.faction"), identity.FactionLabel));
         builder.AppendLine(F("tooltip.row", L("label.role"), identity.RoleLabel));
         if (!string.IsNullOrWhiteSpace(identity.VisualFamily))
@@ -1234,8 +1575,8 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
             builder.AppendLine(F("tooltip.row", L("label.visual_family"), FriendlyValue(identity.VisualFamily)));
         }
 
-        builder.AppendLine("<color=#49534D>────────────────────────</color>");
-        builder.AppendLine($"<b>{L("tooltip.operational_profile")}</b>");
+        builder.AppendLine("<color=#725A32>────────────────────────</color>");
+        builder.AppendLine($"<size=92%><color=#D9953A><b>{L("tooltip.operational_profile")}</b></color></size>");
         foreach ((string label, string value) in rows)
         {
             string safeValue = string.IsNullOrWhiteSpace(value) ? L("general.undefined") : value;
@@ -1243,23 +1584,6 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
         }
 
         return builder.ToString();
-    }
-
-    private static string ShortenTechnicalPlan(params string?[] values)
-    {
-        string raw = Safe(values);
-        if (string.IsNullOrWhiteSpace(raw))
-        {
-            return string.Empty;
-        }
-
-        string normalized = raw.ToLowerInvariant()
-            .Replace("vanguard.sain.", string.Empty)
-            .Replace("vanguard.tuning.", string.Empty)
-            .Replace("vanguard.", string.Empty)
-            .Replace('.', '_')
-            .Replace('-', '_');
-        return normalized;
     }
 
     private static string FormatRole(string? role, string? specialty)
@@ -1300,16 +1624,6 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
     private static string FormatMoney(int amount)
     {
         return amount <= 0 ? "0 ₽" : $"{amount.ToString("N0", CultureInfo.InvariantCulture)} ₽";
-    }
-
-    private static string BuildPortraitPlaceholder(string displayName, string? side)
-    {
-        string prefix = Safe(side, "VG");
-        string[] parts = displayName.Split(new[] { ' ', '-', '_' }, StringSplitOptions.RemoveEmptyEntries);
-        string initials = parts.Length == 0
-            ? "?"
-            : string.Concat(parts.Take(2).Select(part => char.ToUpperInvariant(part[0])));
-        return $"{prefix}\n{initials}";
     }
 
     private void RenderInfoSections(VanguardOffRaidPanelModel model)
@@ -1847,21 +2161,32 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
         }
 
         menuButtonObject.SetActive(sourceButtonComponent == null || sourceButtonComponent.gameObject.activeSelf || !vanillaMenuHidden);
+        if (sourceButtonComponent != null)
+        {
+            ConvergeInteropMenuButtonVisibility(sourceButtonComponent.gameObject, menuButtonObject);
+        }
+
         ConfigureVanguardMenuButton(menuButtonObject);
         enforceMenuLabelUntilRealtime = Time.realtimeSinceStartup + 6.0f;
-        nextExternalMenuLayoutRefreshRealtime = 0f;
+        nextInteropMenuLayoutRefreshRealtime = 0f;
         if (sourceButtonComponent != null
             && sourceButtonComponent.transform.parent != null
             && sourceButtonComponent.transform is RectTransform sourceRect
             && menuButtonObject.transform is RectTransform menuRect)
         {
-            if (VanguardMenuOverhaulCompat.IsInstalled)
+            Transform parent = sourceButtonComponent.transform.parent;
+            if (VanguardMainMenuPlacementOptions.TryGetActivePlacement(out _, out float xPercent, out float yPercent))
             {
-                ApplyExternalMainMenuOwnedLayout(sourceButtonComponent.transform.parent, sourceRect, menuRect);
+                ApplyProfiledVanguardButtonPosition(parent, menuRect, xPercent, yPercent);
+            }
+            else if (VanguardMainMenuPlacementOptions.HasAnyConfiguredPluginLoaded())
+            {
+                ApplyMenuButtonLayout(sourceButtonComponent.gameObject, menuButtonObject);
             }
             else
             {
-                ApplyTwoColumnMenuLayout(sourceButtonComponent.transform.parent, sourceRect, menuRect);
+                CaptureOriginalMenuPositions(parent);
+                ApplyTwoColumnMenuLayout(parent, sourceRect, menuRect);
             }
         }
     }
@@ -1870,9 +2195,9 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
     {
         SetButtonLabel(buttonObject, VanguardOperatorsLocalizationService.Get("menu.button"));
         DisableTextLocalizationComponents(buttonObject);
-        if (VanguardMenuOverhaulCompat.IsInstalled)
+        if (VanguardMainMenuInterop.Has(VanguardMainMenuInteropCapability.ExternalVisualStyleAuthority))
         {
-            ConfigureExternalMenuOwnedVisuals(buttonObject);
+            ConfigureExternallyOwnedMenuVisuals(buttonObject);
         }
         else
         {
@@ -1882,10 +2207,10 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
         ConfigureVanguardMenuIcon(buttonObject);
     }
 
-    private static void ConfigureExternalMenuOwnedVisuals(GameObject buttonObject)
+    private static void ConfigureExternallyOwnedMenuVisuals(GameObject buttonObject)
     {
-        // Menu Overhaul has no Vanguard icon registration surface. Preserve its background-free button
-        // presentation and leave the cloned icon geometry available; ConfigureVanguardMenuIcon replaces
+        // An external visual-style owner has no Vanguard icon registration surface. Preserve its background-free
+        // presentation and leave cloned icon geometry available; ConfigureVanguardMenuIcon replaces
         // inherited artwork only inside Vanguard's own clone.
         Transform? background = buttonObject.transform.Find("Background");
         if (background != null)
@@ -1893,8 +2218,8 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
             background.gameObject.SetActive(false);
         }
 
-        // Do not force inherited icon containers active here. Menu Overhaul owns the external
-        // presentation; ConfigureVanguardMenuIcon decides separately whether a canonical icon slot
+        // Do not force inherited icon containers active here. The registered external style owner retains
+        // presentation authority; ConfigureVanguardMenuIcon decides separately whether a canonical icon slot
         // inside Vanguard's clone may be re-enabled for Vanguard-owned artwork.
     }
 
@@ -1949,13 +2274,13 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
         Image[] nativeIconImages = ResolveNativeMenuIconImages(buttonObject, iconContainer, templateGraphic);
         if (nativeIconImages.Length > 0)
         {
-            // Preserve EFT/Menu Overhaul's own animation carriers. Native button animation changes the
+            // Preserve EFT/external-owner animation carriers. Native button animation changes the
             // active GameObjects/geometry for normal and hover states; replacing their sprites keeps
             // those transitions authoritative instead of reproducing them in a Vanguard-only Image.
             VanguardMenuIconVisualState state = existingState ?? buttonObject.AddComponent<VanguardMenuIconVisualState>();
             state.BindNative(iconSprite, nativeIconImages);
             LogMenuIconStatusOnce(
-                $"configured=true; mode=native_carriers; carriers={nativeIconImages.Length}; menuOverhaul={VanguardMenuOverhaulCompat.IsInstalled}; resource={MenuIconResourceName}");
+                $"configured=true; mode=native_carriers; carriers={nativeIconImages.Length}; externalVisualStyle={VanguardMainMenuInterop.Has(VanguardMainMenuInteropCapability.ExternalVisualStyleAuthority)}; resource={MenuIconResourceName}");
             return;
         }
 
@@ -1992,7 +2317,294 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
         VanguardMenuIconVisualState fallbackState = existingState ?? buttonObject.AddComponent<VanguardMenuIconVisualState>();
         fallbackState.BindFallback(iconSprite, iconImage);
         LogMenuIconStatusOnce(
-            $"configured=true; mode=owned_fallback; carriers=1; menuOverhaul={VanguardMenuOverhaulCompat.IsInstalled}; resource={MenuIconResourceName}");
+            $"configured=true; mode=owned_fallback; carriers=1; externalVisualStyle={VanguardMainMenuInterop.Has(VanguardMainMenuInteropCapability.ExternalVisualStyleAuthority)}; resource={MenuIconResourceName}");
+    }
+
+    private static Sprite ResolveOperatorDetailReadabilityFadeSprite()
+    {
+        if (operatorDetailReadabilityFadeSprite != null)
+        {
+            return operatorDetailReadabilityFadeSprite;
+        }
+
+        const int width = 4;
+        const int height = 128;
+        var texture = new Texture2D(width, height, TextureFormat.RGBA32, false)
+        {
+            name = "Vanguard_OperatorDetail_ReadabilityFade",
+            wrapMode = TextureWrapMode.Clamp,
+            filterMode = FilterMode.Bilinear
+        };
+
+        var pixels = new Color32[width * height];
+        for (int y = 0; y < height; y++)
+        {
+            float normalizedY = y / (height - 1f);
+            float fade = Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(0.08f, 0.78f, normalizedY));
+            byte alpha = (byte)Mathf.RoundToInt(Mathf.Lerp(0f, 224f, fade));
+            for (int x = 0; x < width; x++)
+            {
+                pixels[(y * width) + x] = new Color32(255, 255, 255, alpha);
+            }
+        }
+
+        texture.SetPixels32(pixels);
+        texture.Apply(false, true);
+        operatorDetailReadabilityFadeSprite = Sprite.Create(
+            texture,
+            new Rect(0f, 0f, width, height),
+            new Vector2(0.5f, 0.5f),
+            100f,
+            0u,
+            SpriteMeshType.FullRect);
+        operatorDetailReadabilityFadeSprite.name = "Vanguard_OperatorDetail_ReadabilityFadeSprite";
+        return operatorDetailReadabilityFadeSprite;
+    }
+
+    private static Sprite ResolveOperatorDetailTextureSprite()
+    {
+        if (operatorDetailTextureSprite != null)
+        {
+            return operatorDetailTextureSprite;
+        }
+
+        const int width = 64;
+        const int height = 64;
+        var texture = new Texture2D(width, height, TextureFormat.RGBA32, false)
+        {
+            name = "Vanguard_OperatorDetail_TerminalTexture",
+            wrapMode = TextureWrapMode.Repeat,
+            filterMode = FilterMode.Bilinear
+        };
+
+        var pixels = new Color32[width * height];
+        for (int y = 0; y < height; y++)
+        {
+            for (int x = 0; x < width; x++)
+            {
+                bool scanline = (y % 4) == 0;
+                bool terminalDot = (x % 16) == 0 && (y % 16) == 0;
+                byte alpha = terminalDot ? (byte)30 : scanline ? (byte)14 : (byte)0;
+                pixels[(y * width) + x] = new Color32(255, 255, 255, alpha);
+            }
+        }
+
+        texture.SetPixels32(pixels);
+        texture.Apply(false, true);
+        operatorDetailTextureSprite = Sprite.Create(
+            texture,
+            new Rect(0f, 0f, width, height),
+            new Vector2(0.5f, 0.5f),
+            100f,
+            0u,
+            SpriteMeshType.FullRect);
+        operatorDetailTextureSprite.name = "Vanguard_OperatorDetail_TerminalTextureSprite";
+        return operatorDetailTextureSprite;
+    }
+
+    private static Sprite? ResolveOffRaidBackgroundSprite()
+    {
+        if (offRaidBackgroundSprite != null)
+        {
+            return offRaidBackgroundSprite;
+        }
+
+        // Authored Vanguard/Tarkov command surface. The embedded PNG is intentionally alpha-contoured:
+        // irregular burned/faded edges provide the transition back into EFT while industrial ruins,
+        // worn technical traces and restrained network cues establish identity without depicting a
+        // literal satellite map. Runtime zoning remains independent from this artwork. The former
+        // procedural command-network texture remains only as a deterministic decode fallback.
+        try
+        {
+            using Stream? stream = Assembly.GetExecutingAssembly().GetManifestResourceStream(OffRaidBackgroundResourceName);
+            if (stream != null)
+            {
+                using var memory = new MemoryStream();
+                stream.CopyTo(memory);
+                var authoredTexture = new Texture2D(2, 2, TextureFormat.RGBA32, false);
+                if (ImageConversion.LoadImage(authoredTexture, memory.ToArray()))
+                {
+                    authoredTexture.name = "Vanguard_OffRaid_CommandSurface";
+                    authoredTexture.wrapMode = TextureWrapMode.Clamp;
+                    authoredTexture.filterMode = FilterMode.Bilinear;
+                    offRaidBackgroundSprite = Sprite.Create(
+                        authoredTexture,
+                        new Rect(0f, 0f, authoredTexture.width, authoredTexture.height),
+                        new Vector2(0.5f, 0.5f),
+                        100f);
+                    offRaidBackgroundSprite.name = "Vanguard_OffRaid_CommandSurfaceSprite";
+                    LogOffRaidBackgroundStatusOnce($"configured=true; mode=embedded_authored_command_surface; resource={OffRaidBackgroundResourceName}; size={authoredTexture.width}x{authoredTexture.height}");
+                    return offRaidBackgroundSprite;
+                }
+
+                Destroy(authoredTexture);
+                LogOffRaidBackgroundStatusOnce($"configured=false; mode=procedural_fallback; reason=image_decode_failed; resource={OffRaidBackgroundResourceName}");
+            }
+            else
+            {
+                LogOffRaidBackgroundStatusOnce($"configured=false; mode=procedural_fallback; reason=resource_missing; resource={OffRaidBackgroundResourceName}");
+            }
+        }
+        catch (Exception exception)
+        {
+            VanguardClientDiagnosticsLog.Error(VanguardBuildVersion.OffRaidUiStatusTag, exception);
+            LogOffRaidBackgroundStatusOnce($"configured=false; mode=procedural_fallback; reason=resource_exception; resource={OffRaidBackgroundResourceName}");
+        }
+
+        // UI-1G deterministic fallback retained for resilience only.
+        const int width = 256;
+        const int height = 256;
+        var texture = new Texture2D(width, height, TextureFormat.RGBA32, false)
+        {
+            name = "Vanguard_OffRaid_CommandNetworkTexture",
+            wrapMode = TextureWrapMode.Clamp,
+            filterMode = FilterMode.Bilinear
+        };
+
+        Vector2[] networkNodes =
+        {
+            new(0.10f, 0.76f),
+            new(0.30f, 0.64f),
+            new(0.52f, 0.73f),
+            new(0.66f, 0.50f),
+            new(0.83f, 0.60f),
+            new(0.91f, 0.32f),
+            new(0.60f, 0.24f),
+            new(0.33f, 0.31f)
+        };
+        int[] networkLinks = { 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 3, 6, 6, 7, 7, 1 };
+
+        var pixels = new Color[width * height];
+        for (int y = 0; y < height; y++)
+        {
+            float v = y / (float)(height - 1);
+            for (int x = 0; x < width; x++)
+            {
+                float u = x / (float)(width - 1);
+
+                float coolDx = (u - 0.12f) / 0.78f;
+                float coolDy = (v - 0.86f) / 0.74f;
+                float coolGlow = Mathf.Clamp01(1f - Mathf.Sqrt((coolDx * coolDx) + (coolDy * coolDy)));
+
+                float warmDx = (u - 0.90f) / 0.82f;
+                float warmDy = (v - 0.14f) / 0.76f;
+                float warmGlow = Mathf.Clamp01(1f - Mathf.Sqrt((warmDx * warmDx) + (warmDy * warmDy)));
+
+                // Deterministic distressed terrain grain: broad enough to evoke Tarkov wear without
+                // looking like visible digital noise at native menu scale.
+                float terrainNoise = VanguardBackgroundNoise(x / 5, y / 5) - 0.5f;
+                float fineNoise = VanguardBackgroundNoise(x, y) - 0.5f;
+
+                // Sparse command grid. Major lines are intentionally only marginally brighter than
+                // the base surface so they read subconsciously rather than as literal table borders.
+                bool majorGrid = (x % 64 == 0) || (y % 64 == 0);
+                bool minorGrid = (x % 24 == 0) || (y % 24 == 0);
+                float gridLine = majorGrid ? 0.010f : (minorGrid ? 0.004f : 0f);
+
+                // Terrain/map contour hint. This is not a literal geography asset: it is a low-alpha
+                // procedural contour family that provides the intelligence-map tone requested for Vanguard.
+                float contourWave = Mathf.Sin((u * 19f) + Mathf.Sin(v * 8f) * 1.6f)
+                    + Mathf.Cos((v * 17f) - (u * 5f));
+                float contourDistance = Mathf.Abs(contourWave - Mathf.Round(contourWave));
+                float contourLine = contourDistance < 0.027f ? 0.008f : 0f;
+
+                // Clandestine-network graph: faint connections and small nodes spread across the
+                // command surface. No animation and no text keep the effect restrained and EFT-safe.
+                var sample = new Vector2(u, v);
+                float networkGlow = 0f;
+                for (int link = 0; link < networkLinks.Length; link += 2)
+                {
+                    float distance = DistanceToVanguardSegment(
+                        sample,
+                        networkNodes[networkLinks[link]],
+                        networkNodes[networkLinks[link + 1]]);
+                    networkGlow = Mathf.Max(networkGlow, Mathf.Clamp01(1f - (distance / 0.0045f)) * 0.010f);
+                }
+
+                float nodeGlow = 0f;
+                for (int node = 0; node < networkNodes.Length; node++)
+                {
+                    float distance = Vector2.Distance(sample, networkNodes[node]);
+                    nodeGlow = Mathf.Max(nodeGlow, Mathf.Clamp01(1f - (distance / 0.012f)) * 0.018f);
+                }
+
+                float edgeX = Mathf.Abs((u * 2f) - 1f);
+                float edgeY = Mathf.Abs((v * 2f) - 1f);
+                float vignette = Mathf.Clamp01(((edgeX * edgeX) + (edgeY * edgeY)) * 0.28f);
+
+                float red = 0.009f
+                    + (coolGlow * 0.006f)
+                    + (warmGlow * 0.020f)
+                    + (terrainNoise * 0.006f)
+                    + (fineNoise * 0.002f)
+                    + (gridLine * 0.45f)
+                    + (contourLine * 0.30f)
+                    + (networkGlow * 0.45f)
+                    + (nodeGlow * 0.38f)
+                    - (vignette * 0.006f);
+                float green = 0.018f
+                    + (coolGlow * 0.023f)
+                    + (warmGlow * 0.010f)
+                    + (terrainNoise * 0.008f)
+                    + (fineNoise * 0.002f)
+                    + gridLine
+                    + contourLine
+                    + networkGlow
+                    + nodeGlow
+                    - (vignette * 0.008f);
+                float blue = 0.018f
+                    + (coolGlow * 0.026f)
+                    + (warmGlow * 0.003f)
+                    + (terrainNoise * 0.006f)
+                    + (fineNoise * 0.002f)
+                    + (gridLine * 0.85f)
+                    + (contourLine * 0.85f)
+                    + (networkGlow * 0.90f)
+                    + (nodeGlow * 0.82f)
+                    - (vignette * 0.009f);
+                float alpha = 0.70f + (vignette * 0.06f);
+
+                pixels[(y * width) + x] = new Color(
+                    Mathf.Clamp01(red),
+                    Mathf.Clamp01(green),
+                    Mathf.Clamp01(blue),
+                    Mathf.Clamp01(alpha));
+            }
+        }
+
+        texture.SetPixels(pixels);
+        texture.Apply(false, true);
+        offRaidBackgroundSprite = Sprite.Create(
+            texture,
+            new Rect(0f, 0f, texture.width, texture.height),
+            new Vector2(0.5f, 0.5f),
+            100f);
+        offRaidBackgroundSprite.name = "Vanguard_OffRaid_CommandNetworkSprite";
+        return offRaidBackgroundSprite;
+    }
+
+    private static float VanguardBackgroundNoise(int x, int y)
+    {
+        unchecked
+        {
+            uint value = (uint)((x * 374761393) + (y * 668265263));
+            value = (value ^ (value >> 13)) * 1274126177u;
+            value ^= value >> 16;
+            return (value & 0x00FFFFFFu) / 16777215f;
+        }
+    }
+
+    private static float DistanceToVanguardSegment(Vector2 point, Vector2 start, Vector2 end)
+    {
+        Vector2 segment = end - start;
+        float denominator = segment.sqrMagnitude;
+        if (denominator <= 0.000001f)
+        {
+            return Vector2.Distance(point, start);
+        }
+
+        float t = Mathf.Clamp01(Vector2.Dot(point - start, segment) / denominator);
+        return Vector2.Distance(point, start + (segment * t));
     }
 
     private static Sprite? ResolveVanguardMenuIconSprite()
@@ -2071,7 +2683,7 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
             return false;
         }
 
-        // This is Vanguard's cloned button, not Menu Overhaul's original button. Re-enabling the
+        // This is Vanguard's cloned button, not the external owner's original button. Re-enabling the
         // canonical icon slot is therefore bounded to Vanguard-owned presentation and does not move
         // or mutate any externally owned main-menu RectTransform.
         iconContainer.gameObject.SetActive(true);
@@ -2246,6 +2858,17 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
 
         menuIconStatusLogged = true;
         VanguardClientDiagnosticsLog.Info("VANGUARD_OFFRAID_MENU_ICON_STATUS", message);
+    }
+
+    private static void LogOffRaidBackgroundStatusOnce(string message)
+    {
+        if (offRaidBackgroundStatusLogged)
+        {
+            return;
+        }
+
+        offRaidBackgroundStatusLogged = true;
+        VanguardClientDiagnosticsLog.Info(VanguardBuildVersion.OffRaidUiStatusTag, $"visual_background {message}");
     }
 
     private void RegisterVanillaButtonVisuals(GameObject buttonObject, TextMeshProUGUI label, GameObject hoverPlate, TextMeshProUGUI hoverIcon)
@@ -2656,70 +3279,121 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
         }
     }
 
-    private static void ApplyExternalMainMenuOwnedLayout(Transform parent, RectTransform sourceRect, RectTransform menuRect)
+    private static void ApplyProfiledVanguardButtonPosition(
+        Transform parent,
+        RectTransform menuRect,
+        float xPercent,
+        float yPercent)
     {
-        // Menu Overhaul owns the vanilla buttons. Observe its resulting geometry and append Vanguard
-        // below the lowest managed button without disabling layouts, moving siblings or invoking its internals.
-        List<RectTransform> ownedRects = MenuOverhaulOwnedButtonNames
-            .Select(name => parent.Find(name))
-            .OfType<RectTransform>()
-            .Where(rect => rect != menuRect)
-            .ToList();
-
-        if (ownedRects.Count == 0)
+        // This path applies an absolute normalized target every time. Only Vanguard's RectTransform is written;
+        // no companion anchor, sibling row or external/vanilla button is ever rebalanced by this path.
+        if (parent is not RectTransform referenceRect)
         {
-            CopyExternalButtonGeometry(sourceRect, menuRect, sourceRect.anchoredPosition + new Vector2(0f, -ExternalMenuFallbackVerticalStep));
             return;
         }
 
-        RectTransform lowest = ownedRects
-            .OrderBy(rect => rect.anchoredPosition.y)
-            .ThenBy(rect => rect.GetSiblingIndex())
-            .First();
-        float verticalStep = ResolveObservedExternalVerticalStep(ownedRects);
-        Vector2 targetPosition = new(lowest.anchoredPosition.x, lowest.anchoredPosition.y - verticalStep);
-        CopyExternalButtonGeometry(lowest, menuRect, targetPosition);
+        Rect referenceBounds = referenceRect.rect;
+        float normalizedX = Mathf.Clamp01(xPercent / 100f);
+        float normalizedY = Mathf.Clamp01(yPercent / 100f);
+        float targetLocalX = Mathf.Lerp(referenceBounds.xMin, referenceBounds.xMax, normalizedX);
+        float targetLocalY = Mathf.Lerp(referenceBounds.yMin, referenceBounds.yMax, normalizedY);
+        Vector3 localPosition = menuRect.localPosition;
+        localPosition.x = targetLocalX;
+        localPosition.y = targetLocalY;
+        menuRect.localPosition = localPosition;
     }
 
-    // Derive spacing from what is actually on screen instead of copying Menu Overhaul's current default.
-    // Using the median non-trivial gap makes the added button tolerate user F12 offsets and small future
-    // presentation changes while rejecting tiny transform noise. The clamp prevents pathological geometry
-    // from pushing Vanguard far outside the visible menu.
-    private static float ResolveObservedExternalVerticalStep(IReadOnlyList<RectTransform> rects)
+    private void ConvergeInteropMenuButtonVisibility(GameObject sourceButton, GameObject vanguardButton)
     {
-        float[] yValues = rects
-            .Select(rect => rect.anchoredPosition.y)
-            .Distinct()
-            .OrderByDescending(value => value)
-            .ToArray();
-        var steps = new List<float>();
-        for (int index = 1; index < yValues.Length; index++)
+        // Visibility convergence is opt-in through the central registry. It exists for integrations that rebuild
+        // the menu by temporarily hiding known entries (typically through CanvasGroup) and later revealing only
+        // their own registered stack. Vanguard never patches that lifecycle; it mirrors the live primary entry
+        // onto its own clone and leaves every third-party/vanilla object untouched.
+        if (vanillaMenuHidden
+            || !VanguardMainMenuInterop.Has(VanguardMainMenuInteropCapability.ExternalVisibilityLifecycle))
         {
-            float delta = Mathf.Abs(yValues[index - 1] - yValues[index]);
-            if (delta >= 8f)
+            return;
+        }
+
+        bool shouldBeActive = sourceButton.activeSelf;
+        if (vanguardButton.activeSelf != shouldBeActive)
+        {
+            vanguardButton.SetActive(shouldBeActive);
+        }
+
+        if (!shouldBeActive)
+        {
+            return;
+        }
+
+        CanvasGroup[] sourceGroups = sourceButton.GetComponents<CanvasGroup>();
+        CanvasGroup[] targetGroups = vanguardButton.GetComponents<CanvasGroup>();
+        if (sourceGroups.Length == 0)
+        {
+            // No source-local visibility carrier means the effective local state is identity. Normalize any
+            // stale group retained by the clone from an earlier rebuild so a removed/recreated external
+            // CanvasGroup cannot leave Vanguard permanently transparent after returning from Operator UI.
+            foreach (CanvasGroup targetGroup in targetGroups)
             {
-                steps.Add(delta);
+                if (targetGroup == null)
+                {
+                    continue;
+                }
+
+                targetGroup.alpha = 1f;
+                targetGroup.interactable = true;
+                targetGroup.blocksRaycasts = true;
+                targetGroup.ignoreParentGroups = false;
             }
+
+            return;
         }
 
-        if (steps.Count == 0)
+        // Collapse any number of source-local groups into one effective local state. Parent CanvasGroups are
+        // intentionally excluded because source and clone share the same parent hierarchy and already inherit
+        // those equally. Extra groups on the clone are normalized to identity so an inherited/transient hidden
+        // group cannot multiply alpha back to zero after the source is revealed.
+        float sourceAlpha = 1f;
+        bool sourceInteractable = true;
+        bool sourceBlocksRaycasts = true;
+        bool sourceIgnoresParentGroups = false;
+        foreach (CanvasGroup sourceGroup in sourceGroups)
         {
-            return ExternalMenuFallbackVerticalStep;
+            if (sourceGroup == null)
+            {
+                continue;
+            }
+
+            sourceAlpha *= Mathf.Clamp01(sourceGroup.alpha);
+            sourceInteractable &= sourceGroup.interactable;
+            sourceBlocksRaycasts &= sourceGroup.blocksRaycasts;
+            sourceIgnoresParentGroups |= sourceGroup.ignoreParentGroups;
         }
 
-        steps.Sort();
-        float observed = steps[steps.Count / 2];
-        return Mathf.Clamp(observed, 36f, 120f);
-    }
+        if (targetGroups.Length == 0)
+        {
+            targetGroups = new[] { vanguardButton.AddComponent<CanvasGroup>() };
+        }
 
-    // Copy only anchor/pivot geometry required for Vanguard to live in the same coordinate system.
-    // Width, visual state, sibling order and every vanilla RectTransform remain under the external owner.
-    private static void CopyExternalButtonGeometry(RectTransform referenceRect, RectTransform menuRect, Vector2 anchoredPosition)
-    {
-        menuRect.anchorMin = referenceRect.anchorMin;
-        menuRect.anchorMax = referenceRect.anchorMax;
-        menuRect.pivot = referenceRect.pivot;
-        menuRect.anchoredPosition = anchoredPosition;
+        CanvasGroup primaryTarget = targetGroups[0];
+        primaryTarget.alpha = Mathf.Clamp01(sourceAlpha);
+        primaryTarget.interactable = sourceInteractable;
+        primaryTarget.blocksRaycasts = sourceBlocksRaycasts;
+        primaryTarget.ignoreParentGroups = sourceIgnoresParentGroups;
+
+        for (int index = 1; index < targetGroups.Length; index++)
+        {
+            CanvasGroup extraTarget = targetGroups[index];
+            if (extraTarget == null)
+            {
+                continue;
+            }
+
+            extraTarget.alpha = 1f;
+            extraTarget.interactable = true;
+            extraTarget.blocksRaycasts = true;
+            extraTarget.ignoreParentGroups = false;
+        }
     }
 
     private void ApplyTwoColumnMenuLayout(Transform parent, RectTransform playerRect, RectTransform menuRect)
@@ -3140,6 +3814,15 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
         public string LabelText { get; set; } = string.Empty;
     }
 
+    private enum OperatorCardAccentKind
+    {
+        Contract,
+        Active,
+        Resting,
+        Medical,
+        Stable
+    }
+
     private sealed class VanguardOperatorCardModel
     {
         public string Title { get; init; } = string.Empty;
@@ -3150,6 +3833,8 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
         public int Level { get; init; }
         public string StateLabel { get; init; } = string.Empty;
         public string AccentLabel { get; init; } = string.Empty;
+        public OperatorCardAccentKind AccentKind { get; init; } = OperatorCardAccentKind.Stable;
+        public bool Injured { get; init; }
         public string Placeholder { get; init; } = string.Empty;
         public string PortraitKey { get; init; } = string.Empty;
         public string Tooltip { get; init; } = string.Empty;
@@ -3246,7 +3931,7 @@ internal sealed class VanguardMenuIconVisualState : MonoBehaviour, IPointerEnter
             }
 
             // Deliberately preserve enabled state, GameObject activity, RectTransform, material and
-            // preserveAspect. Those belong to EFT/Menu Overhaul's native button-state presentation.
+            // preserveAspect. Those belong to the native/external button-state presentation.
             image.sprite = sprite;
         }
     }

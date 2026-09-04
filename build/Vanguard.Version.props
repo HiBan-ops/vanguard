@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project>
   <PropertyGroup>
-    <VanguardVersion>0.7.6</VanguardVersion>
-    <VanguardBuildLabel>vanguard-0-7-6</VanguardBuildLabel>
+    <VanguardVersion>0.7.8</VanguardVersion>
+    <VanguardBuildLabel>vanguard-0-7-8</VanguardBuildLabel>
     <VanguardBuildVersionGeneratedDir>$(BaseIntermediateOutputPath)$(Configuration)\$(TargetFramework)\</VanguardBuildVersionGeneratedDir>
     <VanguardBuildVersionGeneratedFile>$(VanguardBuildVersionGeneratedDir)VanguardBuildVersion.g.cs</VanguardBuildVersionGeneratedFile>
   </PropertyGroup>
@@ -55,6 +55,7 @@
     <VanguardBuildVersionLines Include="        public const string OperatorHudStatusTag = &quot;VANGUARD_OPERATOR_HUD_STATUS&quot;%3B" />
     <VanguardBuildVersionLines Include="        public const string OperatorIntentDryRunStatusTag = &quot;VANGUARD_OPERATOR_INTENT_DRYRUN_STATUS&quot;%3B" />
     <VanguardBuildVersionLines Include="        public const string OperatorInventoryExitReloadStatusTag = &quot;VANGUARD_OPERATOR_INVENTORY_EXIT_RELOAD_STATUS&quot;%3B" />
+    <VanguardBuildVersionLines Include="        public const string OperatorInventoryNavigationGuardStatusTag = &quot;VANGUARD_OPERATOR_INVENTORY_NAVIGATION_GUARD_STATUS&quot;%3B" />
     <VanguardBuildVersionLines Include="        public const string OperatorInventoryRaidCursorRestoreStatusTag = &quot;VANGUARD_OPERATOR_INVENTORY_RAID_CURSOR_RESTORE_STATUS&quot;%3B" />
     <VanguardBuildVersionLines Include="        public const string OperatorLootPolicyUiClarityStatusTag = &quot;VANGUARD_OPERATOR_LOOT_POLICY_UI_CLARITY_STATUS&quot;%3B" />
     <VanguardBuildVersionLines Include="        public const string OperatorPersistenceStatusTag = &quot;VANGUARD_OPERATOR_PERSISTENCE_STATUS&quot;%3B" />

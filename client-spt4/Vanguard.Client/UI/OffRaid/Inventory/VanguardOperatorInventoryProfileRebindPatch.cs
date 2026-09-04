@@ -58,56 +58,91 @@ internal sealed class VanguardOperatorInventoryProfileRebindPatch : ModulePatch
             object? screen = __args[0];
             bool turnOn = __args[1] is bool value && value;
             string screenName = screen?.ToString() ?? string.Empty;
-            if (!turnOn || !string.Equals(screenName, "Player", StringComparison.OrdinalIgnoreCase))
-            {
-                return true;
-            }
+            VanguardOperatorInventoryNavigationDecision decision = VanguardOperatorInventoryNavigationPolicy.Evaluate(screenName, turnOn);
 
-            if (VanguardOperatorDirectEquipmentScreenEntry.TryOpenFromMainMenu(
-                    __instance,
-                    "vanilla_player_button",
-                    out string reason,
-                    out bool vanillaFallbackSafe))
+            if (!decision.RouteAllowed)
             {
-                VanguardClientDiagnosticsLog.Info(
-                    "VANGUARD_OPERATOR_PROFILE_REBIND_STATUS",
-                    $"vanilla_player_redirected_to_direct_operator_inventory reason={reason}; operator={VanguardOperatorInventoryModeClientState.OperatorId ?? "<none>"}; inventoryProfile={VanguardOperatorInventoryModeClientState.InventoryProfileId ?? "<none>"}");
+                if (VanguardOperatorInventoryNavigationPolicy.TryReserveBlockedSignal(screenName))
+                {
+                    VanguardClientDiagnosticsLog.Info(
+                        VanguardBuildVersion.OperatorInventoryNavigationGuardStatusTag,
+                        $"owner=client; operator={VanguardOperatorInventoryModeClientState.OperatorId ?? "<none>"}; session_active=True; requested_route={screenName}; route_allowed=False; reason={decision.Reason}; nested_flow={decision.NestedFlowActive}; equipment_builds_lease={decision.EquipmentBuildsLease}; session_preserved=True; commit_triggered=False; exit_triggered=False; reload_triggered=False; screen={VanguardOperatorDirectInventoryLifecycle.DescribeCurrentScreen()}");
+                    VanguardOperatorInventoryNavigationPolicy.ShowBlockedNavigationNotice();
+                }
+
+                // Prefix suppression occurs before MainMenuController can cross an
+                // authority boundary that has not been qualified for the Operator session.
                 return false;
             }
 
-            if (vanillaFallbackSafe)
+            if (!turnOn || decision.Disposition == VanguardOperatorInventoryNavigationDisposition.AllowNative)
             {
-                VanguardClientDiagnosticsLog.Warning(
-                    "VANGUARD_OPERATOR_PROFILE_REBIND_STATUS",
-                    $"vanilla_player_fallback_after_recovered_operator_open_failure reason={reason}; inventoryModeActive={VanguardOperatorInventoryModeClientState.IsActive}");
-
-                // The Operator technical session has been closed and Vanguard's temporary UI state
-                // restored.  Resume EFT's original Player ShowScreen call instead of turning a
-                // recoverable interop failure into a dead Equipment button.
                 return true;
             }
 
-            VanguardClientDiagnosticsLog.Warning(
-                "VANGUARD_OPERATOR_PROFILE_REBIND_STATUS",
-                $"vanilla_player_blocked_operator_inventory_not_opened reason={reason}; operator={VanguardOperatorInventoryModeClientState.OperatorId ?? "<none>"}; inventoryProfile={VanguardOperatorInventoryModeClientState.InventoryProfileId ?? "<none>"}");
+            if (decision.Disposition == VanguardOperatorInventoryNavigationDisposition.AllowNativePreserveSession)
+            {
+                VanguardOperatorInventorySessionNavigation.BeginPreservedNavigation(screenName, "main_menu_show_screen");
+                VanguardClientDiagnosticsLog.Info(
+                    VanguardBuildVersion.OperatorInventoryNavigationGuardStatusTag,
+                    $"owner=client; operator={VanguardOperatorInventoryModeClientState.OperatorId ?? "<none>"}; session_active=True; requested_route={screenName}; route_allowed=True; reason={decision.Reason}; nested_flow={decision.NestedFlowActive}; equipment_builds_lease={decision.EquipmentBuildsLease}; session_preserved=True; commit_triggered=False; exit_triggered=False; reload_triggered=False");
+                return true;
+            }
 
-            // Keep the vanilla Player screen blocked while the Operator technical session is still
-            // active or another direct-inventory lifecycle is in flight. Opening it against the
-            // cached player controller in that state would mix player and Operator authorities.
+            if (decision.Disposition == VanguardOperatorInventoryNavigationDisposition.ReturnToOperatorInventory)
+            {
+                if (VanguardOperatorDirectEquipmentScreenEntry.TryReturnToActiveOperatorInventory("character_route", out string returnReason))
+                {
+                    VanguardClientDiagnosticsLog.Info(
+                        VanguardBuildVersion.OperatorInventoryNavigationGuardStatusTag,
+                        $"owner=client; operator={VanguardOperatorInventoryModeClientState.OperatorId ?? "<none>"}; session_active=True; requested_route={screenName}; route_allowed=True; reason={decision.Reason}; action=return_to_captured_operator_inventory; result={returnReason}; session_preserved=True; commit_triggered=False; exit_triggered=False; reload_triggered=False");
+                    return false;
+                }
+
+                VanguardClientDiagnosticsLog.Warning(
+                    VanguardBuildVersion.OperatorInventoryNavigationGuardStatusTag,
+                    $"owner=client; operator={VanguardOperatorInventoryModeClientState.OperatorId ?? "<none>"}; session_active=True; requested_route={screenName}; route_allowed=False; reason=return_to_operator_inventory_failed:{returnReason}; session_preserved=True; disposition=fail_closed");
+                VanguardOperatorInventoryNavigationPolicy.ShowBlockedNavigationNotice();
+                return false;
+            }
+
+            if (decision.Disposition == VanguardOperatorInventoryNavigationDisposition.ExitSessionToMainMenu)
+            {
+                if (VanguardOperatorDirectEquipmentScreenEntry.TryBeginExplicitSessionExit("main_menu_route", out string exitReason))
+                {
+                    VanguardClientDiagnosticsLog.Info(
+                        VanguardBuildVersion.OperatorInventoryNavigationGuardStatusTag,
+                        $"owner=client; operator={VanguardOperatorInventoryModeClientState.OperatorId ?? "<none>"}; session_active=True; requested_route={screenName}; route_allowed=True; reason={decision.Reason}; action=commit_exit_restore_then_main_menu_reload; result={exitReason}; session_preserved=False; commit_triggered=True; exit_triggered=True; reload_triggered=True");
+                    // Vanguard owns this route transition. The proven profile/menu reload
+                    // performed after server exit lands on Main Menu, so the original EFT
+                    // ShowScreen call is deliberately suppressed to avoid racing the commit.
+                    return false;
+                }
+
+                VanguardClientDiagnosticsLog.Warning(
+                    VanguardBuildVersion.OperatorInventoryNavigationGuardStatusTag,
+                    $"owner=client; operator={VanguardOperatorInventoryModeClientState.OperatorId ?? "<none>"}; session_active=True; requested_route={screenName}; route_allowed=False; reason=explicit_session_exit_not_started:{exitReason}; session_preserved=True; disposition=fail_closed");
+                VanguardOperatorInventoryNavigationPolicy.ShowBlockedNavigationNotice();
+                return false;
+            }
+
+            VanguardClientDiagnosticsLog.Warning(
+                VanguardBuildVersion.OperatorInventoryNavigationGuardStatusTag,
+                $"navigation_guard_unhandled_disposition disposition={decision.Disposition}; requested_route={screenName}; session_active=True; disposition=fail_closed");
             return false;
         }
         catch (Exception exception)
         {
             VanguardClientDiagnosticsLog.Warning(
-                "VANGUARD_OPERATOR_PROFILE_REBIND_STATUS",
-                $"vanilla Player screen guard failed; reason={exception.GetType().Name}: {exception.Message}; vanillaFallbackSafe=false; disposition=fail_closed_unverified_recovery");
+                VanguardBuildVersion.OperatorInventoryNavigationGuardStatusTag,
+                $"navigation_guard_failed reason={exception.GetType().Name}:{exception.Message}; session_active={VanguardOperatorInventoryModeClientState.IsActive}; disposition=fail_closed_unverified_recovery");
 
             // An unexpected guard exception does not prove that the Operator technical session
-            // and temporary UI authority were fully restored. Only the explicit recovered-failure
-            // path above may resume EFT's original Player ShowScreen call.
+            // and temporary UI authority were fully restored. Fail closed while the session is active.
             return false;
         }
     }
+
 }
 #else
 internal sealed class VanguardOperatorInventoryProfileRebindPatch

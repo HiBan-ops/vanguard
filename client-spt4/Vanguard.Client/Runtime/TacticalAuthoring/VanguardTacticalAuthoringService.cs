@@ -1634,31 +1634,6 @@ internal static class VanguardTacticalAuthoringService
         return best;
     }
 
-    private static VanguardTacticalAuthoringAccess? FindNearestAccess(
-        VanguardTacticalAuthoringZone zone,
-        Vector3 playerPosition,
-        float maxDistance,
-        out int bestIndex)
-    {
-        VanguardTacticalAuthoringAccess? best = null;
-        bestIndex = -1;
-        var bestSqr = maxDistance * maxDistance;
-        for (var index = 0; index < zone.Accesses.Count; index++)
-        {
-            var access = zone.Accesses[index];
-            var delta = access.Position.ToVector3() - playerPosition;
-            var sqr = delta.sqrMagnitude;
-            if (sqr <= bestSqr)
-            {
-                bestSqr = sqr;
-                best = access;
-                bestIndex = index;
-            }
-        }
-
-        return best;
-    }
-
     private static VanguardTacticalAuthoringAccess? FindNearestAccessUnbounded(
         VanguardTacticalAuthoringZone zone,
         Vector3 playerPosition,

@@ -1,4 +1,4 @@
-Vanguard 0.7.6 active public-source manifest
+Vanguard 0.7.8 active public-source manifest
 
 Canonical public source roots:
 - client-spt4/Vanguard.Client

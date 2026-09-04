@@ -44,6 +44,8 @@ internal sealed class VanguardOperatorInventoryModeResponseDto
 
     public string? OperatorDisplayName { get; set; }
 
+    public string? OperatorCallsign { get; set; }
+
     public string? OperatorInventoryProfileId { get; set; }
 
     public DateTimeOffset? GeneratedAtUtc { get; set; }

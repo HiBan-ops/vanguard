@@ -35,7 +35,6 @@ internal static class VanguardReturnMovementCommandStore
     private static readonly Dictionary<string, VanguardMovementPhysicalBackendFailureSignal> PhysicalBackendFailureByProfileId = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<string, DateTimeOffset> LastLogByKey = new(StringComparer.OrdinalIgnoreCase);
     private static readonly TimeSpan LogInterval = TimeSpan.FromSeconds(1.5d);
-    private static readonly TimeSpan SameRequestReissueGuard = TimeSpan.FromSeconds(4.0d);
     private const float SameAnchorToleranceMeters = 1.75f;
     private const float MaterialRetargetMeters = 4.50f;
     private static readonly TimeSpan RetargetCooldown = TimeSpan.FromSeconds(1.25d);

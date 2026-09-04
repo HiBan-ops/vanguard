@@ -32,15 +32,12 @@ internal static class VanguardCorpseLootReadOnlyEvaluator
     private const int MaximumPlanCandidates = 3;
     private const int MaximumOperatorReadModelCandidates = 2;
     private static readonly object CacheSync = new();
-    private static readonly Dictionary<string, CachedPlan> PlanCache = new(StringComparer.OrdinalIgnoreCase);
     private static readonly HashSet<string> FriendlyOperatorEligibilityLogKeys = new(StringComparer.OrdinalIgnoreCase);
-    private static readonly TimeSpan PlanCacheLifetime = TimeSpan.FromSeconds(2.5d);
 
     public static void ResetForRaidLifecycle(string reason)
     {
         lock (CacheSync)
         {
-            PlanCache.Clear();
             FriendlyOperatorEligibilityLogKeys.Clear();
         }
     }
@@ -512,39 +509,6 @@ internal static class VanguardCorpseLootReadOnlyEvaluator
             Hostility = hostility
         };
 
-    private static VanguardCorpseLootDryRunPlan GetOrBuildPlan(
-        VanguardCorpseRegistryEntry entry,
-        BotOwner botOwner,
-        IReadOnlyList<EftWeapon> weapons,
-        VanguardOperatorLootNeedSnapshot need,
-        VanguardOperatorLootPermissionSnapshot permissions,
-        DateTimeOffset now)
-    {
-        string key = string.Join("|", botOwner.ProfileId, entry.CorpseId, need.DecisionSignature, permissions.DecisionSignature);
-        lock (CacheSync)
-        {
-            if (PlanCache.TryGetValue(key, out CachedPlan cached) && cached.ExpiresAtUtc > now)
-            {
-                return cached.Plan;
-            }
-        }
-
-        VanguardCorpseLootDryRunPlan plan = VanguardCorpseLootDryRunPlanner.Build(entry.Corpse, botOwner, weapons, need, permissions);
-        lock (CacheSync)
-        {
-            PlanCache[key] = new CachedPlan(plan, now + PlanCacheLifetime);
-            foreach (string expiredKey in PlanCache
-                         .Where(pair => pair.Value.ExpiresAtUtc <= now)
-                         .Select(pair => pair.Key)
-                         .Take(16)
-                         .ToArray())
-            {
-                PlanCache.Remove(expiredKey);
-            }
-        }
-        return plan;
-    }
-
     private static string EvaluateGate(
         VanguardThreatDecisionSnapshot threat,
         VanguardSainDecisionSnapshot sain,
@@ -595,20 +559,6 @@ internal static class VanguardCorpseLootReadOnlyEvaluator
         return unrealizableSurgeryLootFallback
             ? "eligible_unrealizable_surgery_loot_fallback"
             : "eligible_for_precheck";
-    }
-
-    private static IReadOnlyList<EftWeapon> GetOperatorWeapons(BotOwner botOwner)
-    {
-        var result = new List<EftWeapon>();
-        var equipment = botOwner.GetPlayer?.Inventory?.Equipment;
-        foreach (EquipmentSlot slotKind in new[] { EquipmentSlot.FirstPrimaryWeapon, EquipmentSlot.SecondPrimaryWeapon, EquipmentSlot.Holster })
-        {
-            if (equipment?.GetSlot(slotKind)?.ContainedItem is EftWeapon weapon)
-            {
-                result.Add(weapon);
-            }
-        }
-        return result;
     }
 
     private static float Score(
@@ -694,8 +644,6 @@ internal static class VanguardCorpseLootReadOnlyEvaluator
         VanguardUnifiedLootReadModelObservation Observation,
         float CompatibilityBonus,
         float Score);
-
-    private sealed record CachedPlan(VanguardCorpseLootDryRunPlan Plan, DateTimeOffset ExpiresAtUtc);
     private static string Safe(string? value) => string.IsNullOrWhiteSpace(value)
         ? "none"
         : value.Trim().Replace(' ', '_').Replace(';', '_').Replace('|', '_').Replace('\r', '_').Replace('\n', '_');

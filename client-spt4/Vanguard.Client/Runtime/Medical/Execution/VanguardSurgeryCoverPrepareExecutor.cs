@@ -128,7 +128,6 @@ internal static class VanguardSurgeryCoverPrepareExecutor
     private static readonly TimeSpan CoverProbeFailureMemoryTtl = TimeSpan.FromSeconds(8.00d);
     private static readonly Dictionary<string, DateTimeOffset> RetryAllowedAtByBotProfile = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<string, DateTimeOffset> LastBlockedLogAtByKey = new(StringComparer.OrdinalIgnoreCase);
-    private static readonly Dictionary<string, DateTimeOffset> LastLocalHoldBlockLogAtByKey = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<string, DateTimeOffset> LastPrepareMutationAtByBotProfile = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<string, int> CoverSlotReselectCountByBotProfile = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<string, VanguardSurgeryCoverSlotState> CoverSlotsByBotProfile = new(StringComparer.OrdinalIgnoreCase);
@@ -146,7 +145,6 @@ internal static class VanguardSurgeryCoverPrepareExecutor
     {
         RetryAllowedAtByBotProfile.Clear();
         LastBlockedLogAtByKey.Clear();
-        LastLocalHoldBlockLogAtByKey.Clear();
         LastPrepareMutationAtByBotProfile.Clear();
         CoverSlotReselectCountByBotProfile.Clear();
         CoverSlotsByBotProfile.Clear();
@@ -1670,21 +1668,6 @@ internal static class VanguardSurgeryCoverPrepareExecutor
         return false;
     }
 
-
-    private static void LogPrepareBlocked(OperatorDecisionSnapshot snapshot, string reason)
-    {
-        string key = Safe(snapshot.BotProfileId) + ":" + Safe(reason);
-        var now = DateTimeOffset.UtcNow;
-        if (LastBlockedLogAtByKey.TryGetValue(key, out var last) && now - last < BlockedLogInterval)
-        {
-            return;
-        }
-
-        LastBlockedLogAtByKey[key] = now;
-        var safety = snapshot.Medical.Safety;
-        VanguardClientDiagnosticsLog.Info(StatusTag, $"VANGUARD_MEDICAL_PREPARE_SURGERY_COVER_BLOCKED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; reason={Safe(reason)}; need={snapshot.Medical.Need.DominantNeed}; target={SafeTarget(snapshot.Medical.Actionability.TargetPart, snapshot.Medical.Need.TargetPart)}; plan={Safe(snapshot.Medical.Plan.NextStep)}; medSafety={Safe(safety.SurgeryAreaClearReason)}; residual={safety.ResidualThreat}; stale={safety.StaleThreat}; directThreat={snapshot.Threat.DirectThreat}; enemyVisible={safety.EnemyVisible}; enemyCanShoot={safety.EnemyCanShoot}; incomingFire={safety.IncomingFireRecent}; immediateCombatBlock={safety.ImmediateCombatBlock}; pathClose={safety.SurgeryThreatPathTooClose}; distanceClose={safety.SurgeryThreatDistanceTooClose}; coveredOrHolding={safety.CoveredOrHoldingAngle}; patientOnly=true; surgeryLaunchStillStrict=true; tag={StatusTag}");
-    }
-
     private static bool CanGraceActionabilityDuringPrepare(VanguardExecutionLeaseState lease, OperatorDecisionSnapshot snapshot, DateTimeOffset now, string actionReason, out string graceReason)
     {
         graceReason = "none";
@@ -1785,18 +1768,6 @@ internal static class VanguardSurgeryCoverPrepareExecutor
 
         reason = "none";
         return false;
-    }
-
-    private static void LogLocalHoldBlocked(OperatorDecisionSnapshot snapshot, DateTimeOffset now, string reason, string phase)
-    {
-        string key = Safe(snapshot.BotProfileId) + "|" + Safe(reason) + "|" + Safe(phase);
-        if (LastLocalHoldBlockLogAtByKey.TryGetValue(key, out var last) && now - last < TimeSpan.FromSeconds(2.00d))
-        {
-            return;
-        }
-
-        LastLocalHoldBlockLogAtByKey[key] = now;
-        VanguardClientDiagnosticsLog.Info(OrbitLocalHoldLockStatusTag, $"VANGUARD_SURGERY_COVER_LOCAL_HOLD_BLOCKED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; phase={Safe(phase)}; reason={Safe(reason)}; brain={Safe(snapshot.Brain.ActiveLayer)}; orbit={Safe(snapshot.Orbit.Classification)}; orbitStatus={Safe(snapshot.Orbit.Status)}; orbitCategory={Safe(snapshot.Orbit.Category)}; path={Tri(snapshot.Movement.HasPath)}; dist={Float(snapshot.Movement.DistanceToDestination)}; goToDist={Float(snapshot.Movement.GoToDistance)}; loot={Safe(snapshot.Looting.Classification)}; surgeryAreaClear={Bool(snapshot.Medical.Safety.SurgeryAreaClear)}; coverOrHold={Bool(snapshot.Medical.Safety.CoveredOrHoldingAngle)}; patientOnly=true; next=wait_for_external_path_clear_or_release; tag={OrbitLocalHoldLockStatusTag}");
     }
 
     private static bool IsLootOrOrbitActive(OperatorDecisionSnapshot snapshot)
@@ -2990,34 +2961,6 @@ internal static class VanguardSurgeryCoverPrepareExecutor
         }
 
         return false;
-    }
-
-    private static int CountNearbyObstacles(Vector3 position)
-    {
-        int count = 0;
-        Vector3 origin = position + Vector3.up * 0.9f;
-        Vector3[] dirs =
-        {
-            Vector3.forward, Vector3.back, Vector3.left, Vector3.right,
-            new Vector3(0.707f, 0f, 0.707f), new Vector3(-0.707f, 0f, 0.707f), new Vector3(0.707f, 0f, -0.707f), new Vector3(-0.707f, 0f, -0.707f)
-        };
-
-        foreach (Vector3 dir in dirs)
-        {
-            try
-            {
-                if (Physics.Raycast(origin, dir.normalized, 1.35f, ~0, QueryTriggerInteraction.Ignore))
-                {
-                    count++;
-                }
-            }
-            catch
-            {
-                return 0;
-            }
-        }
-
-        return count;
     }
 
     private static Vector3 Flat(Vector3 value) => new(value.x, 0f, value.z);

@@ -288,7 +288,6 @@ internal static class VanguardMedicalEffectReader
         string[] array = values.Where(value => !string.IsNullOrWhiteSpace(value)).ToArray();
         return array.Length == 0 ? "none" : string.Join(",", array.Select(Safe));
     }
-    private static string TrimToken(string value) => Safe(value).Length <= 80 ? Safe(value) : Safe(value).Substring(0, 80);
     private static string SafePart(string? value) => Safe(ExtractPartName(value));
     private static string ExtractPartName(string? value)
     {

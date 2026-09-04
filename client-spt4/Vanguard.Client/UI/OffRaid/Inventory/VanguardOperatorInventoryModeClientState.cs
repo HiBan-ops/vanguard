@@ -28,6 +28,8 @@ internal static class VanguardOperatorInventoryModeClientState
 
     public static string? OperatorDisplayName { get; private set; }
 
+    public static string? OperatorCallsign { get; private set; }
+
     public static string? InventoryProfileId { get; private set; }
 
     public static bool OperatorProfileApplied { get; private set; }
@@ -44,6 +46,7 @@ internal static class VanguardOperatorInventoryModeClientState
             IsActive = true;
             OperatorId = response.OperatorId ?? operatorId;
             OperatorDisplayName = response.OperatorDisplayName ?? response.Summary?.DisplayName ?? operatorId;
+            OperatorCallsign = response.OperatorCallsign ?? response.OperatorDisplayName ?? response.Summary?.DisplayName ?? operatorId;
             InventoryProfileId = response.OperatorInventoryProfileId ?? response.Summary?.InventoryProfileId;
             OperatorProfileApplied = false;
             ReloadInProgress = false;
@@ -124,6 +127,7 @@ internal static class VanguardOperatorInventoryModeClientState
             IsActive = status.Success && status.Active;
             OperatorId = IsActive ? status.OperatorId : null;
             OperatorDisplayName = IsActive ? status.OperatorDisplayName ?? status.Summary?.DisplayName : null;
+            OperatorCallsign = IsActive ? status.OperatorCallsign ?? status.OperatorDisplayName ?? status.Summary?.DisplayName : null;
             InventoryProfileId = IsActive ? status.OperatorInventoryProfileId ?? status.Summary?.InventoryProfileId : null;
             if (!IsActive)
             {
@@ -279,9 +283,12 @@ internal static class VanguardOperatorInventoryModeClientState
     private static void ClearInventoryModeClientState()
     {
         VanguardOperatorEquipmentBuildsFlow.Clear("inventory_mode_client_state_clear");
+        VanguardOperatorInventorySessionNavigation.Clear("inventory_mode_client_state_clear");
+        VanguardOperatorDirectEquipmentScreenEntry.ClearActiveSessionContext("inventory_mode_client_state_clear");
         IsActive = false;
         OperatorId = null;
         OperatorDisplayName = null;
+        OperatorCallsign = null;
         InventoryProfileId = null;
         OperatorProfileApplied = false;
         ReloadInProgress = false;

@@ -25,6 +25,8 @@ internal static class VanguardOffRaidHarmonyInteropAuditService
         "Vanguard.Client.UI.OffRaid.VanguardOffRaidMenuPatch",
         "Vanguard.Client.UI.OffRaid.Inventory.VanguardOperatorInventoryGetProfilesPatch",
         "Vanguard.Client.UI.OffRaid.Inventory.VanguardOperatorInventoryProfileRebindPatch",
+        "Vanguard.Client.UI.OffRaid.Inventory.VanguardOperatorContextualRagfairNavigationPatch",
+        "Vanguard.Client.UI.OffRaid.Inventory.VanguardOperatorWeaponModdingNavigationPatch",
         "Vanguard.Client.UI.OffRaid.Inventory.VanguardOperatorEditBuildControllerPatch",
         "Vanguard.Client.UI.OffRaid.Inventory.VanguardOperatorEquipmentBuildsControllerPatch",
         "Vanguard.Client.UI.OffRaid.Inventory.VanguardOperatorInventoryScreenReturnPatch",

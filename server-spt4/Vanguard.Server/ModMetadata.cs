@@ -14,7 +14,11 @@ public sealed record ModMetadata : AbstractModMetadata
     public override List<string>? Contributors { get; init; }
     public override SemanticVersioning.Version Version { get; init; } = new(VanguardBuildVersion.Value);
     public override SemanticVersioning.Range SptVersion { get; init; } = new("~4.0.0");
-    public override List<string>? Incompatibilities { get; init; }
+    public override List<string>? Incompatibilities { get; init; } = new()
+    {
+        // PiT Fireteam and Vanguard both own friendly/persistent PMC squad functionality.
+        "xyz.pit.fireteam",
+    };
     public override Dictionary<string, SemanticVersioning.Range>? ModDependencies { get; init; } = new()
     {
         ["com.morebotsapi.tacticaltoaster"] = new SemanticVersioning.Range(">=2.0.1"),

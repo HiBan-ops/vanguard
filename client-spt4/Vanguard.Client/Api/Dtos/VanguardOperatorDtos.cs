@@ -7,12 +7,6 @@ using System.Collections.Generic;
 // Invariant: Defaults tolerate compatible/missing fields, serialization stays side-effect free, and no DTO is treated as independent persistence authority.
 namespace Vanguard.Client.Api.Dtos;
 
-internal sealed class WrappedResponseDto<T>
-    where T : class
-{
-    public T? Data { get; set; }
-}
-
 internal sealed class VanguardOperatorStateResponseDto
 {
     public string? RequestedProfileId { get; set; }
