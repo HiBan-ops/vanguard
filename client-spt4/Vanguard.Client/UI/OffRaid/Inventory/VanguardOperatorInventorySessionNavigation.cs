@@ -49,6 +49,12 @@ internal static class VanguardOperatorInventorySessionNavigation
             currentGeneration = generation;
         }
 
+        VanguardOperatorProfileTransitionTrace.RecordNestedBoundary(
+            normalizedRoute,
+            source,
+            "operator_or_preserved_player_session",
+            $"leaseGeneration={currentGeneration}; sessionPreserved=true");
+
         VanguardClientDiagnosticsLog.Info(
             VanguardBuildVersion.OperatorInventoryNavigationGuardStatusTag,
             $"session_navigation_lease_started operator={VanguardOperatorInventoryModeClientState.OperatorId ?? "<none>"}; route={normalizedRoute}; source={source}; generation={currentGeneration}; session_preserved=True");
@@ -101,6 +107,7 @@ internal static class VanguardOperatorInventorySessionNavigation
 
         if (hadLease)
         {
+            VanguardOperatorProfileTransitionTrace.RecordReturnToOperatorInventory(source, route);
             VanguardClientDiagnosticsLog.Info(
                 VanguardBuildVersion.OperatorInventoryNavigationGuardStatusTag,
                 $"session_navigation_returned_to_operator_inventory operator={VanguardOperatorInventoryModeClientState.OperatorId ?? "<none>"}; priorRoute={route}; source={source}; generation={currentGeneration}; next_direct_close_will_commit=True");

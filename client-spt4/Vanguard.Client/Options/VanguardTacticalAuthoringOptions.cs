@@ -65,9 +65,9 @@ internal static class VanguardTacticalAuthoringOptions
         }
 
         editorHotkeysEnabled = config.Bind(Section, "Enable tactical authoring hotkeys", true,
-            "Local-only in-raid authoring input. Editing remains owner-local; headless preview/occupancy transport is handled separately.");
+            "Local-only in-raid authoring input. Editing remains owner-local; published authored-zone occupancy is transported separately to the process that owns raid runtime authority.");
         automaticAuthoredZoneOccupancyEnabled = config.Bind(Section, "Enable automatic authored zone occupancy", true,
-            "When the editor is closed and a saved authoring map exists, automatically publish an owner-scoped authored zone to the Fika headless. Exact occupancy is sticky to prevent overlap churn; a strictly more-specific nested exact zone may preempt, direct handoff occurs after exact exit when another exact zone exists, and exit hysteresis applies only when no exact replacement exists. Operators still yield to grenade/combat/medical authority. Persisted RuntimeConsumptionEnabled/RuntimeEligible flags remain false.");
+            "When the editor is closed and a saved authoring map exists, automatically publish an owner-scoped authored zone to the active raid runtime authority (standalone/local, Fika direct host, or Fika Headless). Exact occupancy is sticky to prevent overlap churn; a strictly more-specific nested exact zone may preempt, direct handoff occurs after exact exit when another exact zone exists, and exit hysteresis applies only when no exact replacement exists. Operators still yield to grenade/combat/medical authority. Persisted RuntimeConsumptionEnabled/RuntimeEligible compatibility flags remain false because live consumption is authorized by the raid-scoped transport, not by those persisted flags.");
 
         toggleEditor = BindShortcut(config, "Toggle editor", KeyCode.F6, KeyCode.LeftControl,
             "Toggle the Vanguard tactical authoring overlay for the local player.");
@@ -129,15 +129,15 @@ internal static class VanguardTacticalAuthoringOptions
         defaultFloorAboveMeters = config.Bind(Section, "Floor upper Y offset meters", 1.25f,
             new ConfigDescription("Offset added to the local player's standing Y when a zone is created or Ctrl+] captures its explicit upper bound.", new AcceptableValueRange<float>(0.5f, 4.0f)));
         priority = config.Bind(Section, "Slot priority", 50,
-            new ConfigDescription("Priority copied into new slots and applied to the nearest existing slot with Ctrl+U. It is persisted for future runtime consumption; current Operators do not consume authored slot priority.", new AcceptableValueRange<int>(0, 100)));
+            new ConfigDescription("Priority copied into new slots and applied to the nearest existing slot with Ctrl+U. The active runtime authority evaluates higher-priority authored slots first; equal-priority slots retain authoring/JSON order.", new AcceptableValueRange<int>(0, 100)));
         minimumSquadSize = config.Bind(Section, "Minimum squad size", 1,
             new ConfigDescription("Minimum squad size copied into new slots and applied to the nearest existing slot with Ctrl+U.", new AcceptableValueRange<int>(1, 3)));
         maximumOwnerDistanceMeters = config.Bind(Section, "Maximum owner distance meters", 35.0f,
-            new ConfigDescription("Maximum owner distance copied into new slots and applied to the nearest existing slot with Ctrl+U for later common-runtime validation.", new AcceptableValueRange<float>(5.0f, 120.0f)));
+            new ConfigDescription("Maximum owner distance copied into new slots and applied to the nearest existing slot with Ctrl+U. The active runtime authority rejects a slot when its owner anchor is unknown or farther than this limit.", new AcceptableValueRange<float>(5.0f, 120.0f)));
         roleAffinity = config.Bind(Section, "Role affinity", string.Empty,
             "Optional role affinity copied into new slots and applied to the nearest existing slot with Ctrl+U.");
         mutualExclusionGroup = config.Bind(Section, "Mutual exclusion group", string.Empty,
-            "Optional mutual-exclusion group copied into new slots and applied to the nearest existing slot with Ctrl+U for future collective assignment.");
+            "Optional mutual-exclusion group copied into new slots and applied to the nearest existing slot with Ctrl+U. During active assignment, only the first/highest-priority validated slot in one group can receive an Operator.");
         watchArcDegrees = config.Bind(Section, "Watch arc degrees", 90.0f,
             new ConfigDescription("Watch arc copied into new slots and applied to the nearest existing slot with Ctrl+U.", new AcceptableValueRange<float>(20.0f, 180.0f)));
         navMeshProjectionMeters = config.Bind(Section, "NavMesh projection meters", 1.5f,

@@ -13,9 +13,9 @@ using UnityEngine;
 #endif
 
 // Responsibility: owns the captured direct Operator InventoryScreen lifecycle, including persistent off-raid navigation, explicit completion, and player-authority restoration.
-// Flow: the initial Operator controllers are captured once; compatible navigation preserves that live context; Character creates a fresh one-shot InventoryScreen controller from it; explicit Main Menu or an unleased close performs commit, server exit, and the proven player-menu reload.
+// Flow: the initial Operator controllers are captured once; compatible navigation preserves that live context; Character creates a fresh one-shot InventoryScreen controller from it; explicit Main Menu or an unleased close performs commit and server exit, then restores Player authority through strict parity-gated fast reconciliation or the proven native full-reload fallback.
 // Authority boundary: client presentation/lifecycle orchestration only; server inventory mode and commit persistence remain authoritative on the server.
-// Invariant: closed EFT screen-controller instances are never re-queued; one captured Operator session can complete at most once, and any server-confirmed exit always restores player profile/menu authority even if the best-effort direct snapshot fails.
+// Invariant: closed EFT screen-controller instances are never re-queued; one captured Operator session can complete at most once; strict PARITY_OK may use bounded fast reconciliation, while every ambiguous/failed case preserves the proven method_21 hard fallback.
 
 namespace Vanguard.Client.UI.OffRaid.Inventory;
 
@@ -72,6 +72,8 @@ internal static class VanguardOperatorDirectEquipmentScreenEntry
         public int Generation { get; }
 
         public bool CompletionStarted { get; set; }
+
+        public VanguardOperatorFastReconciliationParityGate.Baseline? FastReconciliationParityBaseline { get; set; }
     }
 
     public static bool TryOpenFromCurrentMainMenu(string source, out string reason)
@@ -219,7 +221,14 @@ internal static class VanguardOperatorDirectEquipmentScreenEntry
             return false;
         }
 
-        object? profileId = ResolveMember(operatorProfile, "Id");
+        object? mainProfile = ResolveMember(session, "Profile");
+        object? mainProfileId = mainProfile == null ? null : ResolveMember(mainProfile, "Id");
+        if (mainProfileId == null)
+        {
+            reason = "main_profile_id_not_found";
+            return false;
+        }
+
         Type? inventoryControllerType = ResolveTypeByName("GClass3388");
         if (inventoryControllerType == null)
         {
@@ -235,10 +244,20 @@ internal static class VanguardOperatorDirectEquipmentScreenEntry
             return false;
         }
 
-        VanguardClientDiagnosticsLog.Info("VANGUARD_OPERATOR_DIRECT_EQUIPMENT_SCREEN_STATUS", $"inventory_controller_ctor_begin profile={operatorProfileId ?? "<none>"}; type={inventoryControllerType.FullName ?? inventoryControllerType.Name}");
-        object inventoryController = inventoryConstructor.Invoke(new[] { session, operatorProfile, profileId });
+        VanguardClientDiagnosticsLog.Info(
+            "VANGUARD_OPERATOR_DIRECT_EQUIPMENT_SCREEN_STATUS",
+            $"inventory_controller_ctor_begin profile={operatorProfileId ?? "<none>"}; networkOwnerProfile={mainProfileId}; type={inventoryControllerType.FullName ?? inventoryControllerType.Name}; secondaryProfileRouting=native_main_profile_owner");
+        // Native EFT uses the main PMC profile id as the network owner for secondary
+        // inventory controllers (for example the Scav controller).  The controller's
+        // Profile remains the Operator composite, while inventory commands continue to
+        // travel through the active player session id so Vanguard's server redirect can
+        // apply them to the live Operator projection and rekey ProfileChanges back to the
+        // Operator updater.
+        object inventoryController = inventoryConstructor.Invoke(new[] { session, operatorProfile, mainProfileId });
         inventoryControllerForCommit = inventoryController;
-        VanguardClientDiagnosticsLog.Info("VANGUARD_OPERATOR_DIRECT_EQUIPMENT_SCREEN_STATUS", $"inventory_controller_ctor_success profile={operatorProfileId ?? "<none>"}");
+        VanguardClientDiagnosticsLog.Info(
+            "VANGUARD_OPERATOR_DIRECT_EQUIPMENT_SCREEN_STATUS",
+            $"inventory_controller_ctor_success profile={operatorProfileId ?? "<none>"}; networkOwnerProfile={mainProfileId}; secondaryProfileRouting=native_main_profile_owner");
         object? inventory = ResolveMember(inventoryController, "Inventory");
         object? stash = inventory == null ? null : ResolveMember(inventory, "Stash");
         if (stash == null)
@@ -348,6 +367,21 @@ internal static class VanguardOperatorDirectEquipmentScreenEntry
             activeDirectSession = context;
         }
 
+        context.FastReconciliationParityBaseline = VanguardOperatorFastReconciliationParityGate.CaptureBaseline(
+            mainMenuController,
+            session,
+            operatorProfile,
+            inventoryController,
+            operatorProfileId,
+            context.OperatorId,
+            context.Generation);
+
+        VanguardOperatorProfileTransitionTrace.BeginSession(
+            context.OperatorId,
+            context.OperatorProfileId,
+            context.Generation,
+            "direct_session_capture");
+
         VanguardClientDiagnosticsLog.Info(
             VanguardBuildVersion.OperatorInventoryNavigationGuardStatusTag,
             $"session_context_captured operator={context.OperatorId ?? "<none>"}; profile={context.OperatorProfileId ?? "<none>"}; generation={context.Generation}; screenController={context.ScreenController.GetType().FullName ?? context.ScreenController.GetType().Name}");
@@ -407,6 +441,169 @@ internal static class VanguardOperatorDirectEquipmentScreenEntry
                 && activeDirectSession != null
                 && ReferenceEquals(activeDirectSession.ScreenController, screenController)
                 && VanguardOperatorInventoryModeClientState.IsActive;
+        }
+    }
+
+    internal static bool TryGetCurrentPlayerRuntimeContext(
+        out object? mainMenuController,
+        out object? session,
+        out object? playerProfile,
+        out object? inventoryController,
+        out object? healthController,
+        out object? equipment,
+        out string reason)
+    {
+        mainMenuController = ResolveCurrentMainMenuController();
+        session = mainMenuController == null ? null : ResolveMember(mainMenuController, "ISession");
+        playerProfile = session == null ? null : ResolveMember(session, "Profile");
+        inventoryController = mainMenuController == null ? null : ResolveMember(mainMenuController, "InventoryController");
+        healthController = mainMenuController == null ? null : ResolveMember(mainMenuController, "HealthControllerClass") ?? ResolveMember(mainMenuController, "HealthController");
+        object? inventory = inventoryController == null ? null : ResolveMember(inventoryController, "Inventory");
+        equipment = inventory == null ? null : ResolveMember(inventory, "Equipment");
+
+        if (mainMenuController == null || session == null || playerProfile == null || inventoryController == null || healthController == null || equipment == null)
+        {
+            reason = "player_runtime_context_incomplete";
+            return false;
+        }
+
+        string? sessionProfileId = ResolveMember(playerProfile, "Id")?.ToString();
+        object? controllerProfile = ResolveMember(inventoryController, "Profile");
+        string? controllerProfileId = controllerProfile == null
+            ? ResolveMember(inventoryController, "ProfileId")?.ToString()
+            : ResolveMember(controllerProfile, "Id")?.ToString();
+        if (!string.IsNullOrWhiteSpace(sessionProfileId)
+            && !string.IsNullOrWhiteSpace(controllerProfileId)
+            && !string.Equals(sessionProfileId, controllerProfileId, StringComparison.OrdinalIgnoreCase))
+        {
+            reason = $"player_profile_controller_identity_mismatch:{sessionProfileId}:{controllerProfileId}";
+            return false;
+        }
+
+        reason = "ok";
+        return true;
+    }
+
+    internal static bool TryReassertCurrentPlayerItemUiContext(string source, out string reason)
+    {
+        reason = "unknown";
+        if (!TryGetCurrentPlayerRuntimeContext(
+                out object? mainMenuController,
+                out object? session,
+                out object? playerProfile,
+                out object? inventoryController,
+                out object? healthController,
+                out _,
+                out string contextReason)
+            || mainMenuController == null || session == null || playerProfile == null || inventoryController == null || healthController == null)
+        {
+            reason = contextReason;
+            return false;
+        }
+
+        object? questController = ResolveMember(mainMenuController, "LocalQuestControllerClass");
+        if (!ConfigureItemUiContext(mainMenuController, session, playerProfile, inventoryController, healthController, questController, "player_restore"))
+        {
+            reason = "player_item_ui_context_configure_failed";
+            return false;
+        }
+
+        reason = "player_item_ui_context_reasserted";
+        VanguardClientDiagnosticsLog.Info(
+            "VANGUARD_OPERATOR_DIRECT_EQUIPMENT_SCREEN_STATUS",
+            $"player_item_ui_context_reasserted source={source}; authority=player; operatorSessionActive={VanguardOperatorInventoryModeClientState.IsActive}");
+        return true;
+    }
+
+    internal static bool TryGetActiveOperatorRuntimeContext(
+        out object? mainMenuController,
+        out object? session,
+        out object? operatorProfile,
+        out object? inventoryController,
+        out object? healthController,
+        out string? operatorProfileId,
+        out string? operatorId,
+        out int generation,
+        out bool completionStarted)
+    {
+        lock (ActiveSessionGate)
+        {
+            ActiveDirectSessionContext? context = activeDirectSession;
+            mainMenuController = context?.MainMenuController;
+            session = context?.Session;
+            operatorProfile = context?.OperatorProfile;
+            inventoryController = context?.InventoryController;
+            healthController = context?.HealthController;
+            operatorProfileId = context?.OperatorProfileId;
+            operatorId = context?.OperatorId;
+            generation = context?.Generation ?? 0;
+            completionStarted = context?.CompletionStarted ?? false;
+            return context != null;
+        }
+    }
+
+    public static bool TryReassertActiveOperatorItemUiContext(string source, out string reason)
+    {
+        reason = "unknown";
+        ActiveDirectSessionContext? context;
+        lock (ActiveSessionGate)
+        {
+            context = activeDirectSession;
+            if (context == null)
+            {
+                reason = "active_direct_session_context_missing";
+                return false;
+            }
+
+            if (context.CompletionStarted)
+            {
+                reason = "active_direct_session_completion_in_progress";
+                return false;
+            }
+        }
+
+        if (!VanguardOperatorInventoryModeClientState.IsActive)
+        {
+            reason = "inventory_mode_inactive";
+            return false;
+        }
+
+        if (context.Session == null || context.OperatorProfile == null || context.InventoryController == null || context.HealthController == null)
+        {
+            reason = "operator_item_ui_context_inputs_missing";
+            return false;
+        }
+
+        try
+        {
+            object? questController = ResolveMember(context.MainMenuController, "LocalQuestControllerClass");
+            if (!ConfigureItemUiContext(
+                    context.MainMenuController,
+                    context.Session,
+                    context.OperatorProfile,
+                    context.InventoryController,
+                    context.HealthController,
+                    questController,
+                    "operator_reassert"))
+            {
+                reason = "item_ui_context_configure_failed";
+                return false;
+            }
+
+            reason = "operator_item_ui_context_reasserted";
+            VanguardClientDiagnosticsLog.Info(
+                "VANGUARD_OPERATOR_DIRECT_EQUIPMENT_SCREEN_STATUS",
+                $"operator_item_ui_context_reasserted source={source}; operator={context.OperatorId ?? "<none>"}; profile={context.OperatorProfileId ?? "<none>"}; generation={context.Generation}; inventoryController={FormatTypeName(context.InventoryController.GetType())}");
+            return true;
+        }
+        catch (Exception exception)
+        {
+            Exception root = Unwrap(exception);
+            reason = root.GetType().Name + ":" + root.Message;
+            VanguardClientDiagnosticsLog.Warning(
+                "VANGUARD_OPERATOR_DIRECT_EQUIPMENT_SCREEN_STATUS",
+                $"operator_item_ui_context_reassert_failed source={source}; operator={context.OperatorId ?? "<none>"}; profile={context.OperatorProfileId ?? "<none>"}; generation={context.Generation}; reason={reason}");
+            return false;
         }
     }
 
@@ -766,20 +963,78 @@ internal static class VanguardOperatorDirectEquipmentScreenEntry
                     $"player_stash_refresh_continuing_after_direct_commit_failure exitSuccess=True; reason={exitResponse.Reason ?? "no_response"}; recovery=authoritative_exit_then_player_menu_reload; source={source}");
             }
 
-            RestorePlayerItemUiContext(context.MainMenuController, source + "_pre_reload");
-            await VanguardOperatorDirectInventoryExitGuard.RestoreAfterCloseAsync(source + "_pre_reload");
+            // The fast-reconciliation parity gate is read-only and only an exact PARITY_OK
+            // may attempt the retained-player fast path. Any rejection or executor failure falls
+            // through to the proven MainMenuController.method_21 reload without weakening recovery.
+            VanguardOperatorFastReconciliationParityGate.ExitParityResult parity =
+                VanguardOperatorFastReconciliationParityGate.EvaluateAfterAuthoritativeExit(
+                    context.FastReconciliationParityBaseline,
+                    context.MainMenuController,
+                    context.Session,
+                    context.OperatorProfile,
+                    context.InventoryController,
+                    directCommitSucceeded,
+                    exitResponse.Success,
+                    source);
+
+            RestorePlayerItemUiContext(context.MainMenuController, source + "_pre_reconciliation");
+            await VanguardOperatorDirectInventoryExitGuard.RestoreAfterCloseAsync(source + "_pre_reconciliation");
 
             string reloadResultReason;
             if (exitResponse.Success)
             {
                 VanguardOperatorInventoryExitReloadState.MarkExitReloadStarted(source);
                 VanguardOperatorDirectInventoryLifecycle.MarkMenuRebuildStarted(source);
-                playerRefreshSucceeded = await VanguardOperatorInventoryModeClientState.TryReloadMainMenuProfileAfterDirectCommitAsync(context.MainMenuController);
-                RestorePlayerItemUiContext(context.MainMenuController, source + "_post_reload");
-                await VanguardOperatorDirectInventoryExitGuard.RestoreAfterCloseAsync(source + "_post_reload");
-                reloadResultReason = playerRefreshSucceeded
-                    ? (directCommitSucceeded ? "player_menu_reloaded" : "player_menu_reloaded_after_exit_fallback")
-                    : (directCommitSucceeded ? "player_menu_reload_failed" : "player_menu_reload_failed_after_exit_fallback");
+
+                bool fastPathAttempted = false;
+                if (parity.IsStrictFastPathEligible && context.FastReconciliationParityBaseline != null)
+                {
+                    fastPathAttempted = true;
+                    VanguardOperatorFastReconciliationExecutor.ExecutionResult fastResult =
+                        await VanguardOperatorFastReconciliationExecutor.TryExecuteAsync(
+                            context.FastReconciliationParityBaseline,
+                            context.MainMenuController,
+                            context.Session,
+                            context.InventoryController,
+                            source);
+
+                    if (fastResult.Success)
+                    {
+                        playerRefreshSucceeded = true;
+                        reloadResultReason = "player_menu_fast_reconciled";
+                        RestorePlayerItemUiContext(context.MainMenuController, source + "_post_fast_reconciliation");
+                        await VanguardOperatorDirectInventoryExitGuard.RestoreAfterCloseAsync(source + "_post_fast_reconciliation");
+                        VanguardClientDiagnosticsLog.Info(
+                            "VANGUARD_OPERATOR_PLAYER_STASH_REFRESH_STATUS",
+                            $"player_stash_fast_reconciliation_succeeded source={source}; decision={parity.Decision}; reason={fastResult.Reason}; method21Called=False; fallbackAvailable=True");
+                    }
+                    else
+                    {
+                        VanguardClientDiagnosticsLog.Warning(
+                            "VANGUARD_OPERATOR_PLAYER_STASH_REFRESH_STATUS",
+                            $"player_stash_fast_reconciliation_failed_falling_back source={source}; decision={parity.Decision}; reason={fastResult.Reason}; fallback=method_21");
+                        reloadResultReason = "fast_reconciliation_failed";
+                    }
+                }
+                else
+                {
+                    reloadResultReason = "fast_reconciliation_not_admitted:" + parity.Decision;
+                }
+
+                if (!playerRefreshSucceeded)
+                {
+                    playerRefreshSucceeded = await VanguardOperatorInventoryModeClientState.TryReloadMainMenuProfileAfterDirectCommitAsync(context.MainMenuController);
+                    RestorePlayerItemUiContext(context.MainMenuController, source + "_post_reload");
+                    await VanguardOperatorDirectInventoryExitGuard.RestoreAfterCloseAsync(source + "_post_reload");
+                    reloadResultReason = playerRefreshSucceeded
+                        ? (directCommitSucceeded
+                            ? (fastPathAttempted ? "player_menu_reloaded_after_fast_fallback" : "player_menu_reloaded")
+                            : "player_menu_reloaded_after_exit_fallback")
+                        : (directCommitSucceeded
+                            ? (fastPathAttempted ? "player_menu_reload_failed_after_fast_fallback" : "player_menu_reload_failed")
+                            : "player_menu_reload_failed_after_exit_fallback");
+                }
+
                 VanguardOperatorInventoryExitReloadState.MarkExitReloadCompleted(source, playerRefreshSucceeded, reloadResultReason);
             }
             else
@@ -787,6 +1042,13 @@ internal static class VanguardOperatorDirectEquipmentScreenEntry
                 reloadResultReason = "inventory_mode_exit_failed";
                 VanguardOperatorInventoryExitReloadState.MarkExitReloadCompleted(source, false, reloadResultReason);
             }
+
+            bool usedFastPath = string.Equals(reloadResultReason, "player_menu_fast_reconciled", StringComparison.Ordinal);
+            VanguardOperatorProfileTransitionTrace.CompleteSession(
+                source,
+                usedFastPath,
+                exitResponse.Success && playerRefreshSucceeded,
+                reloadResultReason);
 
             await VanguardOperatorDirectInventoryLifecycle.CompleteAfterMenuRebuildAsync(source, playerRefreshSucceeded, reloadResultReason);
             reconciliationIndicatorSuccess = exitResponse.Success && playerRefreshSucceeded;
@@ -1403,7 +1665,7 @@ internal static class VanguardOperatorDirectEquipmentScreenEntry
         }
     }
 
-    private static void ConfigureItemUiContext(object mainMenuController, object? session, object profile, object inventoryController, object healthController, object? questController, string stage)
+    private static bool ConfigureItemUiContext(object mainMenuController, object? session, object profile, object inventoryController, object healthController, object? questController, string stage)
     {
         try
         {
@@ -1411,7 +1673,7 @@ internal static class VanguardOperatorDirectEquipmentScreenEntry
             if (itemUiContext == null || session == null)
             {
                 VanguardClientDiagnosticsLog.Warning("VANGUARD_OPERATOR_DIRECT_EQUIPMENT_SCREEN_STATUS", $"item_ui_context_configure_skipped stage={stage}; reason=context_or_session_not_found");
-                return;
+                return false;
             }
 
             object? insurance = ResolveMember(session, "InsuranceCompany");
@@ -1424,7 +1686,7 @@ internal static class VanguardOperatorDirectEquipmentScreenEntry
             if (configure == null)
             {
                 VanguardClientDiagnosticsLog.Warning("VANGUARD_OPERATOR_DIRECT_EQUIPMENT_SCREEN_STATUS", $"item_ui_context_configure_skipped stage={stage}; reason=configure_not_found");
-                return;
+                return false;
             }
 
             ParameterInfo[] parameters = configure.GetParameters();
@@ -1443,7 +1705,7 @@ internal static class VanguardOperatorDirectEquipmentScreenEntry
             if (args.Length > 11) args[11] = questController;
 
             configure.Invoke(itemUiContext, args);
-            if (string.Equals(stage, "operator", StringComparison.OrdinalIgnoreCase))
+            if (stage.StartsWith("operator", StringComparison.OrdinalIgnoreCase))
             {
                 activeOperatorItemUiContextOwner = mainMenuController;
                 operatorItemUiContextActive = true;
@@ -1455,10 +1717,12 @@ internal static class VanguardOperatorDirectEquipmentScreenEntry
             }
 
             VanguardClientDiagnosticsLog.Info("VANGUARD_OPERATOR_DIRECT_EQUIPMENT_SCREEN_STATUS", $"item_ui_context_configured stage={stage}; args={args.Length}; operatorContextActive={operatorItemUiContextActive}");
+            return true;
         }
         catch (Exception exception)
         {
             VanguardClientDiagnosticsLog.Warning("VANGUARD_OPERATOR_DIRECT_EQUIPMENT_SCREEN_STATUS", $"item_ui_context_configure_failed stage={stage}; reason={exception.GetType().Name}: {exception.Message}");
+            return false;
         }
     }
 
@@ -1500,12 +1764,26 @@ internal static class VanguardOperatorDirectEquipmentScreenEntry
 
     private static Type? ResolveInventoryScreenControllerType()
     {
-        return ResolveTypeByName("EFT.UI.Screens.InventoryScreen+GClass3872")
-            ?? ResolveTypeByName("InventoryScreen+GClass3872")
-            ?? AppDomain.CurrentDomain.GetAssemblies()
-                .SelectMany(SafeGetTypes)
-                .FirstOrDefault(type => string.Equals(type.Name, "GClass3872", StringComparison.Ordinal)
-                    && string.Equals(type.DeclaringType?.Name, "InventoryScreen", StringComparison.Ordinal));
+        // Resolve the qualified outer type without AccessTools.TypeByName so stale candidate names
+        // cannot generate Harmony warnings. The supported SPT 4.0.13 controller is the private
+        // GClass3872 nested under EFT.UI.InventoryScreen; retain a bounded structural fallback for
+        // obfuscation drift while requiring the same declaring-type relationship.
+        Type? inventoryScreenType = AppDomain.CurrentDomain.GetAssemblies()
+            .SelectMany(SafeGetTypes)
+            .FirstOrDefault(type => string.Equals(type.FullName, "EFT.UI.InventoryScreen", StringComparison.Ordinal));
+
+        Type? exactNested = inventoryScreenType?.GetNestedType(
+            "GClass3872",
+            BindingFlags.Public | BindingFlags.NonPublic);
+        if (exactNested != null)
+        {
+            return exactNested;
+        }
+
+        return AppDomain.CurrentDomain.GetAssemblies()
+            .SelectMany(SafeGetTypes)
+            .FirstOrDefault(type => string.Equals(type.Name, "GClass3872", StringComparison.Ordinal)
+                && string.Equals(type.DeclaringType?.FullName, "EFT.UI.InventoryScreen", StringComparison.Ordinal));
     }
 
     private static object? ResolveItemUiContextInstance()

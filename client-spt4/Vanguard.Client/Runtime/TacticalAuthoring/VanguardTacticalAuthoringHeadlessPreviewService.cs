@@ -18,15 +18,15 @@ using Vanguard.Client.Runtime.Execution;
 using Vanguard.Client.Runtime.Movement;
 using Vanguard.Client.Runtime.Movement.Brain;
 
-// Responsibility: Builds the temporary runtime-authority preview of player-authored tactical slots so the author can see placement before committing it.
-// Flow: Player-authored preview data is read from the live transport, validated against raid/world constraints, projected into transient preview objects, and removed when the preview expires or the raid resets.
-// Authority boundary: The active runtime authority (SPT local, Fika direct host, or Headless) may validate and render the preview, but persisted Tactical Authoring state remains owned by the authoring/store path and EFT/SAIN navigation data is never rewritten here.
-// Invariant: Preview state is disposable and non-authoritative: it must never survive its lifecycle window or silently turn an uncommitted edit into gameplay state.
+// Responsibility: Projects owner-published Tactical Authoring zones/slots into transient raid-runtime assignments for the process that currently owns Operator execution.
+// Flow: Raid-scoped author snapshots arrive through the live transport, slots are validated against current world/NavMesh/squad constraints, eligible Operators receive bounded movement/watch assignments, and all transient ownership is released when the author session, zone, authority, or raid expires.
+// Authority boundary: Persisted Tactical Authoring files remain owned by the authoring/store path; this runtime service may issue only bounded Vanguard movement/watch authority and never rewrites EFT/SAIN navigation graphs or persisted authoring data.
+// Invariant: Only published, current owner-scoped snapshots can drive assignments; combat/grenade/medical and other higher-priority authorities preempt them, and stale/unpublished state cannot survive its lifecycle window.
 namespace Vanguard.Client.Runtime.TacticalAuthoring;
 
 /// <summary>
-/// Runtime-authority transient placement preview for player-authored Vanguard slots.
-/// It never changes the persisted authoring flags and never mutates EFT/SAIN cover graphs.
+/// Runtime-authority consumer for owner-published Vanguard tactical slots. The "Preview" type/status identifier is retained for compatibility, while active saved-zone occupancy may drive bounded Operator slot assignment.
+/// It never changes persisted authoring flags and never mutates EFT/SAIN cover/navigation graphs.
 /// </summary>
 internal static class VanguardTacticalAuthoringHeadlessPreviewService
 {

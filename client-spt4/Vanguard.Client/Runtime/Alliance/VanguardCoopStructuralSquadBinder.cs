@@ -16,12 +16,11 @@ using Vanguard.Client.Raid.Runtime;
 namespace Vanguard.Client.Runtime.Alliance;
 
 /// <summary>
-/// Structural coop affiliation layer for the default Vanguard mode.
-/// runtime qualification proved the fallback guard works, but the high number of blocked
-/// hostility attempts showed that Operators were still entering EFT/Fika/SAIN
-/// relation graphs too late as potential enemies. The runtime binds Operators to the
-/// same raid-wide coop group/team used by Fika players before the vanilla group
-/// constructor and after final spawn binding.
+/// Structural coop affiliation layer for the default Vanguard mode. Operators must enter
+/// EFT/Fika/SAIN relation graphs as allied participants before hostility evaluation can treat
+/// them as potential enemies, so the runtime binds Operators to the same raid-wide coop
+/// group/team used by Fika players before the vanilla group constructor and reasserts that
+/// structural relationship after final spawn binding.
 /// </summary>
 internal static class VanguardCoopStructuralSquadBinder
 {

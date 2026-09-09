@@ -12,7 +12,7 @@ You build a roster, prepare Operators Off-Raid, deploy with them, survive togeth
 
 Vanguard is designed around Operators as independent combat entities rather than disposable followers waiting for constant player input.
 
-**Current release:** Vanguard **0.7.8** for **SPT 4.0.13**. This release consolidates persistent Operator Off-Raid lifecycle/navigation/UI improvements and adds an extensible Main Menu placement-profile system for the Vanguard button.
+**Current release:** Vanguard **0.7.9** for **SPT 4.0.13**. It retains the validated 0.7.8 feature set and substantially hardens persistent Operator authority across Off-Raid inventory navigation, QuickFind, Hideout, Traders/Flea, Equipment Builds, safe Player reconciliation and Fika Headless persistence.
 
 ## What Vanguard adds
 
@@ -46,11 +46,13 @@ The broader relationship system is still basic and under development.
 
 ### Persistent Off-Raid Operator session
 
-Opening an Operator inventory creates a persistent Off-Raid authority context rather than a one-screen transaction. Compatible navigation such as Traders, Flea Market, Equipment Builds, Handbook, Messenger, Settings and contextual item actions can keep the same Operator session active. Returning to Character restores the current Operator inventory context, while Main Menu is the normal explicit completion boundary that commits once, exits Operator inventory mode and reconciles the player profile. Raid launch remains protected and Hideout remains fail-closed because its broader player graph is not qualified under temporary Operator authority.
+Opening an Operator inventory creates a persistent Off-Raid authority context rather than a one-screen transaction. Compatible navigation such as Traders, Flea Market, Equipment Builds, Handbook, Messenger, Settings and contextual item actions can keep the same Operator session active. Returning to Character restores the current Operator inventory context, while Main Menu is the normal explicit completion boundary that commits once, exits Operator inventory mode and reconciles Player authority. Safe exits use a strict parity-gated fast reconciliation; any missing, divergent or ambiguous state falls back to the proven native full profile/menu reload. Raid launch remains protected. Hideout operations are explicitly kept on the real player profile while an Operator inventory session is active.
+
+Vanguard 0.7.9 also keeps native player economy authority for Trader/Flea purchases while converging the resulting inventory delta into the active Operator session. The Trader right-side stash is bound to the Operator's live grid, native purchase placement is preflighted against the current shared-stash geometry, and unsafe direct-commit snapshots retain the authoritative full-reconciliation fallback instead of being guessed or force-merged.
 
 ### Extensible Main Menu placement profiles
 
-Vanguard 0.7.8 keeps the historical standalone Vanguard menu layout when no configured external menu plugin is loaded. When a declared menu-plugin topology is present, Vanguard moves **only its own button** to an absolute normalized X/Y position and leaves SPT and third-party rows untouched.
+Vanguard 0.7.9 retains the historical standalone Vanguard menu layout when no configured external menu plugin is loaded. When a declared menu-plugin topology is present, Vanguard moves **only its own button** to an absolute normalized X/Y position and leaves SPT and third-party rows untouched.
 
 The documented `MainMenuPlacementProfiles.jsonc` file contains official profiles for Menu Overhaul, Career Log and their combined topology. Users can add their own blocks with BepInEx plugin GUIDs; the most specific matching profile wins, and the two F12 controls edit and persist only the currently active profile.
 
@@ -67,7 +69,7 @@ Vanguard coordinates the squad-level context required to keep persistent Operato
 
 Individual combat intelligence remains primarily handled by **SAIN**. Vanguard builds squad context and persistence around the existing AI ecosystem rather than attempting to replace it wholesale.
 
-In Vanguard 0.7.8, each Operator starts from a private clone of the **currently loaded SAIN `Normal` personality**. Vanguard then layers the Operator's Persona and Specialty adjustments, plus a small set of Vanguard safety invariants, over that baseline. This means changes to your SAIN `Normal` tuning also influence Vanguard Operators, while Vanguard leaves SAIN's global `Normal` profile untouched.
+In Vanguard 0.7.9, each Operator starts from a private clone of the **currently loaded SAIN `Normal` personality**. Vanguard then layers the Operator's Persona and Specialty adjustments, plus a small set of Vanguard safety invariants, over that baseline. This means changes to your SAIN `Normal` tuning also influence Vanguard Operators, while Vanguard leaves SAIN's global `Normal` profile untouched.
 
 **Planned:** a future Vanguard architecture will use a **dedicated SAIN profile for Operators** rather than deriving from the standard `Normal` personality. This will keep Vanguard's Operator baseline separate from SAIN's preconfigured personality profiles.
 
@@ -91,7 +93,7 @@ The basic workflow is intentionally simple:
 - repeat **Ctrl+Insert** for the positions you want inside the zone; For each slot, you can set priorities with percentage values
 - **Ctrl+S** — save the authored layout.
 
-Saved layouts are reused across raids. With the editor closed and automatic authored-zone occupancy enabled, Vanguard reloads the saved map and activates the relevant authored zone when its owner enters it. In Vanguard 0.7.8, persisted Tactical layouts are consumed by the active raid authority in **standalone/local play, Fika direct-host play and Fika Headless**. Author identity remains part of the live Tactical state, so another player's authored zone does not take control of your Operators.
+Saved layouts are reused across raids. With the editor closed and automatic authored-zone occupancy enabled, Vanguard reloads the saved map and activates the relevant authored zone when its owner enters it. In Vanguard 0.7.9, persisted Tactical layouts are consumed by the active raid authority in **standalone/local play, Fika direct-host play and Fika Headless**. Author identity remains part of the live Tactical state, so another player's authored zone does not take control of your Operators.
 
 Authored slots remain **tactical assignments, not RTS-style direct orders**. Combat, grenade safety, medical needs and other higher-priority authorities can temporarily interrupt a slot assignment; Vanguard can return the Operator to the slot when that assignment becomes valid again.
 
@@ -122,7 +124,7 @@ The release page will list the exact versions qualified for the shipping build.
 
 ## Requirements
 
-Vanguard 0.7.8 targets **SPT 4.0.13** and uses the following dependency model:
+Vanguard 0.7.9 targets **SPT 4.0.13** and uses the following dependency model:
 
 | Component | Status |
 |---|---|
@@ -135,7 +137,7 @@ Vanguard 0.7.8 targets **SPT 4.0.13** and uses the following dependency model:
 | Fika Headless | Required only for dedicated-Headless topology |
 | Looting Bots | Optional / recommended and tested |
 
-**Exact supported versions are frozen against the shipping build and published with the release.**
+**Exact supported versions are frozen against the final public release build and published with the release.**
 
 Vanguard currently reserves MoreBotsAPI role IDs:
 
@@ -148,7 +150,7 @@ Vanguard owns the persistent player-allied Operator squad domain. Mods that also
 
 Compatibility is therefore classified by authority and runtime evidence rather than by “it starts without crashing” alone.
 
-**Menu Overhaul and Career Log Main Menu coexistence are supported in Vanguard 0.7.8.** Vanguard owns only its own button position. `BepInEx/config/Vanguard/MainMenuPlacementProfiles.jsonc` is created with documented profiles for Menu Overhaul, Career Log and their combined topology; users can add GUID-qualified profiles for other menu layouts and calibrate the active profile live with the two F12 X/Y controls.
+**Menu Overhaul and Career Log Main Menu coexistence are supported in Vanguard 0.7.9.** Vanguard owns only its own button position. `BepInEx/config/Vanguard/MainMenuPlacementProfiles.jsonc` ships documented profiles for Menu Overhaul, Career Log and their combined topology; users can add GUID-qualified profiles for other menu layouts and calibrate the active profile live with the two F12 X/Y controls.
 
 The SP-Mod page carries the release-specific compatibility matrix and exact tested versions.
 
@@ -233,7 +235,7 @@ These are **post-release roadmap goals**, not current Vanguard features. No deli
 
 The public repository is intended to contain the minimal source and build material required to reproduce Vanguard's released binaries.
 
-For Vanguard 0.7.8, build against an **SPT 4.0.13** installation. Copy `client-spt4/Directory.Build.props.example` to `client-spt4/Directory.Build.props`, set `SptRoot`, and keep that local file out of commits. The three shipping projects share their release identity through `build/Vanguard.Version.props`.
+For Vanguard 0.7.9, build against an **SPT 4.0.13** installation. Copy `client-spt4/Directory.Build.props.example` to `client-spt4/Directory.Build.props`, set `SptRoot`, and keep that local file out of commits. The three shipping projects share their release identity through `build/Vanguard.Version.props`.
 
 Internal development KBs, handoffs, runtime evidence and private project artifacts are intentionally excluded from the public repository.
 

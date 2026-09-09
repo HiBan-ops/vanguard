@@ -1,4 +1,8 @@
-Vanguard 0.7.8 active public-source manifest
+Vanguard 0.7.9 public release source manifest
+Source base: released Vanguard 0.7.8
+Release delta: Player/Operator Off-Raid authority convergence, QuickFind, Equipment Builds, Trader/Flea commerce and spatial correctness, parity-gated fast Player reconciliation, Fika Headless persistence, and raid-scoped Operator DogTag identity sanitation
+Functional runtime qualification: PASS on SPT 4.0.13
+
 
 Canonical public source roots:
 - client-spt4/Vanguard.Client

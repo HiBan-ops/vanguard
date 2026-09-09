@@ -1,10 +1,10 @@
 using System;
 using Vanguard.Client.Diagnostics;
 
-// Responsibility: Presents and coordinates Operator Equipment Builds Flow in the Off-Raid Operator inventory bridge.
-// Flow: Canonical API/runtime state is projected into view models and Unity/TMP controls; explicit user actions are delegated back through API/service boundaries.
-// Authority boundary: Presentation layer only; it does not become persistence, economy, medical, or raid-runtime authority.
-// Invariant: UI refreshes are idempotent from canonical state and temporary view state must not outlive its owning screen/session.
+// Responsibility: Tracks the nested native Equipment Builds lease inside one direct Operator inventory session.
+// Flow: The direct InventoryScreen/controller pair is captured, native Equipment Builds temporarily borrows the Operator inventory controller, and returning to the captured InventoryScreen releases the nested lease without committing the session early.
+// Authority boundary: Client navigation/controller-lifetime coordination only; native Builds UI and Player market/session authority remain EFT-owned, while Operator persistence remains server-owned.
+// Invariant: Equipment Builds cannot cause an implicit Operator commit/exit, and stale nested controllers must be cleared when the owning inventory session ends.
 namespace Vanguard.Client.UI.OffRaid.Inventory;
 
 /// <summary>
@@ -84,6 +84,26 @@ internal static class VanguardOperatorEquipmentBuildsFlow
         VanguardClientDiagnosticsLog.Info(
             "VANGUARD_OPERATOR_EQUIPMENT_BUILDS_STATUS",
             $"direct_inventory_screen_controller_replaced source={source}; operator={effectiveOperatorId ?? "<none>"}; screenController={DescribeType(screenController)}; inventoryController={DescribeType(inventoryController)}; backendControllerChanged={backendControllerChanged}; nativeBuildsFlowPreserved={preservedBuildsFlow}; generation={generation}");
+    }
+
+    public static bool TryGetActiveOperatorInventoryController(out object? inventoryController, out string? operatorId, out int generation)
+    {
+        lock (Gate)
+        {
+            inventoryController = null;
+            operatorId = capturedOperatorId ?? VanguardOperatorInventoryModeClientState.OperatorId;
+            generation = transitionGeneration;
+
+            if (!VanguardOperatorInventoryModeClientState.IsActive
+                || directInventoryScreenController == null
+                || directInventoryBackendController == null)
+            {
+                return false;
+            }
+
+            inventoryController = directInventoryBackendController;
+            return true;
+        }
     }
 
     public static bool TryPrepareNativeBuildInventoryController(object? requestedInventoryController, string source, out object? effectiveInventoryController)

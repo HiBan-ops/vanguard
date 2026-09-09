@@ -64,8 +64,8 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
     // This reserves the right rail for contextual actions/details without altering the banner.
     private const float PrimaryNavigationXMax = 0.705f;
     private const float PrimaryNavigationGap = 0.008f;
-    // Profile-based placement is absolute and Vanguard-only. Reapply the normalized target after external
-    // menu/layout refreshes and F12 slider edits without ever accumulating deltas or mutating another row.
+    // Profile-driven placement is absolute and Vanguard-only. Reapply the normalized target after external
+    // menu/layout refreshes and F12 slider edits without accumulating deltas or mutating another row.
     private const float ProfiledMenuLayoutRefreshSeconds = 0.05f;
 
     // Single visual source of truth for all Vanguard off-raid buttons.
@@ -3285,8 +3285,8 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
         float xPercent,
         float yPercent)
     {
-        // This path applies an absolute normalized target every time. Only Vanguard's RectTransform is written;
-        // no companion anchor, sibling row or external/vanilla button is ever rebalanced by this path.
+        // Apply the configured absolute normalized target every time. Only Vanguard's RectTransform is
+        // written; no companion anchor, sibling row or external/vanilla button is rebalanced by this path.
         if (parent is not RectTransform referenceRect)
         {
             return;

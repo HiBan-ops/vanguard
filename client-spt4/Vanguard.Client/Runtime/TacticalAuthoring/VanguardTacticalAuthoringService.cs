@@ -15,7 +15,7 @@ using Vanguard.Client.Options;
 
 // Responsibility: owns the local tactical-authoring editor state, visualization and live author snapshot produced by the player client.
 // Flow: The player toggles the editor in raid, map data is loaded and edited as zones/slots/access points, each change is validated and saved through the store, and the service renders both the editor UI/world guides and the bounded live author snapshot consumed by raid transport.
-// Authority boundary: authoring describes slots/zones; runtime consumption remains disabled for persisted maps and live execution is mediated by the dedicated raid transport/runtime services.
+// Authority boundary: authoring owns persisted slot/zone data; persisted compatibility flags remain disabled, while any live Operator consumption is mediated by the dedicated raid-scoped transport/runtime services.
 // Invariant: the editor is silent off-raid for live exchange, keeps snapshots raid-scoped and never turns unsaved authoring geometry directly into unbounded AI movement authority.
 
 namespace Vanguard.Client.Runtime.TacticalAuthoring;
@@ -402,7 +402,7 @@ internal static class VanguardTacticalAuthoringService
                 ? $" Nearest zone selected automatically: {selectedZoneIndex + 1}/{mapFile.Zones.Count}, center={nearestDistance:0.0}m, inside={nearestInside}."
                 : string.Empty;
             SetStatus((loadedExisting
-                ? $"Editor active; existing schema-{mapFile.SchemaVersion} data loaded. Runtime consumption remains disabled."
+                ? $"Editor active; existing schema-{mapFile.SchemaVersion} data loaded. Persisted runtime flags remain disabled; live occupancy consumption is raid-authority mediated."
                 : $"Editor active; new schema-{mapFile.SchemaVersion} map document created in memory. Ctrl+S persists it.") + selectionStatus);
         }
         catch (Exception exception)
@@ -1444,7 +1444,7 @@ internal static class VanguardTacticalAuthoringService
             var selectionStatus = nearestSelected
                 ? $" Nearest zone selected automatically: {selectedZoneIndex + 1}/{mapFile.Zones.Count}, center={nearestDistance:0.0}m, inside={nearestInside}."
                 : string.Empty;
-            SetStatus("Reloaded authoring file with exact schema/map identity checks; runtime consumption remains disabled." + selectionStatus);
+            SetStatus("Reloaded authoring file with exact schema/map identity checks; persisted runtime flags remain disabled and live occupancy consumption remains raid-authority mediated." + selectionStatus);
         }
         catch (Exception exception)
         {

@@ -12,15 +12,15 @@ using Vanguard.Client.Diagnostics;
 using Vanguard.Client.Raid.Runtime;
 using Vanguard.Client.Raid.Services;
 
-// Responsibility: Relays the player’s live Tactical Authoring preview to the authoritative raid process and brings the current preview state back to readers.
-// Flow: The local editor publishes a compact revision, background HTTP exchanges it with the SPT server, and the Headless/host consumes the latest accepted raid-scoped preview at a bounded cadence.
-// Authority boundary: Only the player author writes authoring revisions; server/Headless transport them, and persisted authored maps remain separate from the live preview channel.
-// Invariant: Network I/O never blocks the simulation thread, off-raid chatter stays disabled, and stale revisions cannot overwrite a newer preview.
+// Responsibility: Relays owner-published Tactical Authoring state between the player author and the process that owns raid runtime execution, then returns current runtime-assignment results to readers.
+// Flow: The editor/automatic occupancy publisher emits a compact revision, background HTTP exchanges it with the SPT relay, and standalone/Fika host/Headless runtime authority consumes the latest accepted raid-scoped state at a bounded cadence.
+// Authority boundary: Only the player author writes authoring revisions; the server relays transient state and the current raid runtime authority consumes it, while persisted authored maps remain separate from the live transport.
+// Invariant: Network I/O never blocks the simulation thread, off-raid chatter stays disabled, and stale revisions or a previous runtime-authority epoch cannot overwrite newer state.
 namespace Vanguard.Client.Runtime.TacticalAuthoring;
 
 /// <summary>
-/// Async relay between the local authoring editor, the SPT server, and the Fika headless authority.
-/// Network I/O never runs on the Unity/headless simulation thread.
+/// Async relay between the local authoring publisher, the SPT server, and whichever process owns raid runtime authority.
+/// Network I/O never runs on the Unity/runtime simulation thread.
 /// </summary>
 internal static class VanguardTacticalAuthoringLiveSyncService
 {

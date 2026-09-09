@@ -1,10 +1,10 @@
 using System;
 using System.Text.RegularExpressions;
 
-// Responsibility: Produces bounded diagnostics/telemetry for Runtime Log Presentation in the server diagnostics.
-// Flow: Runtime facts are normalized, deduplicated/rate-gated where needed, then emitted according to Vanguard presentation levels.
-// Authority boundary: Observation only; telemetry never changes the gameplay decision it reports.
-// Invariant: Operational output stays actionable and repetitive detail remains restricted to diagnostic/trace levels.
+// Responsibility: Maps server-side semantic event identifiers into stable reader-facing Vanguard log families and normalizes message formatting.
+// Flow: Tags/messages pass through deterministic identifier/family normalization and cleanup before the caller emits them at its chosen SPT severity.
+// Authority boundary: Presentation only; this type neither filters by audit level nor changes runtime decisions, persistence, or logger severity.
+// Invariant: Equivalent semantic events normalize consistently, and presentation cleanup must never fabricate or suppress the underlying reported fact.
 namespace Vanguard.Server.Diagnostics;
 
 /// <summary>

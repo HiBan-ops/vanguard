@@ -16,15 +16,15 @@ namespace Vanguard.Client.UI.OffRaid.Inventory;
 /// Owns the full lifecycle of the direct Operator inventory screen.
 ///
 /// The vanilla InventoryScreen is not opened through MainMenuController.method_32()
-/// because Vanguard must feed it a temporary Operator profile.  That is safe only if
-/// the whole open -> close -> commit -> player profile reload sequence is treated as
-/// one serialized transaction.  Re-entering the direct screen while the previous menu
-/// rebuild is still settling leaves EFT in a half-restored UI/input state after
-/// opening several Operator inventories in a row.
+/// because Vanguard must feed it a temporary Operator profile. That is safe only if
+/// the whole open -> close -> commit -> Player-authority reconciliation sequence is
+/// treated as one serialized transaction. Re-entering the direct screen while the previous
+/// menu reconciliation is still settling can leave EFT in a half-restored UI/input state
+/// after opening several Operator inventories in a row.
 ///
-/// This class prevents that bad state from being created by serializing direct
-/// inventory sessions and by keeping the UI disabled until the player menu has
-/// been rebuilt after close.
+/// This class prevents that state by serializing direct inventory sessions and keeping
+/// the UI unavailable until the Player menu has settled after either the admitted fast
+/// reconciliation path or the native full-reload fallback.
 /// </summary>
 internal static class VanguardOperatorDirectInventoryLifecycle
 {

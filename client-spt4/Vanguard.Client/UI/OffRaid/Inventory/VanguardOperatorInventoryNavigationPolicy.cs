@@ -66,8 +66,8 @@ internal static class VanguardOperatorInventoryNavigationPolicy
         }
 
         // Main Menu is the explicit Operator-session authority boundary. Vanguard
-        // commits once, exits server inventory mode, restores player authority and then
-        // performs the already-proven full menu/profile reconciliation.
+        // commits once and exits server inventory mode, then restores Player authority through
+        // strict parity-gated fast reconciliation or the proven native full-reload fallback.
         if (RouteEquals(route, "MainMenu"))
         {
             return Decide(VanguardOperatorInventoryNavigationDisposition.ExitSessionToMainMenu, "explicit_main_menu_session_exit", equipmentBuildsLease);

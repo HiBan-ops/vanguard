@@ -1,9 +1,12 @@
-using System;
+﻿using System;
 using System.Linq;
 using System.Reflection;
 using Vanguard.Client.Diagnostics;
 
 #if SPT_CLIENT
+using EFT;
+using EFT.HealthSystem;
+using EFT.InventoryLogic;
 using HarmonyLib;
 using SPT.Reflection.Patching;
 #endif
@@ -41,29 +44,134 @@ internal sealed class VanguardOperatorEditBuildControllerPatch : ModulePatch
 
         VanguardClientDiagnosticsLog.Info(
             "VANGUARD_OPERATOR_EQUIPMENT_BUILDS_STATUS",
-            $"edit_build_controller_patch_target_resolved target={controllerType.FullName}.ctor; signature={string.Join(",", target.GetParameters().Select(parameter => parameter.ParameterType.Name))}");
+            $"edit_build_controller_patch_target_resolved target={controllerType.FullName}.ctor; signature={string.Join(",", target.GetParameters().Select(parameter => parameter.ParameterType.Name))}; authorityRouting=player_or_operator");
         return target;
     }
 
     [PatchPrefix]
-    private static void Prefix(object[] __args)
+    private static void Prefix([HarmonyArgument(1)] ref InventoryController requestedInventoryController)
     {
-        if (!VanguardOperatorInventoryModeClientState.IsActive || __args.Length < 2)
-        {
-            return;
-        }
-
-        object? requestedInventoryController = __args[1];
-        if (!VanguardOperatorEquipmentBuildsFlow.TryPrepareNativeBuildInventoryController(
-                requestedInventoryController,
+        if (!VanguardOffRaidViewAuthorityRouter.TryResolve(
+                "EditBuild",
                 "edit_build_controller_ctor",
-                out object? operatorInventoryController)
-            || operatorInventoryController == null)
+                out VanguardOffRaidViewContext viewContext,
+                out string routeReason))
         {
+            VanguardClientDiagnosticsLog.Warning(
+                "VANGUARD_OPERATOR_EQUIPMENT_BUILDS_STATUS",
+                $"edit_build_view_authority_unresolved reason={routeReason}; native_controller_preserved=true");
             return;
         }
 
-        __args[1] = operatorInventoryController;
+        InventoryController originalController = requestedInventoryController;
+        if (viewContext.IsOperator)
+        {
+            if (VanguardOperatorEquipmentBuildsFlow.TryPrepareNativeBuildInventoryController(
+                    requestedInventoryController,
+                    "edit_build_controller_ctor",
+                    out object? operatorInventoryController)
+                && operatorInventoryController is InventoryController preparedController)
+            {
+                requestedInventoryController = preparedController;
+            }
+            else
+            {
+                requestedInventoryController = viewContext.InventoryController;
+            }
+
+            VanguardOperatorProfileTransitionTrace.RecordNestedBoundary(
+                "EditBuild",
+                "edit_build_controller_ctor",
+                "operator_presentation_player_session",
+                "view_authority_router=operator; native_edit_build_controller_requested=true");
+        }
+        else
+        {
+            requestedInventoryController = viewContext.InventoryController;
+        }
+
+        bool itemUiContextReasserted = VanguardOffRaidViewAuthorityRouter.TryReassertItemUiContext(
+            viewContext,
+            "edit_build_controller_ctor",
+            out string itemUiContextReason);
+
+        VanguardOffRaidViewAuthorityRouter.RecordEffectiveBinding(
+            "EditBuild",
+            "edit_build_controller_ctor",
+            viewContext,
+            requestedInventoryController,
+            null,
+            null,
+            itemUiContextReasserted,
+            itemUiContextReason,
+            $"controllerSubstituted={!ReferenceEquals(originalController, requestedInventoryController)}; sessionPreserved=true");
+    }
+}
+
+/// <summary>
+/// Reasserts the active Operator ItemUiContext immediately before EFT presents an
+/// EditBuild screen. This covers returns from the native buy-missing-items commerce
+/// subflow, where the global ItemUiContext may have been reconfigured by trading UI.
+/// </summary>
+internal sealed class VanguardOperatorEditBuildScreenPresentationPatch : ModulePatch
+{
+    protected override MethodBase GetTargetMethod()
+    {
+        Type screenType = AccessTools.TypeByName("EFT.UI.EditBuildScreen")
+            ?? AccessTools.TypeByName("EditBuildScreen")
+            ?? throw new MissingMemberException("EditBuildScreen type not found.");
+
+        Type controllerType = screenType.GetNestedType("GClass3881", BindingFlags.Public | BindingFlags.NonPublic)
+            ?? throw new MissingMemberException(screenType.FullName ?? screenType.Name, "GClass3881");
+
+        MethodInfo? target = AccessTools.Method(screenType, "Show", new[] { controllerType });
+        target ??= screenType.GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+            .FirstOrDefault(method =>
+                string.Equals(method.Name, "Show", StringComparison.Ordinal)
+                && method.GetParameters().Length == 1
+                && method.GetParameters()[0].ParameterType == controllerType);
+
+        if (target == null)
+        {
+            throw new MissingMethodException(screenType.FullName ?? screenType.Name, "Show(GClass3881)");
+        }
+
+        VanguardClientDiagnosticsLog.Info(
+            "VANGUARD_OPERATOR_EQUIPMENT_BUILDS_STATUS",
+            $"edit_build_screen_patch_target_resolved target={target.DeclaringType?.FullName ?? screenType.FullName}.{target.Name}; controller={controllerType.FullName ?? controllerType.Name}");
+        return target;
+    }
+
+    [PatchPrefix]
+    private static void Prefix()
+    {
+        if (!VanguardOffRaidViewAuthorityRouter.TryResolve(
+                "EditBuild",
+                "edit_build_screen_show_prefix",
+                out VanguardOffRaidViewContext viewContext,
+                out string routeReason))
+        {
+            VanguardClientDiagnosticsLog.Warning(
+                "VANGUARD_OPERATOR_EQUIPMENT_BUILDS_STATUS",
+                $"edit_build_item_ui_context_reassert_skipped source=edit_build_screen_show_prefix; reason={routeReason}; native_show_preserved=true");
+            return;
+        }
+
+        bool reasserted = VanguardOffRaidViewAuthorityRouter.TryReassertItemUiContext(
+            viewContext,
+            "edit_build_screen_show_prefix",
+            out string reason);
+
+        VanguardOffRaidViewAuthorityRouter.RecordEffectiveBinding(
+            "EditBuild",
+            "edit_build_screen_show_prefix",
+            viewContext,
+            viewContext.InventoryController,
+            viewContext.HealthController,
+            viewContext.Equipment,
+            reasserted,
+            reason,
+            "presentation_boundary=true");
     }
 }
 
@@ -83,11 +191,6 @@ internal sealed class VanguardOperatorEquipmentBuildsControllerPatch : ModulePat
         Type controllerType = screenType.GetNestedType("GClass3870", BindingFlags.Public | BindingFlags.NonPublic)
             ?? throw new MissingMemberException(screenType.FullName ?? screenType.Name, "GClass3870");
 
-        // EFT 0.16.9 / SPT 4.1.x constructs this native controller from
-        // (session, backend inventory controller, health controller, equipment).
-        // Constructor interception happens before ShowScreen queues navigation, so
-        // Vanguard can preserve its direct inventory session before InventoryScreen
-        // emits OnClose for the nested transition.
         ConstructorInfo? target = controllerType.GetConstructors(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
             .FirstOrDefault(ctor => ctor.GetParameters().Length == 4);
         if (target == null)
@@ -97,28 +200,128 @@ internal sealed class VanguardOperatorEquipmentBuildsControllerPatch : ModulePat
 
         VanguardClientDiagnosticsLog.Info(
             "VANGUARD_OPERATOR_EQUIPMENT_BUILDS_STATUS",
-            $"equipment_builds_controller_patch_target_resolved target={controllerType.FullName}.ctor; signature={string.Join(",", target.GetParameters().Select(parameter => parameter.ParameterType.Name))}");
+            $"equipment_builds_controller_patch_target_resolved target={controllerType.FullName}.ctor; signature={string.Join(",", target.GetParameters().Select(parameter => parameter.ParameterType.Name))}; authorityRouting=player_or_operator; mutationMechanism=harmony_direct_ref_arguments");
         return target;
     }
 
-    [PatchPostfix]
-    private static void Postfix(object __instance, object[] __args)
+    [PatchPrefix]
+    private static void Prefix(
+        [HarmonyArgument(0)] ISession requestedSession,
+        [HarmonyArgument(1)] ref GClass3387 requestedInventoryController,
+        [HarmonyArgument(2)] ref IHealthController requestedHealthController,
+        [HarmonyArgument(3)] ref InventoryEquipment requestedEquipment)
     {
-        if (!VanguardOperatorInventoryModeClientState.IsActive)
+        if (!VanguardOffRaidViewAuthorityRouter.TryResolve(
+                "EquipmentBuilds",
+                "equipment_builds_controller_ctor_prefix",
+                out VanguardOffRaidViewContext viewContext,
+                out string routeReason))
+        {
+            VanguardClientDiagnosticsLog.Warning(
+                "VANGUARD_OPERATOR_EQUIPMENT_BUILDS_STATUS",
+                $"equipment_builds_view_authority_unresolved reason={routeReason}; native_constructor_preserved=true");
+            return;
+        }
+
+        GClass3387 originalController = requestedInventoryController;
+        IHealthController originalHealth = requestedHealthController;
+        InventoryEquipment originalEquipment = requestedEquipment;
+
+        requestedInventoryController = viewContext.InventoryController;
+        requestedHealthController = viewContext.HealthController;
+        requestedEquipment = viewContext.Equipment;
+
+        bool itemUiContextReasserted = VanguardOffRaidViewAuthorityRouter.TryReassertItemUiContext(
+            viewContext,
+            "equipment_builds_controller_ctor",
+            out string itemUiContextReason);
+
+        if (viewContext.IsOperator)
+        {
+            VanguardOperatorProfileTransitionTrace.RecordNestedBoundary(
+                "EquipmentBuilds",
+                "equipment_builds_controller_ctor_prefix",
+                "operator_presentation_player_session",
+                $"operator={viewContext.OperatorId ?? "<none>"}; profile={viewContext.ProfileId ?? "<none>"}; generation={viewContext.Generation}; directRefRouting=true; sessionArgumentPreserved=True");
+
+            VanguardOperatorProfileTransitionTrace.Record(
+                phase: "equipment_builds_ctor_effective_context",
+                route: "EquipmentBuilds",
+                source: "equipment_builds_controller_ctor_prefix",
+                expectedAuthority: "operator_presentation_player_session",
+                suppliedInventoryController: requestedInventoryController,
+                suppliedHealthController: requestedHealthController,
+                suppliedEquipment: requestedEquipment,
+                detail: $"requestedControllerWasOperator={ReferenceEquals(originalController, viewContext.InventoryController)}; requestedHealthWasOperator={ReferenceEquals(originalHealth, viewContext.HealthController)}; requestedEquipmentWasOperator={ReferenceEquals(originalEquipment, viewContext.Equipment)}; directRefRouting=true");
+        }
+
+        VanguardOffRaidViewAuthorityRouter.RecordEffectiveBinding(
+            "EquipmentBuilds",
+            "equipment_builds_controller_ctor_prefix",
+            viewContext,
+            requestedInventoryController,
+            requestedHealthController,
+            requestedEquipment,
+            itemUiContextReasserted,
+            itemUiContextReason,
+            $"sessionArgumentMatchesResolvedSession={ReferenceEquals(requestedSession, viewContext.Session)}; controllerSubstituted={!ReferenceEquals(originalController, requestedInventoryController)}; healthSubstituted={!ReferenceEquals(originalHealth, requestedHealthController)}; equipmentSubstituted={!ReferenceEquals(originalEquipment, requestedEquipment)}; nativePlayerSessionPreserved=true");
+
+        VanguardClientDiagnosticsLog.Info(
+            "VANGUARD_OPERATOR_EQUIPMENT_BUILDS_STATUS",
+            $"equipment_builds_view_context_rebound authority={viewContext.AuthorityName}; operator={viewContext.OperatorId ?? "<none>"}; profile={viewContext.ProfileId ?? "<none>"}; generation={viewContext.Generation}; controllerSubstituted={!ReferenceEquals(originalController, requestedInventoryController)}; healthSubstituted={!ReferenceEquals(originalHealth, requestedHealthController)}; equipmentSubstituted={!ReferenceEquals(originalEquipment, requestedEquipment)}; controllerMatchesExpected={ReferenceEquals(requestedInventoryController, viewContext.InventoryController)}; healthMatchesExpected={ReferenceEquals(requestedHealthController, viewContext.HealthController)}; equipmentMatchesExpected={ReferenceEquals(requestedEquipment, viewContext.Equipment)}; itemUiContextReasserted={itemUiContextReasserted}; playerSessionPreserved=True");
+    }
+
+    [PatchPostfix]
+    private static void Postfix(
+        object __instance,
+        [HarmonyArgument(0)] ISession effectiveSession,
+        [HarmonyArgument(1)] GClass3387 effectiveInventoryController,
+        [HarmonyArgument(2)] IHealthController effectiveHealthController,
+        [HarmonyArgument(3)] InventoryEquipment effectiveEquipment)
+    {
+        if (!VanguardOffRaidViewAuthorityRouter.TryResolve(
+                "EquipmentBuilds",
+                "equipment_builds_controller_ctor_postfix",
+                out VanguardOffRaidViewContext viewContext,
+                out _))
         {
             return;
         }
 
-        object? buildsBackendInventoryController = __args.Length > 1 ? __args[1] : null;
-        if (!VanguardOperatorEquipmentBuildsFlow.TryBeginNativeBuildsTransition(__instance, buildsBackendInventoryController, "equipment_builds_controller_ctor"))
+        VanguardOffRaidViewAuthorityRouter.RecordEffectiveBinding(
+            "EquipmentBuilds",
+            "equipment_builds_controller_ctor_postfix",
+            viewContext,
+            effectiveInventoryController,
+            effectiveHealthController,
+            effectiveEquipment,
+            itemUiContextReasserted: true,
+            itemUiContextReason: "prefix_already_reasserted",
+            detail: "native_controller_constructed=true");
+
+        if (!viewContext.IsOperator)
         {
             return;
         }
 
-        // Miyako's compatible bot-inventory implementation documents that EFT can
-        // immediately return from the build list when LastEquipmentBuildType is not
-        // a usable equipment tab. Preserve an already-valid Standard/Custom choice;
-        // only repair other/unknown values to Standard. Both tabs remain native.
+        if (!VanguardOperatorEquipmentBuildsFlow.TryBeginNativeBuildsTransition(
+                __instance,
+                effectiveInventoryController,
+                "equipment_builds_controller_ctor"))
+        {
+            return;
+        }
+
+        VanguardOperatorProfileTransitionTrace.Record(
+            phase: "equipment_builds_ctor_completed",
+            route: "EquipmentBuilds",
+            source: "equipment_builds_controller_ctor_postfix",
+            expectedAuthority: "operator_presentation_player_session",
+            suppliedInventoryController: effectiveInventoryController,
+            suppliedHealthController: effectiveHealthController,
+            suppliedEquipment: effectiveEquipment,
+            detail: "native_controller_constructed=true; directRefRouting=true");
+
         bool initialBuildTypeValid = TryEnsureUsableInitialBuildType(__instance, out string buildTypeReason);
         VanguardClientDiagnosticsLog.Info(
             "VANGUARD_OPERATOR_EQUIPMENT_BUILDS_STATUS",
@@ -137,7 +340,11 @@ internal sealed class VanguardOperatorEquipmentBuildsControllerPatch : ModulePat
         try
         {
             PropertyInfo? property = AccessTools.Property(controller.GetType(), "LastEquipmentBuildType");
-            FieldInfo? field = AccessTools.Field(controller.GetType(), "LastEquipmentBuildType");
+            // The supported SPT 4.0.13 controller exposes this as a property. Query the field only
+            // as a compatibility fallback so Harmony does not emit a false missing-field warning.
+            FieldInfo? field = property == null
+                ? AccessTools.Field(controller.GetType(), "LastEquipmentBuildType")
+                : null;
             Type? enumType = property?.PropertyType ?? field?.FieldType;
             if (enumType == null || !enumType.IsEnum)
             {
@@ -216,6 +423,23 @@ internal sealed class VanguardOperatorInventoryScreenReturnPatch : ModulePatch
         return target;
     }
 
+    [PatchPrefix]
+    private static void Prefix(object[] __args)
+    {
+        object? controller = __args.Length > 0 ? __args[0] : null;
+        if (!VanguardOperatorDirectEquipmentScreenEntry.IsActiveOperatorInventoryScreenController(controller))
+        {
+            return;
+        }
+
+        if (!VanguardOperatorDirectEquipmentScreenEntry.TryReassertActiveOperatorItemUiContext("inventory_screen_show_prefix", out string reassertReason))
+        {
+            VanguardClientDiagnosticsLog.Warning(
+                "VANGUARD_OPERATOR_DIRECT_EQUIPMENT_SCREEN_STATUS",
+                $"operator_item_ui_context_reassert_before_show_failed source=inventory_screen_show_prefix; reason={reassertReason}; session_preserved={VanguardOperatorInventoryModeClientState.IsActive}");
+        }
+    }
+
     [PatchPostfix]
     private static void Postfix(object[] __args)
     {
@@ -223,13 +447,27 @@ internal sealed class VanguardOperatorInventoryScreenReturnPatch : ModulePatch
         bool equipmentBuildsReturned = VanguardOperatorEquipmentBuildsFlow.NotifyDirectInventoryShown(controller, "inventory_screen_show");
         if (VanguardOperatorDirectEquipmentScreenEntry.IsActiveOperatorInventoryScreenController(controller))
         {
-            VanguardOperatorInventorySessionNavigation.NotifyOperatorInventoryShown(
-                equipmentBuildsReturned ? "inventory_screen_show_after_equipment_builds" : "inventory_screen_show");
+            if (!VanguardOperatorDirectEquipmentScreenEntry.TryReassertActiveOperatorItemUiContext("inventory_screen_show_postfix", out string reassertReason))
+            {
+                VanguardClientDiagnosticsLog.Warning(
+                    "VANGUARD_OPERATOR_DIRECT_EQUIPMENT_SCREEN_STATUS",
+                    $"operator_item_ui_context_reassert_after_show_failed source=inventory_screen_show_postfix; reason={reassertReason}; session_preserved={VanguardOperatorInventoryModeClientState.IsActive}");
+            }
+
+            string returnSource = equipmentBuildsReturned ? "inventory_screen_show_after_equipment_builds" : "inventory_screen_show";
+            VanguardOperatorInventorySessionNavigation.NotifyOperatorInventoryShown(returnSource);
         }
     }
 }
 #else
 internal sealed class VanguardOperatorEditBuildControllerPatch
+{
+    public void Enable()
+    {
+    }
+}
+
+internal sealed class VanguardOperatorEditBuildScreenPresentationPatch
 {
     public void Enable()
     {

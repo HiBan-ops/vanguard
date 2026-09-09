@@ -189,10 +189,10 @@ public sealed class VanguardRaidOperatorPersistenceService(
                     }
                 }
 
-                // First validate the unmodified runtime trees.  A legal transfer removes an item
-                // from the donor corpse before it appears on the receiver.  Seeing the same ItemId
-                // in two final runtime Operator trees is therefore a transaction/replication fault,
-                // even if the donor is about to lose that item under the KIA policy.
+                // Runtime trees are forensic/corpse truth. They must already be globally unique across
+                // Operators; Vanguard never arbitrates ownership of the same ItemId.  Personal PMC dogtags
+                // are prevented at their source by raid-scoped materialization and persistent-profile
+                // sanitization, so this guard can remain strict.
                 foreach (string itemId in runtimeSnapshot.EquipmentItemIds)
                 {
                     if (runtimeItemOwners.TryGetValue(itemId, out string? existingRuntimeOwner))
@@ -203,17 +203,27 @@ public sealed class VanguardRaidOperatorPersistenceService(
                     runtimeItemOwners[itemId] = operatorKey;
                 }
 
-                VanguardRaidInventoryPreparedSnapshot persistenceSnapshot = runtimeSnapshot;
-                string effectiveSnapshotSource = Normalize(entry.SnapshotSource, "runtime_profile_descriptor");
+                // The Operator's own Dogtag equipment item is raid-scoped corpse truth and must never
+                // become next-raid persistence.  Strip only the direct Equipment/Dogtag tree; looted
+                // dogtags elsewhere in pockets/rig/backpack remain untouched.
+                if (!inventoryModeService.TryPreparePersistentRaidInventorySnapshot(
+                        runtimeSnapshot,
+                        out VanguardRaidInventoryPreparedSnapshot? persistentBaseSnapshot,
+                        out string persistentSnapshotReason)
+                    || persistentBaseSnapshot is null)
+                {
+                    return Failure("persistent_snapshot_invalid_" + operatorId + "_" + persistentSnapshotReason, raidSessionId, entries.Length, now);
+                }
+
+                VanguardRaidInventoryPreparedSnapshot persistenceSnapshot = persistentBaseSnapshot;
+                string effectiveSnapshotSource = Normalize(entry.SnapshotSource, "runtime_profile_descriptor") + ":personal_dogtag_excluded";
                 if (entry.Died)
                 {
                     // SPT does not persist a dead PMC's residual corpse as survivor equipment.
-                    // After the corpse has been reconciled exactly, apply SPT LostOnDeathConfig to
-                    // derive the distinct persistence tree.  Recovered items have already left the
-                    // corpse and live in the receiver's runtime tree; unrecovered lost-on-death gear
-                    // is deliberately absent from the dead Operator's next-raid inventory.
+                    // After the raw corpse has been reconciled exactly and the raid-scoped personal
+                    // dogtag has been excluded from persistence, apply SPT LostOnDeathConfig.
                     if (!inventoryModeService.TryPrepareKiaRaidInventorySnapshot(
-                            runtimeSnapshot,
+                            persistentBaseSnapshot,
                             out VanguardRaidInventoryPreparedSnapshot? kiaSnapshot,
                             out string kiaReason)
                         || kiaSnapshot is null)
@@ -222,7 +232,7 @@ public sealed class VanguardRaidOperatorPersistenceService(
                     }
 
                     persistenceSnapshot = kiaSnapshot;
-                    effectiveSnapshotSource = "runtime_corpse_reconciled_spt_lost_on_death";
+                    effectiveSnapshotSource = "runtime_corpse_reconciled_personal_dogtag_excluded_spt_lost_on_death";
                 }
 
                 foreach (string itemId in persistenceSnapshot.EquipmentItemIds)
@@ -237,6 +247,7 @@ public sealed class VanguardRaidOperatorPersistenceService(
 
                 prepared.Add(new PreparedEntry(entry, storageProfileId, persistentOperator, persistenceSnapshot, skillSnapshot, effectiveSnapshotSource, careerTruthProbe));
             }
+
 
             foreach (string owner in prepared.Select(entry => entry.StorageProfileId).Distinct(StringComparer.OrdinalIgnoreCase))
             {

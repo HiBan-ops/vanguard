@@ -86,20 +86,58 @@ internal static class VanguardRaidOperatorPersistenceService
     public static void CommitAtRaidEnd(string source)
     {
         string raidSessionId;
+        string gateDecision;
+        bool gateArmed;
+        bool gateFinalCommitAttempted;
+        bool gateAuthority;
+        string gateArmedRaidSessionId;
+
         lock (Sync)
         {
-            if (!armed || finalCommitAttempted)
-            {
-                return;
-            }
+            gateArmed = armed;
+            gateFinalCommitAttempted = finalCommitAttempted;
+            gateAuthority = IsPersistenceAuthority;
+            gateArmedRaidSessionId = armedRaidSessionId;
 
-            if (!IsPersistenceAuthority)
+            if (!gateArmed)
             {
-                return;
+                raidSessionId = gateArmedRaidSessionId;
+                gateDecision = "reject_not_armed";
             }
+            else if (gateFinalCommitAttempted)
+            {
+                raidSessionId = gateArmedRaidSessionId;
+                gateDecision = "reject_already_attempted";
+            }
+            else if (!gateAuthority)
+            {
+                raidSessionId = gateArmedRaidSessionId;
+                gateDecision = "reject_not_persistence_authority";
+            }
+            else
+            {
+                raidSessionId = gateArmedRaidSessionId;
+                finalCommitAttempted = true;
+                gateDecision = "admitted";
+            }
+        }
 
-            raidSessionId = armedRaidSessionId;
-            finalCommitAttempted = true;
+        string runtimeRaidSessionId = VanguardRaidOperatorRuntimeRegistry.ActiveRaidSessionId ?? string.Empty;
+        int runtimeOperatorCount = VanguardRaidOperatorRuntimeRegistry.GetRuntimeCountForAuthority();
+        bool raidIdentityMatches = !string.IsNullOrWhiteSpace(gateArmedRaidSessionId)
+            && !string.IsNullOrWhiteSpace(runtimeRaidSessionId)
+            && string.Equals(gateArmedRaidSessionId, runtimeRaidSessionId, StringComparison.OrdinalIgnoreCase);
+
+        VanguardClientDiagnosticsLog.Info(
+            StatusTag,
+            $"VANGUARD_RAID_PERSISTENCE_COMMIT_GATE source={Safe(source)}; decision={gateDecision}; armed={Bool(gateArmed)}; finalCommitAttemptedBeforeGate={Bool(gateFinalCommitAttempted)}; authority={Bool(gateAuthority)}; armedRaid={Safe(gateArmedRaidSessionId)}; runtimeRaid={Safe(runtimeRaidSessionId)}; raidIdentityMatches={Bool(raidIdentityMatches)}; runtimeOperators={runtimeOperatorCount}; operatorPostRaidPersistenceEnabled={Bool(VanguardOperatorRuntimeAuditOptions.GetOperatorPostRaidPersistenceEnabled())}");
+
+        if (!string.Equals(gateDecision, "admitted", StringComparison.Ordinal))
+        {
+            VanguardClientDiagnosticsLog.Warning(
+                StatusTag,
+                $"VANGUARD_RAID_PERSISTENCE_COMMIT_GATE_REJECTED source={Safe(source)}; reason={gateDecision}; armed={Bool(gateArmed)}; finalCommitAttempted={Bool(gateFinalCommitAttempted)}; authority={Bool(gateAuthority)}; armedRaid={Safe(gateArmedRaidSessionId)}; runtimeRaid={Safe(runtimeRaidSessionId)}; runtimeOperators={runtimeOperatorCount}; durableCommitAttempted=false");
+            return;
         }
 
         try

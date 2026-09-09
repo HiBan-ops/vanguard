@@ -1683,10 +1683,10 @@ internal static class VanguardSquadTravelCohesionExecutor
             int botCorners = 0;
             string botPathStatus = "none";
 
-            // Runtime invariant: first handle the inverse stale-cursor case proved by runtime qualification.
-            // The Operator may already be physically near the owner after combat while the stored
-            // cursor remains far behind. Candidate resolution is side-effect free; a complete path
-            // and exact command identity are required before any cursor commit.
+            // Runtime invariant: first handle the inverse stale-cursor case. The Operator may already
+            // be physically near the owner after an interruption while the stored route cursor remains
+            // far behind. Candidate resolution is side-effect free; a complete path and exact command
+            // identity are required before any cursor commit.
             bool postInterruptionCandidateResolved = VanguardSquadTravelRouteMemory.TryResolvePostInterruptionReconciliationTarget(
                 snapshot,
                 botPosition,

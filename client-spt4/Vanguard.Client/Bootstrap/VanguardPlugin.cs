@@ -93,8 +93,11 @@ public sealed class VanguardPlugin
             EnablePatch("VanguardOperatorContextualRagfairNavigationPatch", () => new VanguardOperatorContextualRagfairNavigationPatch().Enable());
             EnablePatch("VanguardOperatorWeaponModdingNavigationPatch", () => new VanguardOperatorWeaponModdingNavigationPatch().Enable());
             EnablePatch("VanguardOperatorEditBuildControllerPatch", () => new VanguardOperatorEditBuildControllerPatch().Enable());
+            EnablePatch("VanguardOperatorEditBuildScreenPresentationPatch", () => new VanguardOperatorEditBuildScreenPresentationPatch().Enable());
+            EnablePatch("VanguardOperatorTraderGridBindingPatch", () => new VanguardOperatorTraderGridBindingPatch().Enable());
             EnablePatch("VanguardOperatorEquipmentBuildsControllerPatch", () => new VanguardOperatorEquipmentBuildsControllerPatch().Enable());
             EnablePatch("VanguardOperatorInventoryScreenReturnPatch", () => new VanguardOperatorInventoryScreenReturnPatch().Enable());
+            EnablePatch("VanguardOperatorQuickFindAuthorityPatch", () => new VanguardOperatorQuickFindAuthorityPatch().Enable());
             EnablePatch("VanguardOperatorInventoryMenuGuardPatch", () => new VanguardOperatorInventoryMenuGuardPatch().Enable());
             EnablePatch("VanguardFikaBotDifficultiesFallbackPatch", () => new VanguardFikaBotDifficultiesFallbackPatch().Enable());
             EnablePatch("VanguardSptCustomAiVanguardRoleBypassPatch", () => new VanguardSptCustomAiVanguardRoleBypassPatch().Enable());

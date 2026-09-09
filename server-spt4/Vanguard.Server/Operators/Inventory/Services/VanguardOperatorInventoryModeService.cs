@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -43,6 +44,8 @@ public sealed class VanguardOperatorInventoryModeService(
     private readonly ConcurrentDictionary<string, VanguardOperatorInventoryModeSession> activeSessions = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, SemaphoreSlim> profileLocks = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, ConcurrentDictionary<string, MongoId>> playerPurchaseCurrencyAliases = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConditionalWeakTable<ItemEventRouterResponse, NativePurchaseResponseMarker> nativePurchaseResponses = new();
+    private readonly ConcurrentDictionary<string, PendingNativePurchaseRouteMarker> pendingNativePurchaseRoutes = new(StringComparer.OrdinalIgnoreCase);
     private readonly AsyncLocal<int> redirectBypassDepth = new();
     private readonly LostOnDeathConfig lostOnDeathConfig = lostOnDeathConfigProvider.Value;
 
@@ -212,6 +215,28 @@ public sealed class VanguardOperatorInventoryModeService(
         {
             logger.Warning(VanguardServerDiagnosticsLog.Present($"[VANGUARD_OPERATOR_DIRECT_COMMIT_STATUS] direct_commit_snapshot_rejected requested={requested}; storage={session.StorageProfileId}; operator={session.OperatorId}; reason={snapshotReason}; source={snapshotSource ?? "<none>"}; clientItems={clientItemCount}"));
             return Failure(requested, session.StorageProfileId, session.OperatorId, "direct_commit_snapshot_invalid_" + snapshotReason);
+        }
+
+        // Native Equipment Builds can transiently leave the client CompleteProfileDescriptor
+        // with the same logical item serialized more than once.  Do not weaken the direct-
+        // commit audit: collapse only byte-for-structure-equivalent duplicates.  If two
+        // entries with the same id disagree on any field, retain the snapshot unchanged so
+        // the existing hard reconciliation path remains authoritative instead of guessing
+        // which client variant is correct.
+        int exactDuplicatesRemoved = CollapseExactDuplicateInventoryItems(
+            snapshotInventory,
+            out string? divergentDuplicateId,
+            out string? divergentDuplicateDetails);
+        if (exactDuplicatesRemoved > 0)
+        {
+            logger.Info(VanguardServerDiagnosticsLog.Present(
+                $"[VANGUARD_OPERATOR_DIRECT_COMMIT_STATUS] direct_commit_exact_duplicate_items_collapsed requested={requested}; storage={session.StorageProfileId}; operator={session.OperatorId}; removed={exactDuplicatesRemoved}; source={snapshotSource ?? "<none>"}; policy=exact_structural_duplicate_only; hardFallbackPreserved=true"));
+        }
+
+        if (!string.IsNullOrWhiteSpace(divergentDuplicateId))
+        {
+            logger.Warning(VanguardServerDiagnosticsLog.Present(
+                $"[VANGUARD_OPERATOR_DIRECT_COMMIT_STATUS] direct_commit_divergent_duplicate_item_detected requested={requested}; storage={session.StorageProfileId}; operator={session.OperatorId}; id={divergentDuplicateId}; details={divergentDuplicateDetails ?? "<none>"}; source={snapshotSource ?? "<none>"}; action=leave_snapshot_unchanged_for_hard_fallback"));
         }
 
         SemaphoreSlim guard = GetProfileLock(session.StorageProfileId, session.OperatorId);
@@ -398,6 +423,51 @@ public sealed class VanguardOperatorInventoryModeService(
             mastering.Count,
             ComputeSkillStateFingerprint(skills, includeSessionPoints: true));
         reason = source;
+        return true;
+    }
+
+    /// <summary>
+    /// Derives the persistent Operator equipment truth from the raw runtime descriptor.
+    /// The Operator's own PMC dogtag is raid-scoped and must never be written back into
+    /// the persistent Operator profile. Looted dogtags are preserved because only the
+    /// direct Equipment/Dogtag tree is removed.
+    /// </summary>
+    public bool TryPreparePersistentRaidInventorySnapshot(
+        VanguardRaidInventoryPreparedSnapshot runtimeSnapshot,
+        out VanguardRaidInventoryPreparedSnapshot? prepared,
+        out string reason)
+    {
+        prepared = null;
+        JsonObject snapshotInventory = CloneObject(runtimeSnapshot.SnapshotInventory);
+        string equipmentId = GetString(snapshotInventory, "equipment") ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(equipmentId)
+            || !string.Equals(equipmentId, runtimeSnapshot.EquipmentId, StringComparison.OrdinalIgnoreCase))
+        {
+            reason = "persistent_equipment_root_mismatch";
+            return false;
+        }
+
+        int removed = RemoveDirectEquipmentDogtagTree(snapshotInventory);
+        string audit = AuditRaidEquipmentSnapshot(snapshotInventory, equipmentId);
+        if (audit != "ok")
+        {
+            reason = "persistent_snapshot_" + audit;
+            return false;
+        }
+
+        JsonArray items = GetItemsArray(snapshotInventory);
+        HashSet<string> persistentTreeIds = CollectTreeIds(items, equipmentId);
+        string[] persistentItemIds = persistentTreeIds
+            .OrderBy(id => id, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        prepared = new VanguardRaidInventoryPreparedSnapshot(
+            snapshotInventory,
+            equipmentId,
+            persistentItemIds,
+            items.Count,
+            persistentItemIds.Length,
+            ComputeEquipmentTreeFingerprint(snapshotInventory, equipmentId));
+        reason = removed > 0 ? "ok_personal_dogtag_excluded" : "ok_no_personal_dogtag";
         return true;
     }
 
@@ -929,10 +999,25 @@ public sealed class VanguardOperatorInventoryModeService(
         try
         {
             SptProfile? playerProfile = saveServer.GetProfile(requestedProfileId);
-            playerPmcData = playerProfile?.CharacterData?.PmcData;
+            if (playerProfile == null)
+            {
+                throw new InvalidOperationException($"Real player profile unavailable for native purchase: {requestedProfileId}");
+            }
+
+            // Native commerce must keep the real player PMC/wallet authority, but SPT also
+            // chooses purchased-item stash coordinates from that PMC's inventory graph.
+            // Ordinary Operator item events intentionally mutate only the active composite,
+            // so the real player stash can be spatially stale after live Operator moves.
+            // Re-project the player-owned (non-Operator-equipment) inventory branches from
+            // the active composite immediately before BuyItem. This keeps native placement
+            // on the current shared stash without ever copying Operator equipment into the
+            // real player profile.
+            SynchronizePlayerOwnedInventoryForNativePurchase(requestedProfileId, session, playerProfile, operation);
+
+            playerPmcData = playerProfile.CharacterData?.PmcData;
             if (playerPmcData == null)
             {
-                throw new InvalidOperationException($"Real player PMC unavailable for native purchase: {requestedProfileId}");
+                throw new InvalidOperationException($"Real player PMC unavailable for native purchase after stash synchronization: {requestedProfileId}");
             }
 
             operatorId = session.OperatorId;
@@ -947,6 +1032,80 @@ public sealed class VanguardOperatorInventoryModeService(
                 $"[VANGUARD_OPERATOR_NATIVE_PURCHASE_AUTHORITY_STATUS] player_profile_route_failed operation={operation}; requested={requestedProfileId}; operator={session.OperatorId}; type={exception.GetType().Name}; message={exception.Message}; playerWalletAuthority=true; fallbackToComposite=false"));
             throw;
         }
+    }
+
+    private void SynchronizePlayerOwnedInventoryForNativePurchase(
+        MongoId requestedProfileId,
+        VanguardOperatorInventoryModeSession session,
+        SptProfile playerProfile,
+        string operation)
+    {
+        JsonObject playerNode = ProfileToNode(playerProfile);
+        JsonObject sessionNode = ProfileToNode(session.Profile);
+        JsonObject playerInventory = GetInventoryObject(playerNode);
+        JsonObject sessionInventory = GetInventoryObject(sessionNode);
+
+        string playerEquipmentId = RequireString(playerInventory, "equipment", "player_inventory_equipment_missing");
+        string playerStashId = RequireString(playerInventory, "stash", "player_inventory_stash_missing");
+        string sessionStashId = RequireString(sessionInventory, "stash", "session_inventory_stash_missing");
+
+        string playerEquipmentFingerprintBefore = ComputeEquipmentTreeFingerprint(playerInventory, playerEquipmentId);
+        string playerStashFingerprintBefore = ComputeEquipmentTreeFingerprint(playerInventory, playerStashId);
+        string sessionStashFingerprint = ComputeEquipmentTreeFingerprint(sessionInventory, sessionStashId);
+
+        JsonObject synchronizedInventory = BuildPlayerInventoryForCommit(playerInventory, sessionInventory);
+        string synchronizedAudit = AuditInventoryTree(synchronizedInventory);
+        if (!string.Equals(synchronizedAudit, "ok", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("native_purchase_player_inventory_preflight_audit_" + synchronizedAudit);
+        }
+
+        string synchronizedEquipmentId = RequireString(synchronizedInventory, "equipment", "synchronized_player_inventory_equipment_missing");
+        string synchronizedStashId = RequireString(synchronizedInventory, "stash", "synchronized_player_inventory_stash_missing");
+        string synchronizedEquipmentFingerprint = ComputeEquipmentTreeFingerprint(synchronizedInventory, synchronizedEquipmentId);
+        string synchronizedStashFingerprint = ComputeEquipmentTreeFingerprint(synchronizedInventory, synchronizedStashId);
+
+        bool playerEquipmentPreserved = string.Equals(
+            playerEquipmentFingerprintBefore,
+            synchronizedEquipmentFingerprint,
+            StringComparison.OrdinalIgnoreCase);
+        bool sharedStashAligned = string.Equals(
+            sessionStashFingerprint,
+            synchronizedStashFingerprint,
+            StringComparison.OrdinalIgnoreCase);
+        if (!playerEquipmentPreserved || !sharedStashAligned)
+        {
+            throw new InvalidOperationException(
+                $"native_purchase_player_inventory_preflight_authority_mismatch_equipment_{playerEquipmentPreserved}_stash_{sharedStashAligned}");
+        }
+
+        ReplaceInventory(GetPmcObject(playerNode), synchronizedInventory);
+        SptProfile synchronizedPlayerProfile = NodeToProfile(playerNode);
+        CopyProfileMembers(synchronizedPlayerProfile, playerProfile);
+
+        JsonObject readBackInventory = GetInventoryObject(ProfileToNode(playerProfile));
+        string readBackEquipmentId = RequireString(readBackInventory, "equipment", "readback_player_inventory_equipment_missing");
+        string readBackStashId = RequireString(readBackInventory, "stash", "readback_player_inventory_stash_missing");
+        bool readBackEquipmentPreserved = string.Equals(
+            playerEquipmentFingerprintBefore,
+            ComputeEquipmentTreeFingerprint(readBackInventory, readBackEquipmentId),
+            StringComparison.OrdinalIgnoreCase);
+        bool readBackSharedStashAligned = string.Equals(
+            sessionStashFingerprint,
+            ComputeEquipmentTreeFingerprint(readBackInventory, readBackStashId),
+            StringComparison.OrdinalIgnoreCase);
+        if (!readBackEquipmentPreserved || !readBackSharedStashAligned)
+        {
+            throw new InvalidOperationException(
+                $"native_purchase_player_inventory_preflight_readback_mismatch_equipment_{readBackEquipmentPreserved}_stash_{readBackSharedStashAligned}");
+        }
+
+        bool playerStashAlreadyAligned = string.Equals(
+            playerStashFingerprintBefore,
+            sessionStashFingerprint,
+            StringComparison.OrdinalIgnoreCase);
+        logger.Info(VanguardServerDiagnosticsLog.Present(
+            $"[VANGUARD_OPERATOR_NATIVE_PURCHASE_SPATIAL_STATUS] player_inventory_preflight operation={operation}; requested={requestedProfileId}; operator={session.OperatorId}; inventoryProfile={session.OperatorInventoryProfileId}; playerStashAlreadyAligned={playerStashAlreadyAligned}; sharedStashAligned=true; playerEquipmentPreserved=true; treeAudit=ok; authority=player-market_operator-equipment_player-stash; timing=before_native_buy_item"));
     }
 
     public void CanonicalizePlayerPurchasePaymentReferences(
@@ -1079,6 +1238,15 @@ public sealed class VanguardOperatorInventoryModeService(
                 return;
             }
 
+            // Mark the exact item-event response that contains this native purchase.
+            // ItemEventRouterPostfix runs at the outer request boundary, after one or more
+            // TradeHelper.BuyItem calls may have accumulated into this same response.
+            // Only marked purchase responses are dual-routed to both the real player
+            // profile updater and the Operator composite updater. Ordinary Operator item
+            // events remain Operator-only and therefore cannot leak equipment edits into
+            // the player's PMC profile.
+            MarkNativePurchaseResponse(output, requestedProfileId, session.OperatorId, operation);
+
             // SPT has already mutated the real player profile and described that mutation
             // in the item-event response. Apply only those native deltas to the temporary
             // composite instead of replacing the whole stash; unrelated Operator-session
@@ -1126,6 +1294,182 @@ public sealed class VanguardOperatorInventoryModeService(
         }
     }
 
+    private void MarkNativePurchaseResponse(
+        ItemEventRouterResponse output,
+        MongoId requestedProfileId,
+        string operatorId,
+        string operation)
+    {
+        NativePurchaseResponseMarker marker = nativePurchaseResponses.GetValue(
+            output,
+            _ => new NativePurchaseResponseMarker(requestedProfileId, operatorId));
+        int operations = Interlocked.Increment(ref marker.PurchaseOperations);
+        marker.LastOperation = operation;
+
+        string requestedKey = requestedProfileId.ToString();
+        PendingNativePurchaseRouteMarker pending;
+        if (operations == 1)
+        {
+            // TradeHelper.BuyItem receives an inner ItemEventRouterResponse, while
+            // ItemEventRouter.HandleEvents can later return a distinct outer response
+            // instance. Reference identity therefore cannot be the sole routing token.
+            // Keep a bounded per-session marker and fingerprint it with the purchased
+            // NewItem ids; the outer response must carry one of those ids before it is
+            // eligible for dual player+Operator routing.
+            pending = new PendingNativePurchaseRouteMarker(
+                requestedProfileId,
+                operatorId,
+                operation,
+                RuntimeHelpers.GetHashCode(output));
+            pendingNativePurchaseRoutes[requestedKey] = pending;
+        }
+        else if (!pendingNativePurchaseRoutes.TryGetValue(requestedKey, out PendingNativePurchaseRouteMarker? existingPending)
+            || existingPending == null)
+        {
+            pending = new PendingNativePurchaseRouteMarker(
+                requestedProfileId,
+                operatorId,
+                operation,
+                RuntimeHelpers.GetHashCode(output));
+            pendingNativePurchaseRoutes[requestedKey] = pending;
+        }
+        else
+        {
+            pending = existingPending;
+        }
+
+        pending.PurchaseOperations = operations;
+        pending.LastOperation = operation;
+        if (output.ProfileChanges != null
+            && output.ProfileChanges.TryGetValue(requestedProfileId, out ProfileChange? purchaseProfileChange))
+        {
+            pending.Capture(purchaseProfileChange);
+        }
+
+        if (operations == 1)
+        {
+            logger.Info(VanguardServerDiagnosticsLog.Present(
+                $"[VANGUARD_OPERATOR_NATIVE_PURCHASE_AUTHORITY_STATUS] client_profile_change_route_marked requested={requestedProfileId}; operator={operatorId}; response={RuntimeHelpers.GetHashCode(output)}; route=dual_player_and_operator; reason=native_purchase_response; correlation=session_purchase_item_fingerprint"));
+        }
+    }
+
+    public void RouteActiveItemEventProfileChangesForClient(
+        MongoId requestedProfileId,
+        MongoId operatorInventoryProfileId,
+        ItemEventRouterResponse response)
+    {
+        string requestedKey = requestedProfileId.ToString();
+        if (response.ProfileChanges == null
+            || !response.ProfileChanges.TryGetValue(requestedProfileId, out ProfileChange? profileChange))
+        {
+            nativePurchaseResponses.Remove(response);
+            return;
+        }
+
+        bool exactResponseIdentity = nativePurchaseResponses.TryGetValue(response, out NativePurchaseResponseMarker? exactMarker)
+            && exactMarker.RequestedProfileId.Equals(requestedProfileId);
+        bool pendingResponseMatch = pendingNativePurchaseRoutes.TryGetValue(requestedKey, out PendingNativePurchaseRouteMarker? pendingMarker)
+            && pendingMarker.RequestedProfileId.Equals(requestedProfileId)
+            && pendingMarker.Matches(profileChange);
+
+        if (exactResponseIdentity || pendingResponseMatch)
+        {
+            string operatorId = exactResponseIdentity ? exactMarker!.OperatorId : pendingMarker!.OperatorId;
+            int purchaseOperations = exactResponseIdentity ? exactMarker!.PurchaseOperations : pendingMarker!.PurchaseOperations;
+            string lastOperation = exactResponseIdentity ? exactMarker!.LastOperation : pendingMarker!.LastOperation;
+            int markedResponseHash = exactResponseIdentity
+                ? RuntimeHelpers.GetHashCode(response)
+                : pendingMarker!.MarkedResponseHash;
+            string matchedBy = exactResponseIdentity ? "exact_response_identity" : "session_purchase_item_fingerprint";
+
+            try
+            {
+                // A native purchase belongs to two live client read models at once while
+                // Operator inventory mode is active:
+                //   1. the real PMC profile owned by ISession (Trader/EditBuild caches),
+                //   2. the temporary Operator composite profile/controller.
+                // The PMC must receive the native purchase ProfileChange except for a
+                // non-authoritative Skills payload that BuyItem exposes and EFT mis-presents
+                // as level-zero notifications in this dual-live topology. The Operator updater
+                // is allowed to receive only the inventory delta from that purchase.
+                // Copying skills/experience/trader relations/quests/etc. into the Operator
+                // profile would violate Operator authority.
+                string serialized = jsonUtil.Serialize(profileChange, indented: false)
+                    ?? throw new InvalidOperationException("Unable to serialize native purchase ProfileChange for dual client routing.");
+                JsonObject serializedProfileChange = JsonNode.Parse(serialized)?.AsObject()
+                    ?? throw new InvalidOperationException("Unable to parse native purchase ProfileChange for inventory-only Operator routing.");
+                string? itemsPropertyName = serializedProfileChange
+                    .Select(property => property.Key)
+                    .FirstOrDefault(name => string.Equals(name, "items", StringComparison.OrdinalIgnoreCase));
+                if (itemsPropertyName == null || serializedProfileChange[itemsPropertyName] == null)
+                {
+                    throw new InvalidOperationException("Native purchase ProfileChange did not contain an inventory items delta.");
+                }
+
+                string? skillsPropertyName = serializedProfileChange
+                    .Select(property => property.Key)
+                    .FirstOrDefault(name => string.Equals(name, "skills", StringComparison.OrdinalIgnoreCase));
+                bool sourceContainedSkills = skillsPropertyName != null
+                    && serializedProfileChange[skillsPropertyName] != null;
+
+                // SPT's native BuyItem ProfileChange currently carries a Skills payload
+                // even though purchasing does not mutate skills. When the PMC updater is
+                // kept live alongside the Operator updater, EFT interprets that payload as
+                // level changes and emits a burst of "skill leveled up to 0" notifications.
+                // Preserve every legitimate PMC purchase field, but remove Skills from this
+                // purchase response before the native PMC updater consumes it.
+                if (sourceContainedSkills && skillsPropertyName != null)
+                {
+                    JsonObject playerProjectionNode = serializedProfileChange.DeepClone().AsObject();
+                    playerProjectionNode.Remove(skillsPropertyName);
+                    string playerProjectionSerialized = playerProjectionNode.ToJsonString();
+                    ProfileChange playerProjection = jsonUtil.Deserialize<ProfileChange>(playerProjectionSerialized)
+                        ?? throw new InvalidOperationException("Unable to deserialize native purchase ProfileChange with Skills removed for PMC routing.");
+                    playerProjection.Id = requestedProfileId;
+                    response.ProfileChanges[requestedProfileId] = playerProjection;
+                }
+
+                JsonObject operatorProjectionNode = new();
+                string? idPropertyName = serializedProfileChange
+                    .Select(property => property.Key)
+                    .FirstOrDefault(name => string.Equals(name, "id", StringComparison.OrdinalIgnoreCase));
+                if (idPropertyName != null && serializedProfileChange[idPropertyName] != null)
+                {
+                    operatorProjectionNode[idPropertyName] = serializedProfileChange[idPropertyName]!.DeepClone();
+                }
+                operatorProjectionNode[itemsPropertyName] = serializedProfileChange[itemsPropertyName]!.DeepClone();
+                string operatorProjectionSerialized = operatorProjectionNode.ToJsonString();
+                ProfileChange operatorProjection = jsonUtil.Deserialize<ProfileChange>(operatorProjectionSerialized)
+                    ?? throw new InvalidOperationException("Unable to deserialize inventory-only native purchase ProfileChange for Operator routing.");
+                operatorProjection.Id = operatorInventoryProfileId;
+                response.ProfileChanges[operatorInventoryProfileId] = operatorProjection;
+
+                int strippedFieldCount = serializedProfileChange.Count - operatorProjectionNode.Count;
+                logger.Info(VanguardServerDiagnosticsLog.Present(
+                    $"[VANGUARD_OPERATOR_NATIVE_PURCHASE_AUTHORITY_STATUS] client_profile_change_routed requested={requestedProfileId}; operator={operatorId}; playerProfile={requestedProfileId}; operatorProfile={operatorInventoryProfileId}; purchaseOperations={purchaseOperations}; lastOperation={lastOperation}; route=dual_player_and_operator; playerProjection=full_minus_purchase_skills; playerSkillsStripped={sourceContainedSkills}; operatorProjection=inventory_items_only; strippedNonInventoryFields={Math.Max(0, strippedFieldCount)}; sourceContainedSkills={sourceContainedSkills}; matchedBy={matchedBy}; markedResponse={markedResponseHash}; outerResponse={RuntimeHelpers.GetHashCode(response)}; playerSessionProfileConverges=true; operatorCompositeConverges=true; operatorSkillsAuthority=preserved"));
+                return;
+            }
+            catch (Exception exception)
+            {
+                // Preserve the established Operator-only rekey fallback rather than returning one
+                // mutable ProfileChange instance under two keys. A failed clone therefore
+                // falls back to the established Operator-only rekey and is made explicit
+                // in diagnostics; the native server-side purchase remains authoritative.
+                logger.Error(VanguardServerDiagnosticsLog.Present(
+                    $"[VANGUARD_OPERATOR_NATIVE_PURCHASE_AUTHORITY_STATUS] client_profile_change_dual_route_failed requested={requestedProfileId}; operator={operatorId}; operatorProfile={operatorInventoryProfileId}; type={exception.GetType().Name}; message={exception.Message}; fallback=operator_only_rekey"));
+            }
+            finally
+            {
+                nativePurchaseResponses.Remove(response);
+                pendingNativePurchaseRoutes.TryRemove(requestedKey, out _);
+            }
+        }
+
+        response.ProfileChanges.Remove(requestedProfileId);
+        profileChange.Id = operatorInventoryProfileId;
+        response.ProfileChanges[operatorInventoryProfileId] = profileChange;
+    }
+
     private void EndPlayerPurchaseProfileAccess(MongoId requestedProfileId, string operatorId, string operation)
     {
         redirectBypassDepth.Value = Math.Max(0, redirectBypassDepth.Value - 1);
@@ -1151,6 +1495,26 @@ public sealed class VanguardOperatorInventoryModeService(
         redirectBypassDepth.Value = Math.Max(0, redirectBypassDepth.Value - 1);
         logger.Info(VanguardServerDiagnosticsLog.Present(
             $"[VANGUARD_OPERATOR_USER_BUILDS_STATUS] player_profile_route_end operation={operation}; requested={requestedProfileId}; operator={operatorId}; redirectBypassDepth={redirectBypassDepth.Value}; playerUserBuildDataAuthority=true"));
+    }
+
+    public IDisposable? BeginPlayerHideoutProfileAccess(MongoId requestedProfileId, string operation)
+    {
+        if (!activeSessions.TryGetValue(requestedProfileId.ToString(), out VanguardOperatorInventoryModeSession? session))
+        {
+            return null;
+        }
+
+        redirectBypassDepth.Value++;
+        logger.Info(VanguardServerDiagnosticsLog.Present(
+            $"[VANGUARD_OPERATOR_HIDEOUT_AUTHORITY_STATUS] player_profile_route_begin operation={operation}; requested={requestedProfileId}; operator={session.OperatorId}; inventoryProfile={session.OperatorInventoryProfileId}; redirectBypassDepth={redirectBypassDepth.Value}; playerHideoutAuthority=true; operatorProjectionAuthority=false"));
+        return new PlayerHideoutRedirectBypassScope(this, requestedProfileId, session.OperatorId, operation);
+    }
+
+    private void EndPlayerHideoutProfileAccess(MongoId requestedProfileId, string operatorId, string operation)
+    {
+        redirectBypassDepth.Value = Math.Max(0, redirectBypassDepth.Value - 1);
+        logger.Info(VanguardServerDiagnosticsLog.Present(
+            $"[VANGUARD_OPERATOR_HIDEOUT_AUTHORITY_STATUS] player_profile_route_end operation={operation}; requested={requestedProfileId}; operator={operatorId}; redirectBypassDepth={redirectBypassDepth.Value}; playerHideoutAuthority=true; operatorProjectionAuthority=false"));
     }
 
     public bool TryGetActiveInventoryProfileId(MongoId requestedProfileId, out MongoId inventoryProfileId)
@@ -1406,6 +1770,59 @@ public sealed class VanguardOperatorInventoryModeService(
         return new RedirectBypassScope(this);
     }
 
+    private sealed class NativePurchaseResponseMarker(MongoId requestedProfileId, string operatorId)
+    {
+        public MongoId RequestedProfileId { get; } = requestedProfileId;
+        public string OperatorId { get; } = operatorId;
+        public int PurchaseOperations;
+        public string LastOperation = "BuyItem";
+    }
+
+    private sealed class PendingNativePurchaseRouteMarker(
+        MongoId requestedProfileId,
+        string operatorId,
+        string operation,
+        int markedResponseHash)
+    {
+        private readonly ConcurrentDictionary<string, byte> expectedNewItemIds = new(StringComparer.OrdinalIgnoreCase);
+
+        public MongoId RequestedProfileId { get; } = requestedProfileId;
+        public string OperatorId { get; } = operatorId;
+        public int MarkedResponseHash { get; } = markedResponseHash;
+        public int PurchaseOperations;
+        public string LastOperation = operation;
+
+        public void Capture(ProfileChange profileChange)
+        {
+            foreach (var item in profileChange.Items?.NewItems ?? [])
+            {
+                expectedNewItemIds.TryAdd(item.Id.ToString(), 0);
+            }
+        }
+
+        public bool Matches(ProfileChange profileChange)
+        {
+            // Most purchases create at least one item and therefore give us a strong
+            // correlation fingerprint. Stack-only purchases may contain only ChangedItems;
+            // inventory item events are serialized per client session in this path, so an
+            // empty NewItem fingerprint falls back to the immediately pending purchase.
+            if (expectedNewItemIds.IsEmpty)
+            {
+                return true;
+            }
+
+            foreach (var item in profileChange.Items?.NewItems ?? [])
+            {
+                if (expectedNewItemIds.ContainsKey(item.Id.ToString()))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+    }
+
     private sealed class RedirectBypassScope(VanguardOperatorInventoryModeService owner) : IDisposable
     {
         private bool disposed;
@@ -1461,6 +1878,26 @@ public sealed class VanguardOperatorInventoryModeService(
 
             disposed = true;
             owner.EndPlayerUserBuildProfileAccess(requestedProfileId, operatorId, operation);
+        }
+    }
+
+    private sealed class PlayerHideoutRedirectBypassScope(
+        VanguardOperatorInventoryModeService owner,
+        MongoId requestedProfileId,
+        string operatorId,
+        string operation) : IDisposable
+    {
+        private bool disposed;
+
+        public void Dispose()
+        {
+            if (disposed)
+            {
+                return;
+            }
+
+            disposed = true;
+            owner.EndPlayerHideoutProfileAccess(requestedProfileId, operatorId, operation);
         }
     }
 
@@ -1755,6 +2192,64 @@ public sealed class VanguardOperatorInventoryModeService(
         }
 
         return false;
+    }
+
+    private static int CollapseExactDuplicateInventoryItems(
+        JsonObject inventory,
+        out string? divergentDuplicateId,
+        out string? divergentDuplicateDetails)
+    {
+        divergentDuplicateId = null;
+        divergentDuplicateDetails = null;
+
+        JsonArray items = GetItemsArray(inventory);
+        var firstById = new Dictionary<string, JsonObject>(StringComparer.OrdinalIgnoreCase);
+        JsonArray normalized = new();
+        int removed = 0;
+
+        foreach (JsonObject item in items.OfType<JsonObject>())
+        {
+            string? id = GetItemId(item);
+            if (string.IsNullOrWhiteSpace(id))
+            {
+                // Preserve the existing audit semantics for malformed items.
+                normalized.Add(item.DeepClone());
+                continue;
+            }
+
+            if (!firstById.TryGetValue(id, out JsonObject? first))
+            {
+                firstById[id] = item;
+                normalized.Add(item.DeepClone());
+                continue;
+            }
+
+            if (JsonNode.DeepEquals(first, item))
+            {
+                removed++;
+                continue;
+            }
+
+            divergentDuplicateId = id;
+            divergentDuplicateDetails =
+                $"sameTpl={string.Equals(GetString(first, "_tpl"), GetString(item, "_tpl"), StringComparison.OrdinalIgnoreCase)}" +
+                $",firstParent={GetString(first, "parentId") ?? "<none>"}" +
+                $",secondParent={GetString(item, "parentId") ?? "<none>"}" +
+                $",firstSlot={GetString(first, "slotId") ?? "<none>"}" +
+                $",secondSlot={GetString(item, "slotId") ?? "<none>"}";
+
+            // Never guess between divergent representations of the same item id.
+            // Leave the original array untouched so AuditInventoryTree rejects it and
+            // the established authoritative exit/reload recovery path takes over.
+            return 0;
+        }
+
+        if (removed > 0)
+        {
+            inventory[FindPropertyName(inventory, "items") ?? "items"] = normalized;
+        }
+
+        return removed;
     }
 
     private static string AuditInventoryTree(JsonObject inventory)
@@ -2684,10 +3179,13 @@ public sealed class VanguardOperatorInventoryModeService(
 
     private static JsonObject BuildOperatorInventoryForCommit(JsonObject operatorInventory, JsonObject sessionInventory)
     {
+        JsonObject persistentSessionInventory = CloneObject(sessionInventory);
+        RemoveDirectEquipmentDogtagTree(persistentSessionInventory);
+
         JsonArray operatorItems = GetItemsArray(operatorInventory);
-        JsonArray sessionItems = GetItemsArray(sessionInventory);
+        JsonArray sessionItems = GetItemsArray(persistentSessionInventory);
         string operatorEquipmentId = RequireString(operatorInventory, "equipment", "operator_inventory_equipment_missing");
-        string sessionEquipmentId = RequireString(sessionInventory, "equipment", "session_inventory_equipment_missing");
+        string sessionEquipmentId = RequireString(persistentSessionInventory, "equipment", "session_inventory_equipment_missing");
         HashSet<string> oldOperatorEquipmentTree = CollectTreeIds(operatorItems, operatorEquipmentId);
         HashSet<string> sessionEquipmentTree = CollectTreeIds(sessionItems, sessionEquipmentId);
 
@@ -2757,6 +3255,79 @@ public sealed class VanguardOperatorInventoryModeService(
     }
 
 
+    private void StripPersistentPersonalDogtag(JsonObject descriptor, string storageProfileId, string operatorId, string context)
+    {
+        JsonObject customization = GetOrCreateObject(descriptor, "Customization");
+        int customizationRemoved = 0;
+        foreach (string key in customization.Select(property => property.Key).ToArray())
+        {
+            if (string.Equals(key, "Dogtag", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(key, "DogTag", StringComparison.OrdinalIgnoreCase))
+            {
+                customization.Remove(key);
+                customizationRemoved++;
+            }
+        }
+
+        JsonObject inventory = GetOrCreateObject(descriptor, "Inventory");
+        int inventoryItemsRemoved = RemoveDirectEquipmentDogtagTree(inventory);
+        if (customizationRemoved == 0 && inventoryItemsRemoved == 0)
+        {
+            return;
+        }
+
+        logger.Info(VanguardServerDiagnosticsLog.Present(
+            $"[VANGUARD_OPERATOR_DOGTAG_STATUS] phase=persistent_profile_sanitize; storage={storageProfileId}; operator={operatorId}; context={context}; customizationRemoved={customizationRemoved}; equipmentItemsRemoved={inventoryItemsRemoved}; policy=raid_scoped_personal_dogtag; lootedDogtagsPreserved=true"));
+    }
+
+    private static int RemoveDirectEquipmentDogtagTree(JsonObject inventory)
+    {
+        string equipmentId = GetString(inventory, "equipment") ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(equipmentId))
+        {
+            return 0;
+        }
+
+        JsonArray items = GetItemsArray(inventory);
+        string[] dogtagRoots = items.OfType<JsonObject>()
+            .Where(item => string.Equals(GetString(item, "parentId"), equipmentId, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(GetString(item, "slotId"), "Dogtag", StringComparison.OrdinalIgnoreCase))
+            .Select(GetItemId)
+            .Where(id => !string.IsNullOrWhiteSpace(id))
+            .Select(id => id!)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (dogtagRoots.Length == 0)
+        {
+            return 0;
+        }
+
+        var deleteIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (string rootId in dogtagRoots)
+        {
+            deleteIds.UnionWith(CollectTreeIds(items, rootId));
+        }
+
+        int removed = 0;
+        for (int index = items.Count - 1; index >= 0; index--)
+        {
+            if (items[index] is not JsonObject item)
+            {
+                continue;
+            }
+
+            string? id = GetItemId(item);
+            if (!string.IsNullOrWhiteSpace(id) && deleteIds.Contains(id))
+            {
+                items.RemoveAt(index);
+                removed++;
+            }
+        }
+
+        SanitizeInventoryReferences(inventory);
+        return removed;
+    }
+
     private void NormalizeCompleteSessionProfileNode(JsonObject profile, string storageProfileId, string operatorId, string context)
     {
         JsonObject pmc = GetPmcObject(profile);
@@ -2790,6 +3361,7 @@ public sealed class VanguardOperatorInventoryModeService(
         EnsureObject(descriptor, "Encyclopedia");
         EnsureProfileHealth(descriptor);
         EnsureInventoryDescriptor(descriptor, storageProfileId, operatorId, context);
+        StripPersistentPersonalDogtag(descriptor, storageProfileId, operatorId, context);
         EnsureArray(descriptor, "InsuredItems");
         EnsureSkillsDescriptor(descriptor);
         EnsureObject(descriptor, "Notes");

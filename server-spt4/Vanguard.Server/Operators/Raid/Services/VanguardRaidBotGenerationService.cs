@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using SPTarkov.DI.Annotations;
@@ -38,6 +40,9 @@ public sealed class VanguardRaidBotGenerationService(
     JsonUtil jsonUtil,
     ISptLogger<VanguardRaidBotGenerationService> logger)
 {
+    private const string BearDogtagTemplateId = "59f32bb586f774757e1e8442";
+    private const string UsecDogtagTemplateId = "59f32c3b86f77472a31742f0";
+
     public async Task<IReadOnlyList<BotBase>> GenerateOperatorBotsAsync(MongoId sessionId, VanguardGenerateOperatorBotRequest request)
     {
         if (request.Info is null)
@@ -105,6 +110,7 @@ public sealed class VanguardRaidBotGenerationService(
             CopyProfileSection(spawnProfile.OperatorPmcJson, generatedRoot, "Health");
             CopyProfileSection(spawnProfile.OperatorPmcJson, generatedRoot, "Skills");
             CopyProfileSection(spawnProfile.OperatorPmcJson, generatedRoot, "Customization");
+            StripDogtagCustomization(generatedRoot);
 
             BotBase? materialized = jsonUtil.Deserialize<BotBase>(generatedRoot.ToJsonString(new JsonSerializerOptions { WriteIndented = false }));
             if (materialized is null)
@@ -164,6 +170,9 @@ public sealed class VanguardRaidBotGenerationService(
 
     private void ApplyInventory(BotBase generatedBot, VanguardRaidOperatorSpawnProfile spawnProfile)
     {
+        Item? nativeGeneratedDogtag = generatedBot.Inventory?.Items?.FirstOrDefault(item =>
+            string.Equals(item.SlotId, "Dogtag", StringComparison.OrdinalIgnoreCase));
+
         if (spawnProfile.OperatorInventoryJson is null)
         {
             return;
@@ -197,6 +206,10 @@ public sealed class VanguardRaidBotGenerationService(
                 VanguardRaidOperatorManifestService.Raw(GetCaseInsensitive(item, "upd"))));
         }
 
+        int contaminatedPersistentDogtags = itemSnapshots.RemoveAll(item =>
+            string.Equals(item.ParentId, equipmentId, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(item.SlotId, "Dogtag", StringComparison.OrdinalIgnoreCase));
+
         if (!itemSnapshots.Any(item => string.Equals(item.Id, equipmentId, StringComparison.OrdinalIgnoreCase)))
         {
             return;
@@ -213,10 +226,13 @@ public sealed class VanguardRaidBotGenerationService(
             return;
         }
 
-        logger.Info(VanguardServerDiagnosticsLog.Present($"[VANGUARD_OPERATOR_PROFILE_GENERATED] operator={spawnProfile.Snapshot.OperatorId} raid_inventory_pruned sourceItems={itemSnapshots.Count} raidItems={raidItems.Length} equipment={equipmentId}"));
+        Item raidDogtag = CreateRaidScopedDogtag(spawnProfile.Snapshot, equipmentId, nativeGeneratedDogtag);
+        logger.Info(VanguardServerDiagnosticsLog.Present(
+            $"[VANGUARD_OPERATOR_DOGTAG_STATUS] phase=raid_materialize; operator={spawnProfile.Snapshot.OperatorId}; raid={spawnProfile.Snapshot.RaidSessionId}; dogtagId={raidDogtag.Id}; dogtagTpl={raidDogtag.Template}; sourceNativeDogtag={(nativeGeneratedDogtag is null ? "false" : "true")}; contaminatedPersistentDogtagsDropped={contaminatedPersistentDogtags}; persistentCustomizationInherited=false; persistencePolicy=raid_scoped_only; lootedDogtagsUnaffected=true"));
+        logger.Info(VanguardServerDiagnosticsLog.Present($"[VANGUARD_OPERATOR_PROFILE_GENERATED] operator={spawnProfile.Snapshot.OperatorId} raid_inventory_pruned sourceItems={itemSnapshots.Count} raidItems={raidItems.Length + 1} equipment={equipmentId}"));
         generatedBot.Inventory ??= new BotBaseInventory();
         generatedBot.Inventory.Equipment = new MongoId(equipmentId);
-        generatedBot.Inventory.Items = raidItems.Select(CreateInventoryItem).ToList();
+        generatedBot.Inventory.Items = raidItems.Select(CreateInventoryItem).Append(raidDogtag).ToList();
     }
 
     private static IReadOnlyList<VanguardRaidInventoryItemSnapshot> BuildRaidEquipmentTree(IReadOnlyList<VanguardRaidInventoryItemSnapshot> sourceItems, string equipmentId)
@@ -259,6 +275,58 @@ public sealed class VanguardRaidBotGenerationService(
         }
 
         return selected.Values.ToArray();
+    }
+
+    private static void StripDogtagCustomization(JsonObject generatedRoot)
+    {
+        if (GetCaseInsensitive(generatedRoot, "Customization") is not JsonObject customization)
+        {
+            return;
+        }
+
+        string? key = customization.Select(property => property.Key)
+            .FirstOrDefault(candidate => string.Equals(candidate, "Dogtag", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(candidate, "DogTag", StringComparison.OrdinalIgnoreCase));
+        if (key is not null)
+        {
+            customization.Remove(key);
+        }
+    }
+
+    private static Item CreateRaidScopedDogtag(
+        VanguardRaidOperatorSnapshot snapshot,
+        string equipmentId,
+        Item? nativeGeneratedDogtag)
+    {
+        string side = Normalize(snapshot.Side, "Usec");
+        string templateId = side.StartsWith("Bear", StringComparison.OrdinalIgnoreCase)
+            ? BearDogtagTemplateId
+            : UsecDogtagTemplateId;
+        string dogtagId = BuildRaidScopedDogtagId(snapshot);
+
+        return new Item
+        {
+            Id = new MongoId(dogtagId),
+            Template = new MongoId(templateId),
+            ParentId = equipmentId,
+            SlotId = "Dogtag",
+            Location = nativeGeneratedDogtag?.Location,
+            // Fika owns native death-time DogtagComponent population. Reusing SPT's generated
+            // bot Upd could leak the random template-bot identity into the Operator.
+            Upd = null,
+        };
+    }
+
+    private static string BuildRaidScopedDogtagId(VanguardRaidOperatorSnapshot snapshot)
+    {
+        string material = string.Join(
+            ":",
+            Normalize(snapshot.RaidSessionId, "raid"),
+            Normalize(snapshot.OwnerProfileId, "owner"),
+            Normalize(snapshot.OperatorId, "operator"),
+            "dogtag-v1");
+        byte[] hash = SHA256.HashData(Encoding.UTF8.GetBytes(material));
+        return Convert.ToHexString(hash).ToLowerInvariant()[..24];
     }
 
     private Item CreateInventoryItem(VanguardRaidInventoryItemSnapshot snapshot)

@@ -11,16 +11,16 @@ using Vanguard.Client.Compatibility;
 using Vanguard.Client.Diagnostics;
 using Vanguard.Client.Options;
 
-// Responsibility: Determines which saved authored zone currently contains the player and publishes that owner-scoped occupancy to the Headless runtime.
+// Responsibility: Determines which saved authored zone currently contains the player and publishes that owner-scoped occupancy to the active raid runtime authority.
 // Flow: Local position is compared with exact/nested zone bounds, sticky/hysteresis rules prevent boundary churn, and changes are serialized through the Tactical Authoring transport for Operator assignment use.
-// Authority boundary: The player client observes/chooses its authored occupancy; the Headless consumes the published assignment, while persisted authoring data remains owned by the Tactical Authoring store.
+// Authority boundary: The player client observes/chooses its authored occupancy; the process owning raid runtime execution consumes the published assignment, while persisted authoring data remains owned by the Tactical Authoring store.
 // Invariant: Only one best exact zone may be active per owner, more-specific nested zones may preempt deterministically, and stale occupancy must clear when position/map/raid authority disappears.
 namespace Vanguard.Client.Runtime.TacticalAuthoring;
 
 /// <summary>
 /// Owner-local publisher for automatic authored-zone occupancy when the editor overlay is closed.
-/// Saved authoring data remains schema-1/non-runtime on disk; this service only creates a transient
-/// owner-scoped headless preview session while the local player is physically inside an authored zone.
+/// Persisted compatibility flags remain false on disk; this service creates only a transient, owner-scoped
+/// raid-authority session while the local player is physically inside an authored zone.
 /// </summary>
 internal static class VanguardTacticalAuthoredZoneOccupancyService
 {

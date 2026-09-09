@@ -39,16 +39,25 @@ public static class VanguardOperatorInventoryServerPatches
         MethodInfo? getProfile = AccessTools.Method(typeof(SaveServer), nameof(SaveServer.GetProfile));
         MethodInfo? saveProfile = AccessTools.Method(typeof(SaveServer), nameof(SaveServer.SaveProfileAsync));
         MethodInfo? handleEvents = AccessTools.Method(typeof(ItemEventRouter), nameof(ItemEventRouter.HandleEvents));
+        MethodInfo? updatePlayerHideout = AccessTools.Method(
+            typeof(HideoutHelper),
+            nameof(HideoutHelper.UpdatePlayerHideout),
+            new[] { typeof(MongoId) });
 
-        if (getProfile == null || saveProfile == null || handleEvents == null)
+        if (getProfile == null || saveProfile == null || handleEvents == null || updatePlayerHideout == null)
         {
-            logger.Warning(VanguardServerDiagnosticsLog.Present("[VANGUARD_OPERATOR_INVENTORY_PROFILE_REDIRECT_STATUS] patch registration incomplete; SaveServer or ItemEventRouter method not found."));
+            logger.Warning(VanguardServerDiagnosticsLog.Present("[VANGUARD_OPERATOR_INVENTORY_PROFILE_REDIRECT_STATUS] patch registration incomplete; SaveServer, ItemEventRouter, or HideoutHelper.UpdatePlayerHideout method not found."));
             return;
         }
 
         Harmony.Patch(getProfile, prefix: new HarmonyMethod(typeof(VanguardOperatorInventoryServerPatches), nameof(GetProfilePrefix)));
         Harmony.Patch(saveProfile, prefix: new HarmonyMethod(typeof(VanguardOperatorInventoryServerPatches), nameof(SaveProfileAsyncPrefix)));
         Harmony.Patch(handleEvents, postfix: new HarmonyMethod(typeof(VanguardOperatorInventoryServerPatches), nameof(ItemEventRouterPostfix)));
+        Harmony.Patch(
+            updatePlayerHideout,
+            prefix: new HarmonyMethod(typeof(VanguardOperatorInventoryServerPatches), nameof(PlayerHideoutAccessPrefix)),
+            finalizer: new HarmonyMethod(typeof(VanguardOperatorInventoryServerPatches), nameof(PlayerHideoutAccessFinalizer)));
+        logger.Info(VanguardServerDiagnosticsLog.Present("[VANGUARD_OPERATOR_HIDEOUT_AUTHORITY_STATUS] patch_registered target=HideoutHelper.UpdatePlayerHideout; playerHideoutAuthority=true; operatorProjectionAuthority=false"));
 
         // Native purchases are player-economy operations even while the inventory UI
         // is presenting an Operator. Patch only the common SPT buy boundary so trader
@@ -179,6 +188,28 @@ public static class VanguardOperatorInventoryServerPatches
         return __exception;
     }
 
+    private static void PlayerHideoutAccessPrefix(MongoId __0, MethodBase __originalMethod, out IDisposable? __state)
+    {
+        __state = null;
+        VanguardOperatorInventoryModeService? service = ResolveService();
+        if (service == null || !service.IsActive(__0))
+        {
+            return;
+        }
+
+        // HideoutHelper.UpdatePlayerHideout is an SPT background/player authority boundary.
+        // While the Operator inventory UI is active, SaveServer.GetProfile is normally
+        // redirected to the temporary Operator projection. The hideout scheduler must
+        // never observe or mutate that projection: it owns the real player PMC/hideout.
+        __state = service.BeginPlayerHideoutProfileAccess(__0, __originalMethod.Name);
+    }
+
+    private static Exception? PlayerHideoutAccessFinalizer(Exception? __exception, IDisposable? __state)
+    {
+        __state?.Dispose();
+        return __exception;
+    }
+
     private static bool GetProfilePrefix(MongoId sessionId, ref SptProfile __result)
     {
         VanguardOperatorInventoryModeService? service = ResolveService();
@@ -220,6 +251,20 @@ public static class VanguardOperatorInventoryServerPatches
     private static async ValueTask<ItemEventRouterResponse> ReplaceProfileChangesKeyAsync(ValueTask<ItemEventRouterResponse> originalTask, MongoId originalKey, MongoId newKey)
     {
         ItemEventRouterResponse response = await originalTask;
+        VanguardOperatorInventoryModeService? service = ResolveService();
+        if (service != null)
+        {
+            // Native purchases are special: the real PMC ISession profile and the
+            // Operator composite must both consume the completed SPT transaction. The
+            // service correlates the native BuyItem response with this outer item-event
+            // response by exact identity when available, otherwise by a bounded
+            // session + purchased-item fingerprint, then creates independent player and
+            // Operator projections. Ordinary Operator item events keep the original
+            // Operator-only rekey contract.
+            service.RouteActiveItemEventProfileChangesForClient(originalKey, newKey, response);
+            return response;
+        }
+
         if (response.ProfileChanges != null && response.ProfileChanges.TryGetValue(originalKey, out var profileChange))
         {
             response.ProfileChanges.Remove(originalKey);

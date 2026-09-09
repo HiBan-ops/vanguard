@@ -104,10 +104,10 @@ internal static class VanguardReturnMovementCommandStore
                 bool sameAnchor = anchorDelta <= SameAnchorToleranceMeters;
                 bool incomingEmergencyHardReturn = IsEmergencyRequest(incomingRequest);
 
-                // The runtime regression guard: only a materially identical command may be adopted by a
-                // successor scheduler lease.  Preserving a different anchor/request while creating
-                // executor state for the incoming plan would split the lease truth from the BigBrain
-                // driver and reproduce the stale-anchor behavior measured during runtime qualification.
+                // Only a materially identical command may be adopted by a successor scheduler lease.
+                // Preserving a different anchor/request while creating executor state for the incoming
+                // plan would split scheduler lease truth from the BigBrain movement driver and leave a
+                // stale physical destination under the new logical owner.
                 if (sameRequest && sameAnchor)
                 {
                     string previousLeaseId = active.LeaseId;

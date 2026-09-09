@@ -3,6 +3,7 @@ using System.Reflection;
 using Vanguard.Client.Diagnostics;
 using Vanguard.Client.Raid.Career;
 using Vanguard.Client.Raid.Persistence;
+using Vanguard.Client.Raid.Runtime;
 using Vanguard.Client.Raid.Services;
 
 #if SPT_CLIENT
@@ -18,6 +19,27 @@ using SPT.Reflection.Patching;
 namespace Vanguard.Client.Raid.Patches;
 
 #if SPT_CLIENT
+internal static class VanguardRaidPersistenceStopBoundaryDiagnostics
+{
+    public static void Record(string source, string location, ExitStatus exitStatus, string exitName, float delay)
+    {
+        try
+        {
+            string runtimeRaid = VanguardRaidOperatorRuntimeRegistry.ActiveRaidSessionId ?? string.Empty;
+            int runtimeOperators = VanguardRaidOperatorRuntimeRegistry.GetRuntimeCountForAuthority();
+            VanguardClientDiagnosticsLog.Info(
+                VanguardRaidOperatorPersistenceService.StatusTag,
+                $"VANGUARD_RAID_PERSISTENCE_STOP_BOUNDARY source={source}; runtimeRaid={runtimeRaid}; runtimeOperators={runtimeOperators}; location={location ?? "<none>"}; exitStatus={exitStatus}; exitName={exitName ?? "<none>"}; delay={delay:0.###}; armedForCorpseTransactions={VanguardRaidOperatorPersistenceService.IsArmedForOperatorCorpseTransactions}; boundaryReached=true");
+        }
+        catch (Exception exception)
+        {
+            VanguardClientDiagnosticsLog.Warning(
+                VanguardRaidOperatorPersistenceService.StatusTag,
+                $"VANGUARD_RAID_PERSISTENCE_STOP_BOUNDARY_DIAGNOSTIC_FAILED source={source}; type={exception.GetType().Name}; message={exception.Message}; persistenceFlowContinues=true");
+        }
+    }
+}
+
 internal sealed class VanguardRaidPersistenceLocalStopPatch : ModulePatch
 {
     protected override MethodBase GetTargetMethod()
@@ -27,6 +49,7 @@ internal sealed class VanguardRaidPersistenceLocalStopPatch : ModulePatch
     [PatchPrefix]
     private static void PatchPrefix(string __0, ExitStatus __1, string __2, float __3)
     {
+        VanguardRaidPersistenceStopBoundaryDiagnostics.Record("eft_localgame_stop_prefix", __0, __1, __2, __3);
         try
         {
             VanguardCareerEventTruthProbeService.ObserveRaidStop("eft_localgame_stop_prefix", __0, __1, __2, __3);
@@ -72,6 +95,7 @@ internal sealed class VanguardRaidPersistenceFikaStopPatch : ModulePatch
     [PatchPrefix]
     private static void PatchPrefix(string __0, ExitStatus __1, string __2, float __3)
     {
+        VanguardRaidPersistenceStopBoundaryDiagnostics.Record("fika_coopgame_stop_prefix", __0, __1, __2, __3);
         try
         {
             VanguardCareerEventTruthProbeService.ObserveRaidStop("fika_coopgame_stop_prefix", __0, __1, __2, __3);
@@ -122,6 +146,7 @@ internal sealed class VanguardRaidPersistenceFikaHeadlessStopPatch : ModulePatch
     [PatchPrefix]
     private static void PatchPrefix(string __0, ExitStatus __1, string __2, float __3)
     {
+        VanguardRaidPersistenceStopBoundaryDiagnostics.Record("fika_headless_headlessgame_stop_prefix", __0, __1, __2, __3);
         try
         {
             VanguardCareerEventTruthProbeService.ObserveRaidStop("fika_headless_headlessgame_stop_prefix", __0, __1, __2, __3);

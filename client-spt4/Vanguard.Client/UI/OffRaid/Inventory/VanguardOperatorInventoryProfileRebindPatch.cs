@@ -8,10 +8,10 @@ using HarmonyLib;
 using SPT.Reflection.Patching;
 #endif
 
-// Responsibility: Bridges EFT/SPT/Fika callbacks into Operator Inventory Profile Rebind Patch for the Off-Raid Operator inventory bridge.
-// Flow: A narrowly-scoped patch observes/intercepts the host callback, translates the event into Vanguard state/service input, then returns control to the original lifecycle.
-// Authority boundary: Patch code is an integration boundary, not a parallel gameplay authority; original behavior is preserved unless the documented Vanguard contract explicitly supersedes it.
-// Invariant: Hooks remain fail-safe, bounded to the intended process/lifecycle, and avoid unrelated side effects.
+// Responsibility: Enforces the semantic MainMenuController.ShowScreen navigation policy while a direct Operator inventory session owns the current Off-Raid view authority.
+// Flow: Native route requests are classified before EFT changes screens; compatible routes preserve the session, Character returns to the captured Operator inventory, and Main Menu starts the single commit/exit/reconciliation boundary.
+// Authority boundary: Navigation interception only; inventory persistence remains server-owned and Player restoration is delegated to the parity-gated direct-exit reconciliation flow.
+// Invariant: Unqualified authority boundaries fail closed, compatible routes cannot commit implicitly, and Main Menu completion cannot race a second native ShowScreen transition.
 namespace Vanguard.Client.UI.OffRaid.Inventory;
 
 #if SPT_CLIENT
@@ -59,6 +59,12 @@ internal sealed class VanguardOperatorInventoryProfileRebindPatch : ModulePatch
             bool turnOn = __args[1] is bool value && value;
             string screenName = screen?.ToString() ?? string.Empty;
             VanguardOperatorInventoryNavigationDecision decision = VanguardOperatorInventoryNavigationPolicy.Evaluate(screenName, turnOn);
+            VanguardOperatorProfileTransitionTrace.RecordNavigationDecision(
+                screenName,
+                turnOn,
+                decision.Disposition.ToString(),
+                decision.Reason,
+                "main_menu_show_screen");
 
             if (!decision.RouteAllowed)
             {
@@ -112,10 +118,10 @@ internal sealed class VanguardOperatorInventoryProfileRebindPatch : ModulePatch
                 {
                     VanguardClientDiagnosticsLog.Info(
                         VanguardBuildVersion.OperatorInventoryNavigationGuardStatusTag,
-                        $"owner=client; operator={VanguardOperatorInventoryModeClientState.OperatorId ?? "<none>"}; session_active=True; requested_route={screenName}; route_allowed=True; reason={decision.Reason}; action=commit_exit_restore_then_main_menu_reload; result={exitReason}; session_preserved=False; commit_triggered=True; exit_triggered=True; reload_triggered=True");
-                    // Vanguard owns this route transition. The proven profile/menu reload
-                    // performed after server exit lands on Main Menu, so the original EFT
-                    // ShowScreen call is deliberately suppressed to avoid racing the commit.
+                        $"owner=client; operator={VanguardOperatorInventoryModeClientState.OperatorId ?? "<none>"}; session_active=True; requested_route={screenName}; route_allowed=True; reason={decision.Reason}; action=commit_exit_restore_then_reconcile_player_menu; result={exitReason}; session_preserved=False; commit_triggered=True; exit_triggered=True; reconciliation_triggered=True; reload_triggered=False; native_reload_decision=parity_gated");
+                    // Vanguard owns this route transition. The direct-exit flow lands on Main Menu
+                    // through admitted fast reconciliation or, if parity is unsafe/unknown, the native
+                    // full-reload fallback. Suppress the original ShowScreen call so it cannot race commit/exit.
                     return false;
                 }
 

@@ -1,10 +1,10 @@
 using System.Reflection;
 using SPTarkov.Server.Core.Models.Utils;
 
-// Responsibility: Produces bounded diagnostics/telemetry for Server Diagnostics Log in the server diagnostics.
-// Flow: Runtime facts are normalized, deduplicated/rate-gated where needed, then emitted according to Vanguard presentation levels.
-// Authority boundary: Observation only; telemetry never changes the gameplay decision it reports.
-// Invariant: Operational output stays actionable and repetitive detail remains restricted to diagnostic/trace levels.
+// Responsibility: Normalizes Vanguard server diagnostics, mirrors them to the SPT logger, and appends the same presented events to Vanguard's support log.
+// Flow: Callers select SPT severity, the presentation layer normalizes semantic tags/messages, then output is written to the host logger and best-effort Vanguard file sink.
+// Authority boundary: Observation only; this helper does not decide gameplay, persistence, or client audit-level policy.
+// Invariant: Logging/file-sink failures never block Vanguard server startup or runtime behavior, and event normalization must not change the underlying reported fact.
 namespace Vanguard.Server.Diagnostics;
 
 internal static class VanguardServerDiagnosticsLog

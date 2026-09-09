@@ -1100,9 +1100,8 @@ internal static class VanguardExternalAuthorityAdapter
         }
 
         // Runtime invariant: a clear snapshot is not enough during an active CMS/Surv12 lease.
-        // Runtime qualification showed ORBIT assigning a new LooseLoot objective while
-        // Vanguard still logged surgical_kit_using_heartbeat. Therefore every hard
-        // surgery hold tick actively re-applies patient-only ORBIT/Looting/path
+        // External systems may acquire a new loot/path objective while the medical procedure is
+        // still active, so every hard-surgery hold tick re-applies patient-only ORBIT/Looting/path
         // suppression instead of returning a passive clear state.
         var result = RefreshHardMedicalProcedureAuthority(botOwner, snapshot, reason, now);
         summary = (hardSurgeryHold ? "stationaryHold=hard_surgery_forced_refresh;" : "stationaryHold=suppressed;") + result.CompactSummary;

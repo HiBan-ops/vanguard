@@ -13,9 +13,9 @@ using UnityEngine;
 #endif
 
 // Responsibility: owns the client-side lifecycle state for entering/leaving Operator inventory mode and restoring the ordinary Tarkov player profile/menu afterward.
-// Flow: Enter/exit/status calls mirror the server session locally; profile descriptors are rebound for the temporary Operator view, then a successful exit triggers the main-menu profile reload/reassertion path before normal menu actions resume.
+// Flow: Enter/exit/status calls mirror server inventory-mode truth locally; Operator profile descriptors are rebound only for the editing view, and session completion clears redirected state before Player authority is reconciled by the owning direct-exit flow.
 // Authority boundary: the server decides whether inventory mode is active and owns Operator persistence; this state holder only coordinates the client UI/profile bridge and cannot commit wallet or server inventory truth itself.
-// Invariant: local active/rebind flags must converge with server exit state, and a successful server exit must restore the player profile even when an earlier best-effort direct commit failed.
+// Invariant: local active/rebind flags must converge with server exit state; after a successful server exit, Player authority must be restored by either admitted fast reconciliation or the native full-reload fallback, even when an earlier best-effort direct commit failed.
 namespace Vanguard.Client.UI.OffRaid.Inventory;
 
 internal static class VanguardOperatorInventoryModeClientState
@@ -93,7 +93,7 @@ internal static class VanguardOperatorInventoryModeClientState
         VanguardOperatorInventoryModeResponseDto response = ApiClient.ExitInventoryMode(operatorId);
         if (response.Success)
         {
-            VanguardClientDiagnosticsLog.Info("VANGUARD_OPERATOR_INVENTORY_OFFRAID_STATUS", $"client exit operator={operatorId ?? "<none>"}; reason={response.Reason ?? "ok"}; reloadRequested=true; source=direct_commit_refresh");
+            VanguardClientDiagnosticsLog.Info("VANGUARD_OPERATOR_INVENTORY_OFFRAID_STATUS", $"client exit operator={operatorId ?? "<none>"}; reason={response.Reason ?? "ok"}; reconciliationRequested=true; nativeReloadDecision=parity_gated; source=direct_commit_refresh");
             VanguardClientDiagnosticsLog.Info("VANGUARD_OPERATOR_PLAYER_STASH_REFRESH_STATUS", $"player_stash_refresh_requested_after_direct_commit operator={operatorId ?? "<none>"}; reason={response.Reason ?? "ok"}");
             ClearInventoryModeClientState();
         }
@@ -387,11 +387,9 @@ internal static class VanguardOperatorInventoryModeClientState
     {
         screen = VanguardOperatorDirectInventoryLifecycle.DescribeCurrentScreen();
 
-        // The second menu-root reassertion used to run unconditionally as part of the
-        // old cursor workaround chain.  runtime qualification proved cursor recovery belongs to the
-        // deferred raid InputTree cleanup, so the off-raid exit path now keeps only a
-        // guarded fallback: run a second pass only if the first pass did not actually
-        // bring EFT back to a menu root/current screen.
+        // Cursor/InputTree recovery is owned by the deferred raid-input cleanup boundary, not by
+        // unconditional menu-root repetition. Keep this second pass as a guarded fallback only when
+        // the first reconciliation pass did not actually return EFT to a menu root/current screen.
         bool hasRootMenu = screen.IndexOf("root=Menu", StringComparison.OrdinalIgnoreCase) >= 0
             || screen.IndexOf("root=MainMenu", StringComparison.OrdinalIgnoreCase) >= 0;
         bool hasCurrentMenu = screen.IndexOf("current=Menu", StringComparison.OrdinalIgnoreCase) >= 0

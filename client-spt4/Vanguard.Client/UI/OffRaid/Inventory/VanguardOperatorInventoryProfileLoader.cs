@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using Newtonsoft.Json.Linq;
@@ -8,10 +9,10 @@ using Vanguard.Client.Diagnostics;
 using HarmonyLib;
 #endif
 
-// Responsibility: Loads the temporary SPT player-profile representation used to edit an Operator inventory and restores the real player profile after the editing session ends.
-// Flow: The loader enters server inventory mode, requests/reloads the redirected profile for the UI, and on exit forces player-profile reconstruction whenever the server exit converges successfully, independent of the best-effort direct-commit result.
-// Authority boundary: The server inventory-mode service owns Operator inventory persistence; this client component only drives profile presentation/reload and never synthesizes wallet state.
-// Invariant: A successful exit must return the client to the real player profile, and failed direct commit must not strand the menu in redirected/stale state.
+// Responsibility: Builds the temporary EFT Profile objects used to present an Operator inventory from server-supplied client-safe profile descriptors.
+// Flow: Raw redirected descriptors are parsed, normalized for required inventory roots and personal-DogTag contamination, then passed through EFT's native Profile constructor for the direct Operator view.
+// Authority boundary: Descriptor construction only; the server inventory-mode service owns Operator persistence and the direct-exit flow owns restoration of Player authority.
+// Invariant: Constructed profiles must retain a coherent inventory tree and fail closed on malformed/unsupported descriptors; this loader never invents wallet/economy state or decides exit reconciliation.
 namespace Vanguard.Client.UI.OffRaid.Inventory;
 
 internal static class VanguardOperatorInventoryProfileLoader
@@ -176,9 +177,17 @@ internal static class VanguardOperatorInventoryProfileLoader
         SetIfMissing(info, "RegistrationDate", DateTimeOffset.UtcNow.ToUnixTimeSeconds());
 
         EnsureObject(result, "Customization");
+        StripDogTagCustomization(result);
         EnsureObject(result, "Encyclopedia");
         EnsureHealth(result);
         EnsureInventory(result, profileId, index);
+        int removedPersonalDogtagItems = StripPersonalDogtagInventory(result);
+        if (removedPersonalDogtagItems > 0)
+        {
+            VanguardClientDiagnosticsLog.Info(
+                "VANGUARD_OPERATOR_DOGTAG_STATUS",
+                $"offraid_profile_personal_dogtag_removed index={index}; profile={profileId}; removedItems={removedPersonalDogtagItems}; lootedDogtagsPreserved=true; policy=raid_scoped_only");
+        }
         EnsureArray(result, "InsuredItems");
         EnsureSkills(result);
         EnsureObject(result, "Notes");
@@ -280,6 +289,69 @@ internal static class VanguardOperatorInventoryProfileLoader
                 customization.Remove(key);
             }
         }
+    }
+
+    private static int StripPersonalDogtagInventory(JObject descriptor)
+    {
+        JObject inventory = EnsureObject(descriptor, "Inventory");
+        JArray items = EnsureArray(inventory, "items");
+        string? equipmentId = ReadString(inventory, "equipment");
+        if (string.IsNullOrWhiteSpace(equipmentId))
+        {
+            return 0;
+        }
+
+        string[] roots = items.OfType<JObject>()
+            .Where(item => string.Equals(ReadString(item, "parentId"), equipmentId, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(ReadString(item, "slotId"), "Dogtag", StringComparison.OrdinalIgnoreCase))
+            .Select(item => ReadString(item, "_id"))
+            .Where(id => !string.IsNullOrWhiteSpace(id))
+            .Select(id => id!)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (roots.Length == 0)
+        {
+            return 0;
+        }
+
+        var deleteIds = new HashSet<string>(roots, StringComparer.OrdinalIgnoreCase);
+        bool changed;
+        do
+        {
+            changed = false;
+            foreach (JObject item in items.OfType<JObject>())
+            {
+                string? id = ReadString(item, "_id");
+                string? parentId = ReadString(item, "parentId");
+                if (!string.IsNullOrWhiteSpace(id)
+                    && !string.IsNullOrWhiteSpace(parentId)
+                    && deleteIds.Contains(parentId)
+                    && deleteIds.Add(id))
+                {
+                    changed = true;
+                }
+            }
+        }
+        while (changed);
+
+        int removed = 0;
+        for (int itemIndex = items.Count - 1; itemIndex >= 0; itemIndex--)
+        {
+            if (items[itemIndex] is not JObject item)
+            {
+                continue;
+            }
+
+            string? id = ReadString(item, "_id");
+            if (!string.IsNullOrWhiteSpace(id) && deleteIds.Contains(id))
+            {
+                items.RemoveAt(itemIndex);
+                removed++;
+            }
+        }
+
+        SanitizeInventoryReferences(inventory);
+        return removed;
     }
 
     private static void EnsureHealth(JObject descriptor)
