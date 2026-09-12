@@ -44,13 +44,13 @@ internal sealed class VanguardContractsPanel
                 {
                     Label = F("contracts.action.hire_named", displayName),
                     Hint = offer.OfferId,
-                    Enabled = offer.CanHire && state.Operators.Count < state.Limits.MaxHiredOperators,
+                    Enabled = offer.CanHire && state.ActiveService.Count < state.Limits.MaxHiredOperators,
                     Execute = () => hireContract(offer)
                 });
             }
         }
 
-        if (state.Operators.Count >= state.Limits.MaxHiredOperators)
+        if (state.ActiveService.Count >= state.Limits.MaxHiredOperators)
         {
             body.AppendLine(L("contracts.limit"));
         }

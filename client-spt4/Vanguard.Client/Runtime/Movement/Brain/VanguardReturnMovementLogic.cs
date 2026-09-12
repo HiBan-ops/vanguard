@@ -60,7 +60,7 @@ internal sealed class VanguardReturnMovementLogic : CustomLogic
                 // An authored stationary hold has already quiesced the mover. Replaying the terminal
                 // GoToSomePoint backend during a BigBrain handoff would resurrect the old authored
                 // target exactly when SAIN/medical/grenade is becoming sovereign. Other movement
-                // requests keep the historical reset behavior.
+                // requests use the standard reset behavior.
                 if (!activeTacticalAuthoringHold)
                 {
                     ResetMovementBackend(activeContinuousTravel);

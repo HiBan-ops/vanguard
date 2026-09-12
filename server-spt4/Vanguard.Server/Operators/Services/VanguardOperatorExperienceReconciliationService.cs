@@ -56,6 +56,15 @@ public sealed class VanguardOperatorExperienceReconciliationService(
             for (int index = 0; index < reconciled.Length; index++)
             {
                 VanguardOperatorProfile profile = reconciled[index];
+                VanguardOperatorCumulativeMigrationAssessment cumulative = VanguardOperatorCumulativeMigrationPolicy.Assess(profile);
+                if (!cumulative.Supported)
+                {
+                    unsupportedShape++;
+                    logger.Warning(VanguardServerDiagnosticsLog.Present(
+                        $"[{VanguardBuildVersion.CareerXpProfileParityStatusTag}] phase=baseline_reconciliation; owner={Safe(storageProfileId)}; operator={Safe(profile.OperatorId)}; state=skipped; reason=cumulative_chain_{Safe(cumulative.Reason)}; xpMutation=false; levelMutation=false; tag={VanguardBuildVersion.CareerXpProfileParityStatusTag}"));
+                    continue;
+                }
+
                 VanguardOperatorCareer? career = profile.Career;
                 if (career is null)
                 {

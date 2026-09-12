@@ -15,7 +15,7 @@ namespace Vanguard.Client.Runtime.Alliance;
 
 /// <summary>
 /// Event-driven per-Operator cleanup for friendly targets that slipped into EFT memory/group lists.
-/// Vanguard removes the previous all-Operators/all-friendlies one-second mutation sweep.
+/// Vanguard avoids an all-Operators/all-friendlies periodic mutation sweep.
 /// AddEnemy attempts mark only the affected Operator dirty; query vetoes remain zero-mutation.
 /// A bounded round-robin safety audit only clears an actually friendly GoalEnemy.
 /// </summary>

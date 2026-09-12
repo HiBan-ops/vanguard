@@ -17,6 +17,7 @@ namespace Vanguard.Server.Operators.Services;
 public sealed class VanguardContractPoolService(
     VanguardOperatorStore store,
     VanguardEftExperienceCurveService experienceCurve,
+    VanguardOperatorVisualIdentityService visualIdentityService,
     ISptLogger<VanguardContractPoolService> logger)
 {
     private const string RoubleTemplateId = "5449016a4bdc2d6f028b456f";
@@ -77,8 +78,10 @@ public sealed class VanguardContractPoolService(
         new("Medic", "Tactical recovery", "Protector", "stabilize_squad_preserve_lives", "careful", "Vanguard Logistics", "vanguard.sain.protector", "defensive_recovery", "medium", "medic", ["protective", "deliberate", "recovery_minded"]),
     ];
 
+    private const string WorldLifecycleStatusTag = "VANGUARD_OPERATOR_WORLD_LIFECYCLE_STATUS";
     private readonly SemaphoreSlim identityReservationGate = new(1, 1);
     private readonly HashSet<string> migrationStatusLoggedOwners = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, string> lastWorldLifecycleStatusFingerprintByOwner = new(StringComparer.OrdinalIgnoreCase);
     private string lastIdentityRegistryStatusFingerprint = string.Empty;
 
     public async Task<IReadOnlyList<VanguardOperatorContractOffer>> EnsureContractPoolAsync(string profileId, int playerLevel)
@@ -100,6 +103,19 @@ public sealed class VanguardContractPoolService(
             var usedCallsigns = registry.Select(entry => entry.Callsign).Where(value => !string.IsNullOrWhiteSpace(value)).ToHashSet(StringComparer.OrdinalIgnoreCase);
             var usedLegalNames = registry.Select(entry => BuildLegalName(entry.FirstName, entry.LastName)).Where(value => !string.IsNullOrWhiteSpace(value)).ToHashSet(StringComparer.OrdinalIgnoreCase);
 
+            var legacyVisibleWorldOperators = MaterializeWorldOperators(
+                operators,
+                existing.Where(offer => offer.AvailableUntilUtc > now),
+                now,
+                out int legacyVisibleMaterializedCount);
+            if (legacyVisibleMaterializedCount > 0)
+            {
+                // Upgrade bridge: a still-visible pre-0.8 offer becomes a durable world person before
+                // normal pool reconciliation can prune or replace the offer projection.
+                await store.SaveOperatorsAsync(storageProfileId, legacyVisibleWorldOperators);
+                operators = legacyVisibleWorldOperators;
+            }
+
             var reservedOperatorIds = activeService.Select(record => record.OperatorId).ToHashSet(StringComparer.OrdinalIgnoreCase);
             var historical = BuildHistoricalContactOffers(operators, contacts, reservedOperatorIds, now, normalizedLevel).ToList();
             var historicalIds = historical.Select(offer => offer.OperatorId).ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -114,20 +130,45 @@ public sealed class VanguardContractPoolService(
             var combined = historical.Concat(active).Take(expectedCount).ToArray();
             if (combined.Length >= Math.Min(3, expectedCount))
             {
+                var worldOperators = MaterializeWorldOperators(operators, combined, now, out int materializedCount);
+                if (materializedCount > 0)
+                {
+                    // Persist the person before publishing/retaining the offer. A partial failure may leave a world
+                    // Operator without a visible contract, which is valid; the inverse is not.
+                    await store.SaveOperatorsAsync(storageProfileId, worldOperators);
+                    operators = worldOperators;
+                }
+
                 bool registryChanged = UpsertPermanentReservations(
                     registry,
                     storageProfileId,
-                    historical.Select(offer => new IdentityCandidate(offer.OperatorId, offer.FirstName, offer.LastName, offer.Callsign, offer.DisplayName, offer.Side)),
+                    operators.Select(profile => new IdentityCandidate(
+                        profile.OperatorId,
+                        profile.Identity.FirstName,
+                        profile.Identity.LastName,
+                        profile.Identity.Callsign,
+                        profile.Identity.DisplayName,
+                        profile.Identity.Side)),
                     now,
-                    "historical_operator_contact");
-                registryChanged |= UpsertOfferReservations(registry, storageProfileId, active, now, "active_contract_offer");
+                    "world_operator");
                 if (registryChanged) await store.SaveIdentityRegistryAsync(registry);
                 if (combined.Length != existing.Count) await store.SaveContractsAsync(storageProfileId, combined);
+                LogWorldLifecycleStatus(
+                    storageProfileId,
+                    existing,
+                    combined,
+                    operators,
+                    activeService,
+                    materializedCount + legacyVisibleMaterializedCount,
+                    now,
+                    "retained_pool");
                 return combined;
             }
 
-            var dynamicCount = Math.Max(0, expectedCount - historical.Count);
-            var generated = historical.Concat(GenerateContracts(
+            var dynamicCount = Math.Max(0, expectedCount - historical.Count - active.Count);
+            var generated = historical
+                .Concat(active)
+                .Concat(GenerateContracts(
                     storageProfileId,
                     normalizedLevel,
                     now,
@@ -138,15 +179,38 @@ public sealed class VanguardContractPoolService(
                 .Take(expectedCount)
                 .ToArray();
 
+            var generatedWorldOperators = MaterializeWorldOperators(operators, generated, now, out int generatedMaterializedCount);
+            if (generatedMaterializedCount > 0)
+            {
+                // World persistence precedes contract publication. These Operators remain valid world entities even
+                // if the offer later expires or the contract save fails.
+                await store.SaveOperatorsAsync(storageProfileId, generatedWorldOperators);
+                operators = generatedWorldOperators;
+            }
+
             UpsertPermanentReservations(
                 registry,
                 storageProfileId,
-                historical.Select(offer => new IdentityCandidate(offer.OperatorId, offer.FirstName, offer.LastName, offer.Callsign, offer.DisplayName, offer.Side)),
+                operators.Select(profile => new IdentityCandidate(
+                    profile.OperatorId,
+                    profile.Identity.FirstName,
+                    profile.Identity.LastName,
+                    profile.Identity.Callsign,
+                    profile.Identity.DisplayName,
+                    profile.Identity.Side)),
                 now,
-                "historical_operator_contact");
-            UpsertOfferReservations(registry, storageProfileId, generated.Where(offer => string.Equals(offer.MarketStatus, "dynamic_contract", StringComparison.OrdinalIgnoreCase)), now, "contract_offer_visible");
+                "world_operator");
             await store.SaveIdentityRegistryAsync(registry);
             await store.SaveContractsAsync(storageProfileId, generated);
+            LogWorldLifecycleStatus(
+                storageProfileId,
+                existing,
+                generated,
+                operators,
+                activeService,
+                generatedMaterializedCount + legacyVisibleMaterializedCount,
+                now,
+                "generated_pool");
             return generated;
         }
         finally
@@ -186,6 +250,54 @@ public sealed class VanguardContractPoolService(
 
         LogIdentityRegistryStatus(registry, expiredRemoved, changed);
         return registry;
+    }
+
+    private void LogWorldLifecycleStatus(
+        string ownerProfileId,
+        IReadOnlyList<VanguardOperatorContractOffer> previousContracts,
+        IReadOnlyList<VanguardOperatorContractOffer> visibleContracts,
+        IReadOnlyList<VanguardOperatorProfile> operators,
+        IReadOnlyList<VanguardActiveServiceRecord> activeService,
+        int materializedCount,
+        DateTimeOffset now,
+        string phase)
+    {
+        var worldOperatorIds = operators
+            .Where(profile => !string.IsNullOrWhiteSpace(profile.OperatorId))
+            .Select(profile => profile.OperatorId)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var activeOperatorIds = activeService
+            .Where(record => !string.IsNullOrWhiteSpace(record.OperatorId))
+            .Select(record => record.OperatorId)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var expiredOffers = previousContracts
+            .Where(offer => offer.AvailableUntilUtc <= now)
+            .ToArray();
+
+        int expiredWorldPreserved = expiredOffers.Count(offer => worldOperatorIds.Contains(offer.OperatorId));
+        int visibleWithoutWorld = visibleContracts.Count(offer => !worldOperatorIds.Contains(offer.OperatorId));
+        int worldOnly = operators.Count(profile => !activeOperatorIds.Contains(profile.OperatorId));
+        string fingerprint =
+            $"{phase}|{operators.Count}|{activeService.Count}|{visibleContracts.Count}|{materializedCount}|{expiredOffers.Length}|{expiredWorldPreserved}|{visibleWithoutWorld}|{worldOnly}";
+
+        if (lastWorldLifecycleStatusFingerprintByOwner.TryGetValue(ownerProfileId, out string? previous)
+            && string.Equals(previous, fingerprint, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        lastWorldLifecycleStatusFingerprintByOwner[ownerProfileId] = fingerprint;
+        string message =
+            $"[{WorldLifecycleStatusTag}] owner={ownerProfileId}; phase={phase}; worldOperators={operators.Count}; activeService={activeService.Count}; worldOnly={worldOnly}; visibleContracts={visibleContracts.Count}; materialized={materializedCount}; expiredOffersObserved={expiredOffers.Length}; expiredWorldPreserved={expiredWorldPreserved}; visibleOfferWithoutWorld={visibleWithoutWorld}; capacityAuthority=active_service; offerExpiryDeletesWorldOperator=false; mutation={(materializedCount > 0).ToString().ToLowerInvariant()}; tag={WorldLifecycleStatusTag}";
+
+        if (visibleWithoutWorld > 0)
+        {
+            logger.Warning(VanguardServerDiagnosticsLog.Present(message + "; invariant=visible_offer_requires_world_operator; state=violation"));
+        }
+        else
+        {
+            logger.Info(VanguardServerDiagnosticsLog.Present(message + "; invariant=visible_offer_requires_world_operator; state=ok"));
+        }
     }
 
     private void LogMigrationStatusOnce(string ownerProfileId, IReadOnlyList<VanguardOperatorProfile> operators)
@@ -347,8 +459,11 @@ public sealed class VanguardContractPoolService(
         var contactsById = contacts.ToDictionary(contact => contact.OperatorId, StringComparer.OrdinalIgnoreCase);
         foreach (var profile in operators.OrderByDescending(operatorProfile => contactsById.TryGetValue(operatorProfile.OperatorId, out var contact) ? contact.Trust + contact.Loyalty + contact.Respect - contact.Grudge : 0))
         {
-            if (reservedOperatorIds.Contains(profile.OperatorId) || string.Equals(profile.ContractStatus, VanguardOperatorContractStatuses.Contracted, StringComparison.OrdinalIgnoreCase))
+            if (reservedOperatorIds.Contains(profile.OperatorId)
+                || !string.Equals(profile.ContractStatus, VanguardOperatorContractStatuses.Released, StringComparison.OrdinalIgnoreCase))
             {
+                // Persistent world existence must never imply contract visibility. Only an Operator
+                // explicitly released from prior service is eligible for this historical rehire path.
                 continue;
             }
 
@@ -390,6 +505,35 @@ public sealed class VanguardContractPoolService(
                 "historical_contact",
                 relationshipSummary);
         }
+    }
+
+    private IReadOnlyList<VanguardOperatorProfile> MaterializeWorldOperators(
+        IReadOnlyList<VanguardOperatorProfile> existingOperators,
+        IEnumerable<VanguardOperatorContractOffer> offers,
+        DateTimeOffset now,
+        out int materializedCount)
+    {
+        var result = existingOperators.ToList();
+        var knownIds = result
+            .Where(profile => !string.IsNullOrWhiteSpace(profile.OperatorId))
+            .Select(profile => profile.OperatorId)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        materializedCount = 0;
+        foreach (var offer in offers)
+        {
+            if (string.IsNullOrWhiteSpace(offer.OperatorId) || !knownIds.Add(offer.OperatorId))
+            {
+                continue;
+            }
+
+            VanguardOperatorProfile worldProfile = VanguardOperatorWorldProfileFactory.CreateUncontracted(offer, now);
+            VanguardOperatorVisualIdentity visualIdentity = visualIdentityService.ResolveNewWorldIdentity(worldProfile, now);
+            result.Add(worldProfile with { VisualIdentity = visualIdentity });
+            materializedCount++;
+        }
+
+        return result;
     }
 
     public static int GetOfferCount(int playerLevel)

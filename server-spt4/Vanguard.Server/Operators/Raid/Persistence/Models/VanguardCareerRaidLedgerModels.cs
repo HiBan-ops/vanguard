@@ -35,7 +35,9 @@ public sealed record VanguardCareerRaidLedgerEntry(
     VanguardCareerRaidLedgerTerminalDeathTruth? TerminalDeathTruth = null,
     string TerminalDeathTruthFingerprint = "",
     IReadOnlyList<VanguardCareerRaidLedgerXpKillCredit>? XpKillCredits = null,
-    string XpKillCreditsFingerprint = "");
+    string XpKillCreditsFingerprint = "",
+    IReadOnlyList<VanguardCareerRaidLedgerSuppressionExposure>? SuppressionExposure = null,
+    string SuppressionExposureFingerprint = "");
 
 public sealed record VanguardCareerRaidLedgerKillEvent(
     string EventId,
@@ -129,6 +131,32 @@ public sealed record VanguardCareerRaidLedgerXpKillCredit(
     string TruthVersion = VanguardCareerXpKillCreditTruthSchema.TruthVersion,
     int SchemaVersion = VanguardCareerXpKillCreditTruthSchema.CurrentVersion);
 
+public static class VanguardCareerSuppressionExposureTruthSchema
+{
+    public const int CurrentVersion = 1;
+    public const string TruthVersion = "behavioral_suppression_exposure_v1";
+}
+
+/// <summary>
+/// Additive, interpretation-free behavioral evidence. Each row aggregates qualified near-miss
+/// observations for one Operator/hostile-shooter pair during one raid. It is deliberately separate
+/// from PersonaEvidence and SAIN projection, and carries its own fingerprint so base ledger truth stays immutable.
+/// </summary>
+public sealed record VanguardCareerRaidLedgerSuppressionExposure(
+    string EventId,
+    DateTimeOffset FirstObservedAtUtc,
+    DateTimeOffset LastObservedAtUtc,
+    string OperatorProfileId,
+    string HostileShooterProfileId,
+    int BurstCount,
+    int ShotCount,
+    double ClosestMeters,
+    bool ThreatenedOperator,
+    bool ThreatenedOwner,
+    string Source,
+    string TruthVersion = VanguardCareerSuppressionExposureTruthSchema.TruthVersion,
+    int SchemaVersion = VanguardCareerSuppressionExposureTruthSchema.CurrentVersion);
+
 public sealed record VanguardCareerRaidLedgerSkillSessionPoint(
     string SkillId,
     double Progress,
@@ -145,6 +173,7 @@ public sealed record VanguardCareerRaidLedgerCommitRequest(
     IReadOnlyList<VanguardCareerRaidLedgerKillEventRequest>? KillEvents,
     IReadOnlyList<VanguardCareerRaidTerminalDeathTruthEventRequest>? TerminalDeathTruthEvents = null,
     IReadOnlyList<VanguardCareerRaidXpKillCreditEventRequest>? XpKillCreditEvents = null,
+    IReadOnlyList<VanguardCareerRaidSuppressionExposureEventRequest>? SuppressionExposureEvents = null,
     int SchemaVersion = VanguardCareerRaidLedgerSchema.CurrentVersion);
 
 public sealed record VanguardCareerRaidLedgerKillEventRequest(
@@ -215,6 +244,20 @@ public sealed record VanguardCareerRaidXpKillCreditEventRequest(
     int BodyPartBonusXp,
     int StreakBonusXp,
     int KillXpSubtotal,
+    string? Source);
+
+public sealed record VanguardCareerRaidSuppressionExposureEventRequest(
+    string? EventId,
+    string? RaidSessionId,
+    DateTimeOffset FirstObservedAtUtc,
+    DateTimeOffset LastObservedAtUtc,
+    string? OperatorProfileId,
+    string? HostileShooterProfileId,
+    int BurstCount,
+    int ShotCount,
+    double ClosestMeters,
+    bool ThreatenedOperator,
+    bool ThreatenedOwner,
     string? Source);
 
 public sealed record VanguardCareerRaidLedgerCommitResult(

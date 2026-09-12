@@ -479,7 +479,7 @@ internal static partial class VanguardCombatAwarenessBridge
     }
 
     /// <summary>
-    /// Reads an installed SAIN GoalEnemy as an independent evidence source. A previous unified
+    /// Reads an installed SAIN GoalEnemy as an independent evidence source. An existing unified
     /// assignment and the short scheduler handoff are deliberately not sufficient here, otherwise
     /// the coordinator could refresh its own TTL forever after all combat evidence became stale.
     /// </summary>

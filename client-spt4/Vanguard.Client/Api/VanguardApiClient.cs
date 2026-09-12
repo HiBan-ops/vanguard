@@ -185,17 +185,47 @@ internal sealed class VanguardApiClient
             ?? new VanguardOperatorInventorySummaryResponseDto { Summaries = new List<VanguardOperatorInventorySummaryDto>() };
     }
 
+    public VanguardOperatorPreviewVisualResponseDto LoadPreviewVisuals(IEnumerable<string>? operatorIds)
+    {
+        var ids = (operatorIds ?? Array.Empty<string>())
+            .Where(id => !string.IsNullOrWhiteSpace(id))
+            .Select(id => id.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Take(4)
+            .ToList();
+        return Post<VanguardOperatorPreviewVisualRequestDto, VanguardOperatorPreviewVisualResponseDto>(
+            VanguardApiRoutes.PreviewVisuals,
+            new VanguardOperatorPreviewVisualRequestDto { OperatorIds = ids })
+            ?? new VanguardOperatorPreviewVisualResponseDto
+            {
+                Success = false,
+                Reason = "empty_preview_visual_response",
+                RequestedOperatorCount = ids.Count,
+                ReturnedOperatorCount = 0,
+                Operators = new List<VanguardOperatorPreviewVisualDto>(),
+                UnavailableOperatorIds = ids
+            };
+    }
+
     public string GetInventoryModeProfilesJson()
     {
         return requestDispatcher.GetJson(VanguardApiRoutes.InventoryModeProfiles);
     }
 
-    public VanguardRaidOperatorManifestForProfilesResponseDto LoadRaidManifestForProfiles(IEnumerable<string> profileIds, string? raidSessionId)
+    public VanguardRaidOperatorManifestForProfilesResponseDto LoadRaidManifestForProfiles(
+        IEnumerable<string> profileIds,
+        string? raidSessionId,
+        bool reserveDeployment = true)
     {
         var ids = profileIds.Where(id => !string.IsNullOrWhiteSpace(id)).Select(id => id.Trim()).Distinct(StringComparer.Ordinal).ToList();
         return Post<VanguardRaidManifestForProfilesRequestDto, VanguardRaidOperatorManifestForProfilesResponseDto>(
             VanguardApiRoutes.RaidManifestForProfiles,
-            new VanguardRaidManifestForProfilesRequestDto { ProfileIds = ids, RaidSessionId = raidSessionId })
+            new VanguardRaidManifestForProfilesRequestDto
+            {
+                ProfileIds = ids,
+                RaidSessionId = raidSessionId,
+                ReserveDeployment = reserveDeployment
+            })
             ?? new VanguardRaidOperatorManifestForProfilesResponseDto { Success = false, Reason = "empty_raid_manifest_for_profiles_response" };
     }
 

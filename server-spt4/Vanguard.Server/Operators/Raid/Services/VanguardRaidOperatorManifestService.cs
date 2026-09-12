@@ -20,12 +20,14 @@ public sealed class VanguardRaidOperatorManifestService(
     VanguardOperatorStore store,
     VanguardOperatorExperienceReconciliationService experienceReconciliationService,
     VanguardOperatorCareerXpCommitService careerXpCommitService,
+    VanguardOperatorDeploymentStateService deploymentStateService,
     ISptLogger<VanguardRaidOperatorManifestService> logger)
 {
     public async Task<VanguardRaidOperatorManifestResponse> LoadManifestForOwnerAsync(
         string requestedProfileId,
         string? raidSessionId = null,
-        bool createStorageIfMissing = true)
+        bool createStorageIfMissing = true,
+        bool reserveDeployment = true)
     {
         string requested = Normalize(requestedProfileId, "unknown-profile");
         string raidId = Normalize(raidSessionId, BuildRaidSessionId());
@@ -54,6 +56,32 @@ public sealed class VanguardRaidOperatorManifestService(
         if (!createStorageIfMissing)
         {
             await store.EnsureProfileStorageInitializedAsync(storageProfileId);
+        }
+
+        if (reserveDeployment)
+        {
+            // Only a real raid-authority manifest owns the durable deployment interlock. Presentation/HUD
+            // reads must not mutate ActiveService merely to observe the selected squad. The normal
+            // Off-Raid state boundary clears stale flags from a dead server process independently.
+            VanguardDeploymentProcessBaselineResult deploymentBaseline = await deploymentStateService.EnsureProcessBaselineAsync(storageProfileId);
+            if (!deploymentBaseline.Success)
+            {
+                logger.Warning(VanguardServerDiagnosticsLog.Present(
+                    $"[VANGUARD_RAID_MANIFEST_OWNER] owner={storageProfileId} raid={raidId} returned=0 reason=deployment_process_baseline_failed_{Normalize(deploymentBaseline.Reason, "unknown")} reserveDeployment=true"));
+                return new VanguardRaidOperatorManifestResponse(
+                    requested,
+                    storageProfileId,
+                    raidId,
+                    Array.Empty<VanguardRaidOperatorSnapshot>(),
+                    0,
+                    0,
+                    0,
+                    0,
+                    false,
+                    "deployment_process_baseline_failed_" + Normalize(deploymentBaseline.Reason, "unknown"),
+                    DateTimeOffset.UtcNow,
+                    VanguardBuildVersion.BuildLabel);
+            }
         }
 
         var state = await store.LoadStateAsync(storageProfileId);
@@ -118,11 +146,50 @@ public sealed class VanguardRaidOperatorManifestService(
             }
 
             medicalById.TryGetValue(operatorId, out var medical);
-            var snapshot = BuildSnapshot(storageProfileId, raidId, operatorProfile, activeRecord, medical);
+            var snapshot = BuildSnapshot(storageProfileId, raidId, operatorProfile, activeRecord, medical, ignoreDeploymentInterlock: !reserveDeployment);
             snapshots.Add(snapshot);
         }
 
-        logger.Info(VanguardServerDiagnosticsLog.Present($"[VANGUARD_RAID_MANIFEST_OWNER] owner={storageProfileId} raid={raidId} active={state.ActiveService.Count} selected={selectedCount} returned={snapshots.Count} skipped={skippedCount} mode=headless_authoritative_owner_logical"));
+        string[] deploymentOperators = snapshots
+            .Where(snapshot => snapshot.IsSelectedForRaid && snapshot.IsEligibleForRaid)
+            .Select(snapshot => snapshot.OperatorId)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        VanguardDeploymentReservationResult reservation;
+        if (reserveDeployment)
+        {
+            reservation = await deploymentStateService.ReserveForRaidAsync(storageProfileId, raidId, deploymentOperators);
+            if (!reservation.Success)
+            {
+                logger.Warning(VanguardServerDiagnosticsLog.Present(
+                    $"[VANGUARD_RAID_MANIFEST_OWNER] owner={storageProfileId} raid={raidId} active={state.ActiveService.Count} selected={selectedCount} returned=0 skipped={skippedCount} reason=deployment_reservation_failed_{Normalize(reservation.Reason, "unknown")} reserveDeployment=true"));
+                return new VanguardRaidOperatorManifestResponse(
+                    requested,
+                    storageProfileId,
+                    raidId,
+                    Array.Empty<VanguardRaidOperatorSnapshot>(),
+                    state.ActiveService.Count,
+                    selectedCount,
+                    0,
+                    skippedCount + snapshots.Count,
+                    false,
+                    "deployment_reservation_failed_" + Normalize(reservation.Reason, "unknown"),
+                    DateTimeOffset.UtcNow,
+                    VanguardBuildVersion.BuildLabel);
+            }
+        }
+        else
+        {
+            // Presentation-only/HUD manifest reads must not turn a selected Operator into a durable
+            // deployed reservation. Runtime 20260910_155248 proved that the old observer read did so.
+            reservation = new VanguardDeploymentReservationResult(
+                true,
+                "observer_read_no_deployment_reservation",
+                0,
+                true);
+        }
+
+        logger.Info(VanguardServerDiagnosticsLog.Present($"[VANGUARD_RAID_MANIFEST_OWNER] owner={storageProfileId} raid={raidId} active={state.ActiveService.Count} selected={selectedCount} returned={snapshots.Count} skipped={skippedCount} deploymentReserved={reservation.ReservedOperatorCount} reserveDeployment={reserveDeployment} mode=headless_authoritative_owner_logical"));
         return new VanguardRaidOperatorManifestResponse(
             requested,
             storageProfileId,
@@ -140,7 +207,8 @@ public sealed class VanguardRaidOperatorManifestService(
 
     public async Task<IReadOnlyDictionary<string, VanguardRaidOperatorManifestResponse>> LoadManifestForOwnersAsync(
         IReadOnlyCollection<string>? requestedProfileIds,
-        string? raidSessionId = null)
+        string? raidSessionId = null,
+        bool reserveDeployment = true)
     {
         var result = new Dictionary<string, VanguardRaidOperatorManifestResponse>(StringComparer.OrdinalIgnoreCase);
         string raidId = Normalize(raidSessionId, BuildRaidSessionId());
@@ -154,7 +222,11 @@ public sealed class VanguardRaidOperatorManifestService(
         foreach (string ownerProfileId in requestedOwners)
         {
             bool known = knownOwners.Contains(ownerProfileId);
-            result[ownerProfileId] = await LoadManifestForOwnerAsync(ownerProfileId, raidId, createStorageIfMissing: known);
+            result[ownerProfileId] = await LoadManifestForOwnerAsync(
+                ownerProfileId,
+                raidId,
+                createStorageIfMissing: known,
+                reserveDeployment: reserveDeployment);
         }
 
         return result;
@@ -208,7 +280,8 @@ public sealed class VanguardRaidOperatorManifestService(
         string raidSessionId,
         VanguardOperatorProfile operatorProfile,
         VanguardActiveServiceRecord activeRecord,
-        VanguardOperatorMedicalRecord? medical)
+        VanguardOperatorMedicalRecord? medical,
+        bool ignoreDeploymentInterlock)
     {
         string profilePath = store.GetOperatorInventoryProfilePath(ownerProfileId, operatorProfile.OperatorId);
         bool profileExists = File.Exists(profilePath);
@@ -222,7 +295,11 @@ public sealed class VanguardRaidOperatorManifestService(
         }
 
         DateTimeOffset eligibilityNow = DateTimeOffset.UtcNow;
-        var eligibility = VanguardOperatorRaidEligibilityPolicy.Evaluate(activeRecord, medical, eligibilityNow);
+        VanguardActiveServiceRecord eligibilityRecord = ignoreDeploymentInterlock
+            || deploymentStateService.IsReservedForRaid(ownerProfileId, activeRecord.OperatorId, raidSessionId)
+                ? activeRecord with { IsDeployed = false }
+                : activeRecord;
+        var eligibility = VanguardOperatorRaidEligibilityPolicy.Evaluate(eligibilityRecord, medical, eligibilityNow);
         double healthRatio = eligibility.HealthRatio;
 
         var persona = operatorProfile.Persona;

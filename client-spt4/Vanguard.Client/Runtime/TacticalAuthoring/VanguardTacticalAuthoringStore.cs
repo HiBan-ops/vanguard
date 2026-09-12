@@ -209,7 +209,7 @@ internal static class VanguardTacticalAuthoringStore
 
         if (mapFile.RuntimeConsumptionEnabled)
         {
-            throw new InvalidDataException("Tactical authoring files must keep RuntimeConsumptionEnabled=false. Live authored-zone consumption is authorized by the raid-scoped runtime transport, not by this persisted compatibility flag.");
+            throw new InvalidDataException("Tactical authoring files must keep RuntimeConsumptionEnabled=false. Operator runtime consumption is intentionally not enabled in this release.");
         }
 
         mapFile.Zones ??= new List<VanguardTacticalAuthoringZone>();
@@ -271,7 +271,7 @@ internal static class VanguardTacticalAuthoringStore
                 }
                 if (slot.RuntimeEligible)
                 {
-                    throw new InvalidDataException($"Authoring slot {slot.SlotId} illegally sets RuntimeEligible=true. Live slot eligibility is evaluated by the raid runtime authority; this persisted compatibility flag must remain false.");
+                    throw new InvalidDataException($"Authoring slot {slot.SlotId} illegally sets RuntimeEligible=true while runtime consumption is disabled.");
                 }
             }
 

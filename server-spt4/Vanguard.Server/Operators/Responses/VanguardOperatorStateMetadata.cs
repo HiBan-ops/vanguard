@@ -7,6 +7,7 @@ using Vanguard.Server.Operators.Models;
 namespace Vanguard.Server.Operators.Responses;
 
 public sealed record VanguardOperatorStateMetadata(
+    // Count of persistent/known world Operators, not roster capacity. ActiveServiceCount owns hired capacity semantics.
     int OperatorCount,
     int ActiveServiceCount,
     int ContractOfferCount,

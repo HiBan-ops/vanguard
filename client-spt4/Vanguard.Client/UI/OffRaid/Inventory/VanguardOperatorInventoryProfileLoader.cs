@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
@@ -9,10 +9,10 @@ using Vanguard.Client.Diagnostics;
 using HarmonyLib;
 #endif
 
-// Responsibility: Builds the temporary EFT Profile objects used to present an Operator inventory from server-supplied client-safe profile descriptors.
-// Flow: Raw redirected descriptors are parsed, normalized for required inventory roots and personal-DogTag contamination, then passed through EFT's native Profile constructor for the direct Operator view.
-// Authority boundary: Descriptor construction only; the server inventory-mode service owns Operator persistence and the direct-exit flow owns restoration of Player authority.
-// Invariant: Constructed profiles must retain a coherent inventory tree and fail closed on malformed/unsupported descriptors; this loader never invents wallet/economy state or decides exit reconciliation.
+// Responsibility: Loads the temporary SPT player-profile representation used to edit an Operator inventory and restores the real player profile after the editing session ends.
+// Flow: The loader enters server inventory mode, requests/reloads the redirected profile for the UI, and on exit forces player-profile reconstruction whenever the server exit converges successfully, independent of the best-effort direct-commit result.
+// Authority boundary: The server inventory-mode service owns Operator inventory persistence; this client component only drives profile presentation/reload and never synthesizes wallet state.
+// Invariant: A successful exit must return the client to the real player profile, and failed direct commit must not strand the menu in redirected/stale state.
 namespace Vanguard.Client.UI.OffRaid.Inventory;
 
 internal static class VanguardOperatorInventoryProfileLoader
@@ -335,9 +335,9 @@ internal static class VanguardOperatorInventoryProfileLoader
         while (changed);
 
         int removed = 0;
-        for (int itemIndex = items.Count - 1; itemIndex >= 0; itemIndex--)
+        for (int index = items.Count - 1; index >= 0; index--)
         {
-            if (items[itemIndex] is not JObject item)
+            if (items[index] is not JObject item)
             {
                 continue;
             }
@@ -345,7 +345,7 @@ internal static class VanguardOperatorInventoryProfileLoader
             string? id = ReadString(item, "_id");
             if (!string.IsNullOrWhiteSpace(id) && deleteIds.Contains(id))
             {
-                items.RemoveAt(itemIndex);
+                items.RemoveAt(index);
                 removed++;
             }
         }

@@ -1,7 +1,9 @@
-﻿using System;
+using System;
 using System.Linq;
 using System.Reflection;
 using Vanguard.Client.Diagnostics;
+using Vanguard.Client.UI.SquadPreview;
+using Vanguard.Client.UI.SquadPreview.Hosts;
 
 #if SPT_CLIENT
 using EFT;
@@ -143,8 +145,10 @@ internal sealed class VanguardOperatorEditBuildScreenPresentationPatch : ModuleP
     }
 
     [PatchPrefix]
-    private static void Prefix()
+    private static void Prefix(object __instance)
     {
+        VanguardSquadPreviewWeaponEditorVisibility.AttachToScreen(__instance, "edit_build_screen");
+
         if (!VanguardOffRaidViewAuthorityRouter.TryResolve(
                 "EditBuild",
                 "edit_build_screen_show_prefix",
@@ -441,9 +445,11 @@ internal sealed class VanguardOperatorInventoryScreenReturnPatch : ModulePatch
     }
 
     [PatchPostfix]
-    private static void Postfix(object[] __args)
+    private static void Postfix(object __instance, object[] __args)
     {
+        VanguardSquadPreviewHostCoordinator.ClearPresentationSuppressions("inventory_screen_shown");
         object? controller = __args.Length > 0 ? __args[0] : null;
+        VanguardOperatorProgressionVisibility.EnsureNativeProgressionTabs(__instance, controller, "inventory_screen_show_postfix");
         bool equipmentBuildsReturned = VanguardOperatorEquipmentBuildsFlow.NotifyDirectInventoryShown(controller, "inventory_screen_show");
         if (VanguardOperatorDirectEquipmentScreenEntry.IsActiveOperatorInventoryScreenController(controller))
         {

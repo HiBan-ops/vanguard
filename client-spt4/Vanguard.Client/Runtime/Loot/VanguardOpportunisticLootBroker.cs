@@ -21,7 +21,7 @@ using Vanguard.Client.Runtime.Movement;
 namespace Vanguard.Client.Runtime.Loot;
 
 /// <summary>
-/// The historical broker remains only as an authority-suppression boundary. Vanguard's
+/// This broker serves only as an authority-suppression boundary. Vanguard's
 /// corpse qualification, claim and approach chain is the sole active loot path for Operators. The
 /// autonomous LootingBots scan driver is never granted authority, including when F12 admission is off.
 /// </summary>

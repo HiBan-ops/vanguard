@@ -228,10 +228,9 @@ internal static class VanguardOperatorInventoryModeClientState
                 return false;
             }
 
-            // Use the exact vanilla profile reload method.  The previous fallback that
-            // selected any zero-argument Task on MainMenuController could bind to an
-            // unrelated async menu method if names change, leaving the menu visually
-            // half-refreshed after repeated direct Operator inventory sessions.
+            // Use the exact vanilla profile reload method. Selecting an arbitrary zero-argument
+            // Task on MainMenuController could bind to an unrelated async menu method if names change
+            // and leave the menu visually half-refreshed after repeated Operator inventory sessions.
             MethodInfo? reloadMethod = AccessTools.Method(mainMenuController.GetType(), "method_21");
             if (reloadMethod == null || !typeof(Task).IsAssignableFrom(reloadMethod.ReturnType) || reloadMethod.GetParameters().Length != 0)
             {

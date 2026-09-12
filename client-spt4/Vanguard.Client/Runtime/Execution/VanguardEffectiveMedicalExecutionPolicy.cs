@@ -116,8 +116,8 @@ internal static class VanguardEffectiveMedicalExecutionPolicy
         }
 
         // Never infer stationary ownership from an EFT animation/controller alone. An orphaned
-        // controller is recovered by the execution path; granting it authority here could freeze
-        // cohesion without a matching Vanguard execution lease.
+        // controller is recovered by the execution path; granting it authority here would freeze
+        // cohesion without a lease, exactly the stale Warden failure observed during runtime qualification.
 
         if (VanguardExecutionLeaseCoordinator.TryGetActiveLease(snapshot.BotProfileId, out var lease))
         {

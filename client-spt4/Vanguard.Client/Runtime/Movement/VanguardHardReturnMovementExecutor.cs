@@ -653,10 +653,9 @@ internal static class VanguardHardReturnMovementExecutor
                 continue;
             }
 
-            // Vanguard: do not short-circuit here.  TryOpenHardReturnPending is the only place that can
-            // decide whether an active close/travel/claim window is weak and should be preempted.
-            // The previous pre-check made Vanguard preemption unreachable and converted hard returns into
-            // repeated suppressed attempts while external fallback commands kept being recalculated.
+            // Do not short-circuit before TryOpenHardReturnPending: it is the authority that decides
+            // whether an active close/travel/claim window is weak enough to preempt. Evaluating an
+            // overlapping pre-check here would suppress valid hard-return takeover attempts.
             if (!IsEligibleToStart(snapshot, now, out string reason))
             {
                 if (snapshot.MovementAuthority.HardOutsideBubble && !string.Equals(reason, "not_boundary_return_contract", StringComparison.OrdinalIgnoreCase))

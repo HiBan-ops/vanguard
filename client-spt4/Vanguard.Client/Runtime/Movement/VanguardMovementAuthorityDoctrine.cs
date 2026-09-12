@@ -622,8 +622,8 @@ internal static class VanguardMovementAuthorityDoctrine
 
     /// <summary>
     /// The runtime strong local execution evidence for long-range shared-contact authority. Generic Search,
-    /// SeekCover or movement text is intentionally excluded because those states can persist around stale squad
-    /// knowledge without proving that the Operator is locally executing combat.
+    /// SeekCover or movement text is intentionally excluded: runtime qualification showed that those states can keep
+    /// an isolated Operator busy around stale squad knowledge without producing local combat.
     /// </summary>
     public static bool IsStrongLocalCombatExecution(OperatorDecisionSnapshot snapshot, out string reason)
     {

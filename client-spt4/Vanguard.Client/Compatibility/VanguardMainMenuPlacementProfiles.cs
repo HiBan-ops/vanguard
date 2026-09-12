@@ -20,7 +20,7 @@ using Vanguard.Client.Diagnostics;
 // Authority boundary: this file can decide only Vanguard's normalized X/Y. It has no API for moving,
 // resizing, reordering or restyling SPT/third-party buttons.
 // Invariant: zero-GUID profiles are ignored so Vanguard's no-integration standalone two-column layout
-// remains the built-in default whenever no external placement profile qualifies.
+// remains the built-in default when no integration-specific profile is selected.
 namespace Vanguard.Client.Compatibility;
 
 internal readonly struct VanguardMainMenuPlacementProfile
@@ -98,7 +98,7 @@ internal static class VanguardMainMenuPlacementProfiles
         public int SourceOrder { get; init; }
     }
 
-    // These are the official release defaults validated against the supported menu-plugin topologies.
+    // These are the official release defaults validated through the supported runtime calibration matrix.
     // Existing user files are never overwritten on update, so custom profiles and user-adjusted coordinates
     // remain authoritative once MainMenuPlacementProfiles.jsonc already exists.
     private static readonly string DefaultDocument = """

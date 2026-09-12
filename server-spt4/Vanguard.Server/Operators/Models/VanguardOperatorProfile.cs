@@ -20,4 +20,6 @@ public sealed record VanguardOperatorProfile(
     DateTimeOffset UpdatedAtUtc,
     int SchemaVersion = VanguardOperatorSchema.CurrentVersion,
     string LootTargetPolicy = "CorpsesOnly",
-    VanguardOperatorCareer? Career = null);
+    VanguardOperatorCareer? Career = null,
+    VanguardOperatorEnrollmentBaselineState? EnrollmentBaseline = null,
+    VanguardOperatorVisualIdentity? VisualIdentity = null);

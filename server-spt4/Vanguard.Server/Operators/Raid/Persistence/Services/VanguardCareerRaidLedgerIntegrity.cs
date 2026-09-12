@@ -11,7 +11,7 @@ namespace Vanguard.Server.Operators.Raid.Persistence.Services;
 /// <summary>
 /// Identity and fingerprint authority for the durable Career raid ledger. New records use functional,
 /// schema-oriented identifiers. Compatibility checks deliberately validate the semantic fields of older
-/// identifiers so existing legacy profiles remain readable while new writes use only the current functional schema vocabulary.
+/// identifiers so existing legacy profiles remain readable without carrying development lineage into new writes.
 /// Raw fingerprints always remain verifiable against the exact bytes represented by a stored entry.
 /// </summary>
 public static class VanguardCareerRaidLedgerIntegrity
@@ -24,6 +24,9 @@ public static class VanguardCareerRaidLedgerIntegrity
 
     public static string BuildXpKillCreditEventId(string raidSessionId, string xpRecipientProfileId, string targetProfileId)
         => "career_xp_v1|" + Normalize(raidSessionId) + "|xp_kill_credit|" + Normalize(xpRecipientProfileId) + "|" + Normalize(targetProfileId);
+
+    public static string BuildSuppressionExposureEventId(string raidSessionId, string operatorProfileId, string hostileShooterProfileId)
+        => "behavior_suppression_v1|" + Normalize(raidSessionId) + "|suppression_exposure|" + Normalize(operatorProfileId) + "|" + Normalize(hostileShooterProfileId);
 
     public static bool IsCompatibleKillEventId(string? actual, string raidSessionId, string targetProfileId)
         => HasSemanticIdentity(actual, 4,
@@ -44,6 +47,13 @@ public static class VanguardCareerRaidLedgerIntegrity
             (2, "xp_kill_credit"),
             (3, Normalize(xpRecipientProfileId)),
             (4, Normalize(targetProfileId)));
+
+    public static bool IsCompatibleSuppressionExposureEventId(string? actual, string raidSessionId, string operatorProfileId, string hostileShooterProfileId)
+        => HasSemanticIdentity(actual, 5,
+            (1, Normalize(raidSessionId)),
+            (2, "suppression_exposure"),
+            (3, Normalize(operatorProfileId)),
+            (4, Normalize(hostileShooterProfileId)));
 
     public static bool IsCompatibleTerminalDeathTruthEventId(string? actual, string raidSessionId, string victimProfileId)
         => HasSemanticIdentity(actual, 4,
@@ -214,6 +224,45 @@ public static class VanguardCareerRaidLedgerIntegrity
             AppendFingerprintField(builder, "schemaVersion", credit.SchemaVersion.ToString(System.Globalization.CultureInfo.InvariantCulture));
         }
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(builder.ToString())));
+    }
+
+    public static string ComputeSuppressionExposureFingerprint(IReadOnlyList<VanguardCareerRaidLedgerSuppressionExposure> exposures)
+    {
+        var builder = new StringBuilder();
+        foreach (VanguardCareerRaidLedgerSuppressionExposure exposure in exposures
+            .OrderBy(value => value.OperatorProfileId, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(value => value.HostileShooterProfileId, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(value => value.EventId, StringComparer.OrdinalIgnoreCase))
+        {
+            AppendFingerprintField(builder, "eventId", exposure.EventId);
+            AppendFingerprintField(builder, "firstObservedAtUtc", exposure.FirstObservedAtUtc.ToUniversalTime().ToString("O"));
+            AppendFingerprintField(builder, "lastObservedAtUtc", exposure.LastObservedAtUtc.ToUniversalTime().ToString("O"));
+            AppendFingerprintField(builder, "operatorProfileId", exposure.OperatorProfileId);
+            AppendFingerprintField(builder, "hostileShooterProfileId", exposure.HostileShooterProfileId);
+            AppendFingerprintField(builder, "burstCount", exposure.BurstCount.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            AppendFingerprintField(builder, "shotCount", exposure.ShotCount.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            AppendFingerprintField(builder, "closestMeters", exposure.ClosestMeters.ToString("R", System.Globalization.CultureInfo.InvariantCulture));
+            AppendFingerprintField(builder, "threatenedOperator", Bool(exposure.ThreatenedOperator));
+            AppendFingerprintField(builder, "threatenedOwner", Bool(exposure.ThreatenedOwner));
+            AppendFingerprintField(builder, "source", exposure.Source);
+            AppendFingerprintField(builder, "truthVersion", exposure.TruthVersion);
+            AppendFingerprintField(builder, "schemaVersion", exposure.SchemaVersion.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        }
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(builder.ToString())));
+    }
+
+    public static string ComputeSemanticSuppressionExposureFingerprint(
+        IReadOnlyList<VanguardCareerRaidLedgerSuppressionExposure> exposures,
+        string raidSessionId)
+    {
+        VanguardCareerRaidLedgerSuppressionExposure[] canonical = exposures
+            .Select(exposure => exposure with
+            {
+                EventId = BuildSuppressionExposureEventId(raidSessionId, exposure.OperatorProfileId, exposure.HostileShooterProfileId),
+                TruthVersion = VanguardCareerSuppressionExposureTruthSchema.TruthVersion
+            })
+            .ToArray();
+        return ComputeSuppressionExposureFingerprint(canonical);
     }
 
     public static string ComputeSemanticTerminalDeathTruthFingerprint(

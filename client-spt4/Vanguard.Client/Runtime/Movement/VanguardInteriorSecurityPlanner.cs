@@ -50,7 +50,6 @@ internal static class VanguardInteriorSecurityPlanner
     private const float PortalStandOffMeters = 1.85f;
     private const float PortalLateralOffsetMeters = 1.10f;
     private const float MinimumWatchVisibilityMeters = 3.50f;
-    private const float TopologyProbeDistanceMeters = 14.0f;
     private const int MaxInteriorPathCalculationsPerTick = 4;
     private static readonly float[] AccessScanAngles = { 0f, -35f, 35f, -70f, 70f, -105f, 105f, 145f, -145f, 180f };
     private static readonly float[] DepthScanAngles = { -90f, 90f, 180f, -45f, 45f };

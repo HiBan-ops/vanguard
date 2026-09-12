@@ -10,9 +10,10 @@ public static class VanguardOperatorIdentityRegistrySchema
 }
 
 /// <summary>
-/// Server-global reservation ledger. Enrolled/historical Operator identities remain reserved permanently;
-/// unaccepted market offers are reserved only for their offer lifetime plus a bounded grace period.
-/// This prevents duplicate Operators without exhausting finite callsign/name pools through daily offers.
+/// Server-global reservation ledger. Every durable Vanguard world Operator identity remains reserved permanently,
+/// independently of contract visibility or ActiveService membership. Legacy/pre-materialization market offers may still
+/// carry temporary reservations until they are either materialized as world Operators or expire.
+/// This prevents duplicate Operators without making the contract market the authority for person existence.
 /// </summary>
 public sealed record VanguardOperatorIdentityReservation(
     string OperatorId,

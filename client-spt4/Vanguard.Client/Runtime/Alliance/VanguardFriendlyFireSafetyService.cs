@@ -234,7 +234,7 @@ internal static class VanguardFriendlyFireSafetyService
         }
 
         // Runtime invariant: preserve world occlusion while explicitly skipping the shooter's own
-        // muzzle/weapon/body colliders. The previous single Linecast could stop on self geometry
+        // muzzle/weapon/body colliders. A single Linecast can stop on self geometry
         // and return a false negative for an allied body segment at 8-10m.
         return IsLineUnobstructedToFriendly(from, bodyPoint, shooterRoot, candidateRoot);
     }

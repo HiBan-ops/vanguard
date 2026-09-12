@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using Vanguard.Client.Diagnostics;
+using Vanguard.Client.UI.SquadPreview.Hosts;
 
 #if SPT_CLIENT
 using HarmonyLib;
@@ -143,6 +144,23 @@ internal static class VanguardBattleInputNodeReleaseService
 
     public static void NotifyBattleUiShown(string source)
     {
+        // The effective BattleUI boundary is also the authoritative end of the
+        // Vanguard Off-Raid squad preview lifetime. Keep the preview resident
+        // throughout menu/loading transitions, then release every Vanguard-owned
+        // preview body/camera as soon as the actual raid UI is presented. This is
+        // intentionally unconditional: preview cleanup must not depend on whether
+        // the Operator-inventory battle-input repair below happens to be armed.
+        try
+        {
+            VanguardSquadPreviewHostCoordinator.Release("battle_ui_presented_" + Sanitize(source));
+        }
+        catch (Exception exception)
+        {
+            VanguardClientDiagnosticsLog.Warning(
+                "SQUAD_PREVIEW_HOST_RELEASED",
+                $"hostKind=unknown; state=cleanup_failed_closed; source={Sanitize(source)}; type={exception.GetType().Name}; reason={Sanitize(exception.Message)}; persistentTruthUntouched=true");
+        }
+
         if (!pending || completed)
         {
             return;

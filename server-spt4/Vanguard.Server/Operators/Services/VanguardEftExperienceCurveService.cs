@@ -30,6 +30,14 @@ public sealed class VanguardEftExperienceCurveService(
 
     public bool EnsureResolved() => GetTable().Length > 0;
 
+    public VanguardOperatorExperienceCurveAuthority ResolveAuthority()
+    {
+        int[] table = GetTable();
+        return table.Length > 0
+            ? new VanguardOperatorExperienceCurveAuthority(table.Length, AuthoritativeSource, true)
+            : new VanguardOperatorExperienceCurveAuthority(0, FallbackSource, false);
+    }
+
     public int CreateExperienceForLevel(Random random, int requestedLevel)
     {
         int level = Math.Max(requestedLevel, 1);
@@ -183,5 +191,10 @@ public sealed record VanguardOperatorExperienceWindow(
     int Level,
     int CurrentLevelFloorExperience,
     int NextLevelExperience,
+    string Source,
+    bool IsAuthoritative);
+
+public sealed record VanguardOperatorExperienceCurveAuthority(
+    int MaximumLevel,
     string Source,
     bool IsAuthoritative);

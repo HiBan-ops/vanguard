@@ -19,6 +19,7 @@ internal sealed class VanguardCareerRaidLedgerCommitRequestDto
     public List<VanguardCareerRaidLedgerKillEventDto>? KillEvents { get; set; }
     public List<VanguardCareerRaidTerminalDeathTruthEventDto>? TerminalDeathTruthEvents { get; set; }
     public List<VanguardCareerRaidXpKillCreditEventDto>? XpKillCreditEvents { get; set; }
+    public List<VanguardCareerRaidSuppressionExposureEventDto>? SuppressionExposureEvents { get; set; }
     public int SchemaVersion { get; set; } = 1;
 }
 
@@ -95,6 +96,22 @@ internal sealed class VanguardCareerRaidXpKillCreditEventDto
     public int BodyPartBonusXp { get; set; }
     public int StreakBonusXp { get; set; }
     public int KillXpSubtotal { get; set; }
+    public string? Source { get; set; }
+}
+
+internal sealed class VanguardCareerRaidSuppressionExposureEventDto
+{
+    public string? EventId { get; set; }
+    public string? RaidSessionId { get; set; }
+    public DateTimeOffset FirstObservedAtUtc { get; set; }
+    public DateTimeOffset LastObservedAtUtc { get; set; }
+    public string? OperatorProfileId { get; set; }
+    public string? HostileShooterProfileId { get; set; }
+    public int BurstCount { get; set; }
+    public int ShotCount { get; set; }
+    public double ClosestMeters { get; set; }
+    public bool ThreatenedOperator { get; set; }
+    public bool ThreatenedOwner { get; set; }
     public string? Source { get; set; }
 }
 

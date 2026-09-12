@@ -11,6 +11,10 @@ internal sealed class VanguardRaidManifestForProfilesRequestDto
 {
     public List<string>? ProfileIds { get; set; }
     public string? RaidSessionId { get; set; }
+
+    // Explicit transport intent. Observer/HUD reads must never arm the durable deployment interlock.
+    // Nullable keeps older clients compatible: absent means the server retains its historical reserving behavior.
+    public bool? ReserveDeployment { get; set; }
 }
 
 internal sealed class VanguardRaidOperatorManifestForProfilesResponseDto

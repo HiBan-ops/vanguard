@@ -5,6 +5,7 @@ using Vanguard.Client.Raid.Runtime;
 using Vanguard.Client.Raid.Services;
 using Vanguard.Client.Runtime.Alliance;
 using Vanguard.Client.UI.OffRaid.Inventory;
+using Vanguard.Client.UI.SquadPreview.Hosts;
 
 #if SPT_CLIENT
 using EFT;
@@ -37,6 +38,11 @@ internal sealed class VanguardRaidStartPatch : ModulePatch
             {
                 return;
             }
+
+            // Under Menu Overhaul the borrowed Main Menu preview is intentionally disabled
+            // before raid loading. Hand selected Operators to Vanguard's temporary owned
+            // loading shell instead. Vanilla ignores this call and keeps its already-qualified path.
+            VanguardSquadPreviewHostCoordinator.BeginRaidLoadingPresentation("raid_start_pmc");
 
             // A fresh PMC raid must always rebuild the authority manifest and spawn queue.
             // The runtime registry reset clears Operator records; the controller reset clears

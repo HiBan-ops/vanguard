@@ -174,7 +174,7 @@ internal sealed class VanguardCanonicalOperatorState
 
     public VanguardOffRaidIntegrityReport Analyze(VanguardOperatorStateView state)
     {
-        int selectedForRaid = state.ServiceProjections.Count(projection => projection.IsSelectedForRaid);
+        int selectedForRaid = state.ActiveService.Count(record => record.IsSelectedForRaid);
         int duplicateOperatorIds = state.Operators
             .Where(profile => !string.IsNullOrWhiteSpace(profile.OperatorId))
             .GroupBy(profile => profile.OperatorId!, StringComparer.OrdinalIgnoreCase)
@@ -191,7 +191,7 @@ internal sealed class VanguardCanonicalOperatorState
         {
             OperatorCount = state.Operators.Count,
             ContractCount = state.Contracts.Count,
-            ActiveServiceCount = state.ServiceProjections.Count,
+            ActiveServiceCount = state.ActiveService.Count,
             MedicalProjectionCount = state.MedicalProjections.Count,
             SelectedForRaidCount = selectedForRaid,
             MaxDeployableOperators = state.Limits.MaxDeployableOperators,

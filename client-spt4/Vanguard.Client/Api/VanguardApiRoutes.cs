@@ -21,6 +21,7 @@ internal static class VanguardApiRoutes
     public const string InventoryModeProfiles = "/vanguard/operators/inventory-mode/profiles";
     public const string DirectCommitInventoryMode = "/vanguard/operators/inventory-mode/direct-commit";
     public const string InventorySummary = "/vanguard/operators/inventory/summary";
+    public const string PreviewVisuals = "/vanguard/operators/preview/visuals";
     public const string RaidManifest = "/vanguard/operators/raid/manifest";
     public const string RaidManifestForProfiles = "/vanguard/operators/raid/manifest-for-profiles";
     public const string RaidPersistenceCommit = "/vanguard/operators/raid/persistence/commit";

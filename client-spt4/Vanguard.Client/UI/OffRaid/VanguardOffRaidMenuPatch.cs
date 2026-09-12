@@ -3,6 +3,7 @@ using System.Linq;
 using System.Reflection;
 using Vanguard.Client;
 using Vanguard.Client.Diagnostics;
+using Vanguard.Client.UI.SquadPreview.Hosts;
 
 #if SPT_CLIENT
 using HarmonyLib;
@@ -46,6 +47,7 @@ internal sealed class VanguardOffRaidMenuPatch : ModulePatch
             }
 
             VanguardOffRaidUiController.TryInitialize(__instance);
+            VanguardSquadPreviewHostCoordinator.OnMenuShown(__instance, "menu_screen_show");
         }
         catch (Exception exception)
         {

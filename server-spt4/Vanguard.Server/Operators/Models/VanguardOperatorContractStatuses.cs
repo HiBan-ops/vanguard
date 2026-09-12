@@ -6,6 +6,8 @@ namespace Vanguard.Server.Operators.Models;
 
 public static class VanguardOperatorContractStatuses
 {
+    // The Operator may exist persistently before any contract is offered or signed.
+    public const string Uncontracted = "uncontracted";
     public const string Contracted = "contracted";
     public const string Released = "released";
 }

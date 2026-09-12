@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Reflection;
 using Vanguard.Client.Diagnostics;
@@ -20,9 +20,9 @@ namespace Vanguard.Client.Raid.Patches;
 
 #if SPT_CLIENT
 /// <summary>
-/// Vanguard Operators currently carry no PMC dogtag item by design. Fika's corpse sync remains
-/// valid, but its private dogtag metadata helper logs an error for that intentional inventory.
-/// Skip only that helper for registered Operators; all other Fika death/corpse serialization runs.
+/// Vanguard Operators are expected to carry a native raid-scoped PMC dogtag. This patch is only a
+/// fail-safe for malformed/legacy Operator profiles: valid dogtags pass straight through to Fika's
+/// native metadata generation, while a missing/invalid dogtag cannot break corpse synchronization.
 /// </summary>
 internal sealed class VanguardFikaOperatorDogtagGuardPatch : ModulePatch
 {
@@ -92,7 +92,7 @@ internal sealed class VanguardFikaOperatorDogtagGuardPatch : ModulePatch
         object? item = player.Equipment?.GetSlot(EquipmentSlot.Dogtag)?.ContainedItem;
         if (item == null)
         {
-            reason = "operator_inventory_has_no_dogtag_item_by_design";
+            reason = "operator_raid_dogtag_missing_fail_safe";
             return true;
         }
 

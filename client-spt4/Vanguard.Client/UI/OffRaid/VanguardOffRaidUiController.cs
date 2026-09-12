@@ -21,6 +21,7 @@ using Vanguard.Client.UI.OffRaid.Localization;
 using Vanguard.Client.UI.OffRaid.Foundation;
 using Vanguard.Client.UI.OffRaid.Panels;
 using Vanguard.Client.UI.OffRaid.Inventory;
+using Vanguard.Client.UI.SquadPreview;
 #endif
 
 // Responsibility: owns the Off-Raid Vanguard screen lifecycle, navigation, refresh orchestration and presentation binding for Operator management workflows.
@@ -38,6 +39,7 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
     private const string MenuIconResourceName = "Vanguard.Client.UI.OffRaid.Assets.vanguard_menu_icon_mask.png";
     private const string OffRaidBackgroundResourceName = "Vanguard.Client.UI.OffRaid.Assets.vanguard_offraid_command_surface.png";
     private const string ScreenRootName = "Vanguard_OffRaid_ScreenRoot";
+    private const string ModalInputShieldName = "Vanguard_OffRaid_ModalInputShield";
     private const int MaxActionButtons = 6;
     private const int MaxCardsPerPage = 8;
     // Contextual actions own the top of the right rail. Keeping the stack high leaves a stable
@@ -64,8 +66,8 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
     // This reserves the right rail for contextual actions/details without altering the banner.
     private const float PrimaryNavigationXMax = 0.705f;
     private const float PrimaryNavigationGap = 0.008f;
-    // Profile-driven placement is absolute and Vanguard-only. Reapply the normalized target after external
-    // menu/layout refreshes and F12 slider edits without accumulating deltas or mutating another row.
+    // Profile placement is absolute and Vanguard-only. Reapply the normalized target after external
+    // menu/layout refreshes and F12 slider edits without ever accumulating deltas or mutating another row.
     private const float ProfiledMenuLayoutRefreshSeconds = 0.05f;
 
     // Single visual source of truth for all Vanguard off-raid buttons.
@@ -162,6 +164,7 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
     private float enforceMenuLabelUntilRealtime;
     private float nextInteropMenuLayoutRefreshRealtime;
     private GameObject? screenRoot;
+    private GameObject? modalInputShield;
     private GameObject? headerBandRoot;
     private GameObject? infoTableScrollRoot;
     private GameObject? infoTableRoot;
@@ -322,7 +325,7 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
             }
             else
             {
-                // Explicit user requirement: no matching menu integration keeps the historical Vanguard standalone
+                // No matching menu integration keeps the built-in Vanguard standalone
                 // arrangement unchanged, including its existing two-column ownership of vanilla menu rows.
                 CaptureOriginalMenuPositions(parent);
                 ApplyTwoColumnMenuLayout(parent, sourceRect, menuRect);
@@ -341,6 +344,14 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
 
     private void LateUpdate()
     {
+        // An external visual authority can reactivate its borrowed preview after Vanguard's MenuScreen
+        // callbacks have already fired (notably after PMC preset/build workflows). The coordinator probe
+        // is throttled internally and restores only the already-resident Vanguard presentation once the
+        // external preview is truly active.
+        Vanguard.Client.UI.SquadPreview.Hosts.VanguardSquadPreviewHostCoordinator.TickOffRaidPresentation("offraid_ui_late_update");
+
+        ConvergeModalInputShieldLayering();
+
         if (menuButtonObject == null)
         {
             return;
@@ -403,6 +414,7 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
     {
         if (screenRoot != null)
         {
+            EnsureModalInputShield(menuRoot);
             return;
         }
 
@@ -410,6 +422,7 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
         if (existing != null)
         {
             screenRoot = existing.gameObject;
+            EnsureModalInputShield(menuRoot);
             return;
         }
 
@@ -426,6 +439,8 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
         rootImage.preserveAspect = false;
         rootImage.color = ScreenRootBackdropColor;
         rootImage.raycastTarget = false;
+
+        EnsureModalInputShield(menuRoot);
 
         // The root remains transparent. The authored background spans the whole Vanguard workspace and
         // uses its own alpha-burned contour to blend into EFT. It is never stretched: the source image
@@ -503,6 +518,114 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
 
         CreateTooltipRoot();
         CreateConfirmationRoot();
+    }
+
+    private void EnsureModalInputShield(Transform menuRoot)
+    {
+        if (modalInputShield == null)
+        {
+            Transform existing = menuRoot.Find(ModalInputShieldName);
+            modalInputShield = existing != null
+                ? existing.gameObject
+                : new GameObject(ModalInputShieldName, typeof(RectTransform), typeof(Image));
+
+            if (existing == null)
+            {
+                modalInputShield.transform.SetParent(menuRoot, false);
+            }
+        }
+
+        if (modalInputShield.transform is RectTransform shieldRect)
+        {
+            shieldRect.anchorMin = Vector2.zero;
+            shieldRect.anchorMax = Vector2.one;
+            shieldRect.offsetMin = Vector2.zero;
+            shieldRect.offsetMax = Vector2.zero;
+        }
+
+        Image shieldImage = modalInputShield.GetComponent<Image>() ?? modalInputShield.AddComponent<Image>();
+        shieldImage.sprite = null;
+        shieldImage.type = Image.Type.Simple;
+        shieldImage.preserveAspect = false;
+        shieldImage.color = Color.clear;
+        shieldImage.raycastTarget = true;
+        modalInputShield.SetActive(false);
+    }
+
+    private void SetModalInputShieldActive(bool active)
+    {
+        if (modalInputShield == null)
+        {
+            return;
+        }
+
+        modalInputShield.SetActive(active);
+        if (active)
+        {
+            // The shield is a full-menu sibling immediately below Vanguard. It catches pointer
+            // input that would otherwise reach native Main Menu controls while leaving every
+            // Vanguard child control above it fully interactive.
+            PlaceModalInputShieldImmediatelyBelowScreen();
+            VanguardClientDiagnosticsLog.Diagnostic(
+                VanguardBuildVersion.OffRaidUiStatusTag,
+                () => DescribeModalInputShieldState("activated"));
+        }
+    }
+
+    private void ConvergeModalInputShieldLayering()
+    {
+        if (screenRoot == null
+            || modalInputShield == null
+            || !screenRoot.activeInHierarchy
+            || !modalInputShield.activeInHierarchy)
+        {
+            return;
+        }
+
+        Transform? parent = screenRoot.transform.parent;
+        if (parent == null || modalInputShield.transform.parent != parent || parent.childCount < 2)
+        {
+            return;
+        }
+
+        int expectedScreenIndex = parent.childCount - 1;
+        int expectedShieldIndex = expectedScreenIndex - 1;
+        if (screenRoot.transform.GetSiblingIndex() == expectedScreenIndex
+            && modalInputShield.transform.GetSiblingIndex() == expectedShieldIndex)
+        {
+            return;
+        }
+
+        string before = DescribeModalInputShieldState("layering_drift_detected");
+        PlaceModalInputShieldImmediatelyBelowScreen();
+        VanguardClientDiagnosticsLog.Diagnostic(
+            VanguardBuildVersion.OffRaidUiStatusTag,
+            () => $"{before}; correction=shield_then_screen_to_last; {DescribeModalInputShieldState("layering_reconverged")}");
+    }
+
+    private void PlaceModalInputShieldImmediatelyBelowScreen()
+    {
+        if (screenRoot == null || modalInputShield == null)
+        {
+            return;
+        }
+
+        Transform? parent = screenRoot.transform.parent;
+        if (parent == null || modalInputShield.transform.parent != parent)
+        {
+            return;
+        }
+
+        modalInputShield.transform.SetAsLastSibling();
+        screenRoot.transform.SetAsLastSibling();
+    }
+
+    private string DescribeModalInputShieldState(string state)
+    {
+        int shieldIndex = modalInputShield != null ? modalInputShield.transform.GetSiblingIndex() : -1;
+        int screenIndex = screenRoot != null ? screenRoot.transform.GetSiblingIndex() : -1;
+        int siblingCount = screenRoot?.transform.parent?.childCount ?? -1;
+        return $"modal_input_shield state={state}; shieldActive={modalInputShield?.activeInHierarchy == true}; screenActive={screenRoot?.activeInHierarchy == true}; shieldSibling={shieldIndex}; screenSibling={screenIndex}; siblingCount={siblingCount}; raycastTarget={modalInputShield?.GetComponent<Image>()?.raycastTarget == true}";
     }
 
     private void CreateAuthoredBackgroundSurface()
@@ -802,7 +925,7 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
 
         SetVanillaMenuVisible(false);
         screenRoot.SetActive(true);
-        screenRoot.transform.SetAsLastSibling();
+        SetModalInputShieldActive(true);
         RefreshStateAndRender();
     }
 
@@ -815,6 +938,7 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
             screenRoot.SetActive(false);
         }
 
+        SetModalInputShieldActive(false);
         SetVanillaMenuVisible(true);
         RefreshVanguardMenuButtonAfterRestore();
     }
@@ -828,6 +952,8 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
             screenRoot.SetActive(false);
         }
 
+        SetModalInputShieldActive(false);
+
         // The direct Operator inventory owns its close path.  Do not restore the
         // vanilla menu while the temporary InventoryScreen is queued/open; the close
         // lifecycle rebuilds the player menu after the Operator profile has been
@@ -837,12 +963,14 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
 
     private void OnDisable()
     {
+        SetModalInputShieldActive(false);
         SetVanillaMenuVisible(true);
         RefreshVanguardMenuButtonAfterRestore();
     }
 
     private void OnDestroy()
     {
+        SetModalInputShieldActive(false);
         SetVanillaMenuVisible(true);
         RefreshVanguardMenuButtonAfterRestore();
     }
@@ -870,6 +998,7 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
                 VanguardOperatorInventoryModeClientState.IsActive);
             canonicalState = VanguardCanonicalOperatorState.Build(state);
             integrityReport = canonicalState.Analyze(state);
+            VanguardSquadPreviewStateBridge.Publish(state, "offraid_ui_refresh");
             statusMessage = state.Error == null
                 ? BuildStatusMessageWithInventoryMode()
                 : F("general.state_error", state.Error);
@@ -893,7 +1022,7 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
 
     private string BuildStatusMessageWithInventoryMode()
     {
-        string baseStatus = $"{L("general.ready").TrimEnd('.')} · Operators {state.Operators.Count}/{state.Limits.MaxHiredOperators} · {L("dashboard.contracts")} {state.Contracts.Count} · Raid {state.Limits.MaxDeployableOperators}{integrityReport.ToStatusSuffix()}";
+        string baseStatus = $"{L("general.ready").TrimEnd('.')} · Operators {state.ActiveService.Count}/{state.Limits.MaxHiredOperators} · {L("dashboard.contracts")} {state.Contracts.Count} · Raid {state.Limits.MaxDeployableOperators}{integrityReport.ToStatusSuffix()}";
         if (!VanguardOperatorInventoryModeClientState.IsActive)
         {
             return baseStatus;
@@ -936,7 +1065,14 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
             VanguardOffRaidPanelKind.ActiveService => activeServicePanel.Build(state, ConfirmRaidSelection, OpenDossier),
             VanguardOffRaidPanelKind.FieldHospital => fieldHospitalPanel.Build(state, ConfirmTreatOperator),
             VanguardOffRaidPanelKind.Billing => billingPanel.Build(state, ConfirmSignOpenInvoices),
-            VanguardOffRaidPanelKind.OperatorDossier => dossierPanel.Build(state, selectedOperatorId, () => ShowPanel(VanguardOffRaidPanelKind.ActiveService), ConfirmOpenInventory, SetOperatorLootTargets),
+            VanguardOffRaidPanelKind.OperatorDossier => dossierPanel.Build(
+                state,
+                selectedOperatorId,
+                () => ShowPanel(VanguardOffRaidPanelKind.ActiveService),
+                ConfirmOpenInventory,
+                ConfirmReleaseFromService,
+                !VanguardOperatorInventoryModeClientState.IsActive,
+                SetOperatorLootTargets),
             _ => dashboardPanel.Build(
                 state,
                 () => ShowPanel(VanguardOffRaidPanelKind.Contracts),
@@ -1006,7 +1142,7 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
     private List<VanguardOperatorCardModel> BuildContractCards()
     {
         var cards = new List<VanguardOperatorCardModel>();
-        bool limitReached = state.Operators.Count >= state.Limits.MaxHiredOperators;
+        bool limitReached = state.ActiveService.Count >= state.Limits.MaxHiredOperators;
         foreach (VanguardOperatorContractOfferDto offer in state.Contracts.Take(MaxCardsPerPage))
         {
             VanguardCanonicalOperatorView identity = canonicalState.ResolveForContract(offer);
@@ -1979,6 +2115,59 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
         ShowConfirmation(L("confirm.service.title"), body, selected ? L("action.select") : L("action.unselect"), () => SetRaidSelection(operatorId, displayName, selected));
     }
 
+    private void ConfirmReleaseFromService(string? operatorId, string? displayName)
+    {
+        if (VanguardOperatorInventoryModeClientState.IsActive)
+        {
+            statusMessage = L("release.reason.inventory_session");
+            Render();
+            return;
+        }
+
+        string name = Safe(displayName, operatorId, "operator");
+        string body = F("confirm.release.body", name) + BuildReleaseObligationWarning(operatorId, name);
+        ShowConfirmation(
+            L("confirm.release.title"),
+            body,
+            L("action.dismiss"),
+            () => ReleaseFromService(operatorId, name));
+    }
+
+    private string BuildReleaseObligationWarning(string? operatorId, string displayName)
+    {
+        if (string.IsNullOrWhiteSpace(operatorId))
+        {
+            return string.Empty;
+        }
+
+        VanguardOperatorMedicalProjectionDto? medical = state.MedicalProjections?
+            .FirstOrDefault(item => string.Equals(item.OperatorId, operatorId, StringComparison.OrdinalIgnoreCase));
+        bool unresolvedMedical = medical != null
+            && (!string.Equals(medical.RecoveryState, "recovered", StringComparison.OrdinalIgnoreCase)
+                || medical.CurrentHealthRatio < 0.999
+                || medical.HealCost > 0
+                || medical.RecoveryCost > 0);
+
+        List<VanguardOperatorBillingInvoiceDto> openInvoices = (state.Billing.OpenInvoices ?? new List<VanguardOperatorBillingInvoiceDto>())
+            .Where(invoice => string.Equals(invoice.OperatorId, operatorId, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        int unpaidAmount = openInvoices.Sum(invoice => Math.Max(0, invoice.Amount));
+
+        string warning = string.Empty;
+        if (unresolvedMedical && medical != null)
+        {
+            string medicalState = FriendlyValue(medical.RecoveryState, medical.MedicalStatus, L("general.undefined"));
+            warning += F("confirm.release.warning.medical", displayName, medicalState, FormatMoney(Math.Max(0, medical.HealCost + medical.RecoveryCost)));
+        }
+
+        if (openInvoices.Count > 0)
+        {
+            warning += F("confirm.release.warning.billing", displayName, openInvoices.Count, FormatMoney(unpaidAmount));
+        }
+
+        return warning;
+    }
+
     private void ConfirmTreatOperator(VanguardOperatorMedicalProjectionDto projection)
     {
         string displayName = Safe(projection.DisplayName, projection.OperatorId, "operator");
@@ -2020,6 +2209,47 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
             : F("status.service_failed", name, FriendlyValue(response?.Reason, L("value.no_response")));
         RefreshState();
         currentPanel = VanguardOffRaidPanelKind.ActiveService;
+    }
+
+    private void ReleaseFromService(string? operatorId, string displayName)
+    {
+        var response = apiClient?.DismissOperator(operatorId);
+        if (response?.Success == true)
+        {
+            statusMessage = F("status.release_success", displayName, response.ActiveServiceCount);
+            selectedOperatorId = null;
+            VanguardClientDiagnosticsLog.Info(
+                "VANGUARD_OPERATOR_RELEASE_UI_STATUS",
+                $"state=committed; operator={Safe(response.ReleasedOperator?.OperatorId, operatorId, "none")}; activeServiceCount={response.ActiveServiceCount}; reason={Safe(response.Reason, "none")}");
+        }
+        else
+        {
+            string reason = FriendlyReleaseReason(response?.Reason);
+            statusMessage = F("status.release_failed", displayName, reason);
+            VanguardClientDiagnosticsLog.Warning(
+                "VANGUARD_OPERATOR_RELEASE_UI_STATUS",
+                $"state=rejected; operator={Safe(operatorId, "none")}; reason={Safe(response?.Reason, "no_response")}");
+        }
+
+        RefreshState();
+        currentPanel = VanguardOffRaidPanelKind.ActiveService;
+    }
+
+    private static string FriendlyReleaseReason(string? reason)
+    {
+        if (string.IsNullOrWhiteSpace(reason)) return L("value.no_response");
+        if (reason.Contains("inventory_session", StringComparison.OrdinalIgnoreCase)) return L("release.reason.inventory_session");
+        if (reason.Contains("inventory_mutation", StringComparison.OrdinalIgnoreCase)) return L("release.reason.inventory_mutation");
+        if (reason.Contains("raid_persistence", StringComparison.OrdinalIgnoreCase)) return L("release.reason.raid_persistence");
+        if (reason.Contains("operator_deployed", StringComparison.OrdinalIgnoreCase)) return L("release.reason.deployed");
+        if (reason.Contains("release_transaction_busy", StringComparison.OrdinalIgnoreCase)) return L("release.reason.busy");
+        if (reason.Contains("release_transaction_failed", StringComparison.OrdinalIgnoreCase)
+            || reason.Contains("deployment_process_baseline_failed", StringComparison.OrdinalIgnoreCase))
+        {
+            return L("release.reason.transaction_failed");
+        }
+
+        return FriendlyValue(reason, L("value.no_response"));
     }
 
     private void SetOperatorLootTargets(string? operatorId, bool corpsesEnabled, bool containersEnabled)
@@ -3285,8 +3515,8 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
         float xPercent,
         float yPercent)
     {
-        // Apply the configured absolute normalized target every time. Only Vanguard's RectTransform is
-        // written; no companion anchor, sibling row or external/vanilla button is rebalanced by this path.
+        // Apply an absolute normalized target every time. Only Vanguard's RectTransform is written;
+        // no companion anchor, sibling row or external/vanilla button is ever rebalanced by this path.
         if (parent is not RectTransform referenceRect)
         {
             return;

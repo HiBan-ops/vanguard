@@ -2,6 +2,7 @@ using System;
 using System.Linq;
 using System.Reflection;
 using Vanguard.Client.Diagnostics;
+using Vanguard.Client.UI.SquadPreview;
 
 #if SPT_CLIENT
 using HarmonyLib;
@@ -78,12 +79,14 @@ internal sealed class VanguardOperatorContextualRagfairNavigationPatch : ModuleP
 internal sealed class VanguardOperatorWeaponModdingNavigationPatch : ModulePatch
 {
     private static Type? targetControllerType;
+    private static Type? targetScreenType;
 
     protected override MethodBase GetTargetMethod()
     {
         Type screenType = AccessTools.TypeByName("EFT.UI.WeaponModding.WeaponModdingScreen")
             ?? AccessTools.TypeByName("WeaponModdingScreen")
             ?? throw new MissingMemberException("WeaponModdingScreen type not found.");
+        targetScreenType = screenType;
 
         targetControllerType = screenType.GetNestedType("GClass3922", BindingFlags.Public | BindingFlags.NonPublic)
             ?? screenType.GetNestedTypes(BindingFlags.Public | BindingFlags.NonPublic)
@@ -125,10 +128,18 @@ internal sealed class VanguardOperatorWeaponModdingNavigationPatch : ModulePatch
     [PatchPrefix]
     private static void Prefix(object __instance)
     {
-        if (!VanguardOperatorInventoryModeClientState.IsActive
-            || targetControllerType == null
+        if (targetControllerType == null
             || __instance == null
             || !targetControllerType.IsInstanceOfType(__instance))
+        {
+            return;
+        }
+
+        Vanguard.Client.UI.SquadPreview.Hosts.VanguardSquadPreviewHostCoordinator.AcquirePresentationSuppression(
+            "weapon_modding_controller",
+            "weapon_modding_show_screen");
+
+        if (!VanguardOperatorInventoryModeClientState.IsActive)
         {
             return;
         }
@@ -137,6 +148,24 @@ internal sealed class VanguardOperatorWeaponModdingNavigationPatch : ModulePatch
             "WeaponModding",
             "weapon_modding_show_screen",
             $"controller={__instance.GetType().FullName ?? __instance.GetType().Name}");
+    }
+
+    [PatchPostfix]
+    private static void Postfix(object __instance)
+    {
+        if (targetControllerType == null
+            || __instance == null
+            || !targetControllerType.IsInstanceOfType(__instance))
+        {
+            return;
+        }
+
+        VanguardSquadPreviewWeaponEditorVisibility.AttachToActiveScreenType(
+            targetScreenType,
+            "weapon_modding_screen");
+        Vanguard.Client.UI.SquadPreview.Hosts.VanguardSquadPreviewHostCoordinator.ReleasePresentationSuppression(
+            "weapon_modding_controller",
+            "weapon_modding_screen_lease_attached");
     }
 }
 

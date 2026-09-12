@@ -30,7 +30,6 @@ internal static class VanguardSurgeryCoverPrepareExecutor
     public const string IntentKey = "MedicalPrepareSurgeryCover";
     public const string WindowKind = "MedicalPrepareSurgeryCoverWindow";
     public const string StatusTag = "VANGUARD_MEDICAL_AUTHORITY_LEASE_OK";
-    private const string StabilizationStatusTag = "VANGUARD_SURGERY_GO_COVER_ONLY_OK";
     private const string HardOrbitExitStatusTag = "VANGUARD_MEDICAL_HARD_ORBIT_EXIT_OK";
     private const string PathGateStatusTag = "VANGUARD_SURGERY_COVER_PATH_GATE_OK";
     private const string CoverPreflightStatusTag = "VANGUARD_SURGERY_COVER_PREFLIGHT_OK";
@@ -91,7 +90,6 @@ internal static class VanguardSurgeryCoverPrepareExecutor
     private const float VanguardCoverSlotHardRejectDistance = 10.00f;
     private const int VanguardCoverSlotMaxStagnantCommands = 5;
     private const int VanguardCoverSlotMaxReselects = 5;
-    private const float VanguardRejectedCoverSlotCellMeters = 0.75f;
     private const int VanguardCoverPreflightMaxCandidates = 8;
     private const int VanguardCoverPreflightMaxMoveProbes = 8;
     private const int VanguardCoverAnchorMaxPerCandidate = 6;
@@ -100,8 +98,6 @@ internal static class VanguardSurgeryCoverPrepareExecutor
     private const int GlobalCoverCandidateBuildsPerFrame = 1;
     private const int GlobalCoverAnchorBuildsPerFrame = 1;
     private const int GlobalCoverMoveProbesPerFrame = 2;
-    private const int IncrementalAiCoverPointScanLimit = 24;
-    private const int IncrementalAiCoverAcceptedLimit = 6;
     private const int IncrementalWallSampleLimit = 6;
     private static readonly Vector3[] IncrementalWallDirections =
     {

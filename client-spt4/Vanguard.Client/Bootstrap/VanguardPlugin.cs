@@ -4,6 +4,8 @@ using Vanguard.Client;
 using Vanguard.Client.Diagnostics;
 using Vanguard.Client.UI.OffRaid;
 using Vanguard.Client.UI.OffRaid.Inventory;
+using Vanguard.Client.UI.SquadPreview;
+using Vanguard.Client.UI.SquadPreview.Hosts;
 using Vanguard.Client.Raid.Career;
 using Vanguard.Client.Raid.Patches;
 using Vanguard.Client.Raid.Services;
@@ -51,7 +53,7 @@ namespace Vanguard.Client.Bootstrap;
 [BepInDependency("com.chazut.orbit", BepInDependency.DependencyFlags.SoftDependency)]
 [BepInDependency("me.skwizzy.lootingbots", BepInDependency.DependencyFlags.SoftDependency)]
 [BepInDependency("com.SPT.custom", BepInDependency.DependencyFlags.SoftDependency)]
-// Preserve the already-validated optional load-order hint for the current external menu owner.
+// Preserve the optional load-order hint for the current external menu owner.
 // Main-menu compatibility itself is resolved generically from VanguardMainMenuInterop capabilities.
 [BepInDependency(Vanguard.Client.Compatibility.VanguardMainMenuInterop.PreferredLoadOrderPluginGuid, BepInDependency.DependencyFlags.SoftDependency)]
 public sealed class VanguardPlugin : BaseUnityPlugin
@@ -82,12 +84,15 @@ public sealed class VanguardPlugin
             VanguardTacticalAuthoringOptions.Bind(Config);
             VanguardOperatorInventorySessionIndicator.Bind(Config);
             VanguardMainMenuPlacementOptions.Bind(Config);
+            VanguardSquadPreviewOptions.Bind(Config);
             VanguardOperatorRuntimeAuditSyncService.Initialize();
             VanguardClientDiagnosticsLog.Operational(
                 "VANGUARD_STARTUP",
                 () => $"Runtime services configured; operators=true; tactical=true; medical=true; loot=true; hud=true; integrations=MoreBots_required,SAIN_optional,ORBIT_optional,LootingBots_optional,SPT.Custom_optional; build={VanguardBuildVersion.BuildLabel}");
             VanguardReturnMovementBigBrainBootstrap.RegisterSafe();
             EnablePatch("VanguardOffRaidMenuPatch", () => new VanguardOffRaidMenuPatch().Enable());
+            EnablePatch("VanguardSquadPreviewMenuMinimizePatch", () => new VanguardSquadPreviewMenuMinimizePatch().Enable());
+            EnablePatch("VanguardSquadPreviewMainMenuControllerCapturePatch", () => new VanguardSquadPreviewMainMenuControllerCapturePatch().Enable());
             EnablePatch("VanguardOperatorInventoryGetProfilesPatch", () => new VanguardOperatorInventoryGetProfilesPatch().Enable());
             EnablePatch("VanguardOperatorInventoryProfileRebindPatch", () => new VanguardOperatorInventoryProfileRebindPatch().Enable());
             EnablePatch("VanguardOperatorContextualRagfairNavigationPatch", () => new VanguardOperatorContextualRagfairNavigationPatch().Enable());
@@ -251,7 +256,7 @@ public sealed class VanguardPlugin
         try
         {
             // The runtime scheduler starts after diagnostic observers are bound so restored SprintAction/MovementAction
-            // emissions remain visible to the already runtime-validated diagnostics.
+            // emissions remain visible to the established diagnostics.
             VanguardOperatorSkillAndPhysicalAcquisitionFoundationService.Tick();
         }
         catch (Exception exception)
@@ -878,6 +883,7 @@ public sealed class VanguardPlugin
 
     private void OnDestroy()
     {
+        VanguardSquadPreviewHostCoordinator.Shutdown("plugin_destroy");
         VanguardTacticalAuthoringLiveSyncService.Reset("plugin_destroy");
         VanguardTacticalAuthoringService.Shutdown();
     }

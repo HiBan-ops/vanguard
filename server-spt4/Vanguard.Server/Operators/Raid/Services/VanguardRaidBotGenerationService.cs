@@ -1,4 +1,4 @@
-using System.Security.Cryptography;
+﻿using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -311,8 +311,9 @@ public sealed class VanguardRaidBotGenerationService(
             ParentId = equipmentId,
             SlotId = "Dogtag",
             Location = nativeGeneratedDogtag?.Location,
-            // Fika owns native death-time DogtagComponent population. Reusing SPT's generated
-            // bot Upd could leak the random template-bot identity into the Operator.
+            // Dogtag metadata is intentionally empty at materialization time. Fika owns the native
+            // death-time DogtagComponent population for the raid-scoped item. Reusing SPT's generated
+            // bot Upd could leak the random template bot identity into the persistent Operator.
             Upd = null,
         };
     }

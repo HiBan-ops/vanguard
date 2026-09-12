@@ -1,4 +1,4 @@
-#if SPT_CLIENT
+﻿#if SPT_CLIENT
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -222,10 +222,10 @@ internal sealed class VanguardRaidOperatorSpawnService
         var descriptor = generatedProfiles?.FirstOrDefault()
             ?? throw new InvalidOperationException($"Vanguard Operator generation returned no profile for {snapshot.OperatorId ?? "<none>"}.");
 
-        // audit subsystem safe debt cleanup: sanitize the generated profile descriptor before the
-        // EFT Profile constructor instead of intentionally relying on ctor failure + retry.
-        // The fallback path remains in ConstructOperatorProfileWithRepair, but normal
-        // Operator spawn logs should no longer emit avoidable profile_ctor_failed noise.
+        // Sanitize the generated profile descriptor before the EFT Profile constructor instead of
+        // intentionally relying on ctor failure + retry. Persistent/player DogTag customization
+        // is removed, while the raid-scoped PMC dogtag item materialized by the server remains in
+        // the Equipment tree and is therefore available to native EFT/Fika death handling.
         var safeDescriptor = TryBuildSanitizedDescriptor(descriptor, snapshot, out string preSanitizeReason) ?? descriptor;
         if (!ReferenceEquals(safeDescriptor, descriptor))
         {
@@ -291,7 +291,7 @@ internal sealed class VanguardRaidOperatorSpawnService
             SanitizeInventoryReferences(EnsureObject(root, "Inventory"));
 
             int afterItems = ReadArray(ReadObject(root, "Inventory"), "items")?.Count ?? 0;
-            reason = $"dogtag_removed_inventory_sanitized beforeItems={beforeItems}; afterItems={afterItems}";
+            reason = $"dogtag_customization_removed_raid_dogtag_item_preserved_inventory_sanitized beforeItems={beforeItems}; afterItems={afterItems}";
             VanguardClientDiagnosticsLog.Info(
                 "VANGUARD_OPERATOR_PROFILE_GENERATED",
                 $"profile_descriptor_sanitized operator={snapshot.OperatorId ?? "<none>"}; {reason}");
@@ -753,7 +753,7 @@ internal sealed class VanguardRaidOperatorSpawnService
         // The runtime keeps the safety rule (no partial/invalid path, no forced raw fallback), but uses
         // a two-pass selector. The strict pass prefers close squad positions. The balanced pass expands
         // the search and allows a wider NavMesh projection while still requiring a complete path back to
-        // the player owner. This avoids both previous failures: bad decorative/island spawns and endless
+        // the player owner. This avoids isolated decorative spawns and endless
         // deferral in dense interiors.
         if (TryResolveFromCandidates(
                 botsController,

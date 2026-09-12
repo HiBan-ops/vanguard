@@ -25,5 +25,5 @@ public sealed record ModMetadata : AbstractModMetadata
     };
     public override string? Url { get; init; }
     public override bool? IsBundleMod { get; init; }
-    public override string License { get; init; } = "MIT";
+    public override string License { get; init; } = "MPL-2.0";
 }

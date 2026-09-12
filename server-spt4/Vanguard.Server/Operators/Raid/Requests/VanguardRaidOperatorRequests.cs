@@ -9,7 +9,8 @@ namespace Vanguard.Server.Operators.Raid.Requests;
 
 public sealed record VanguardRaidManifestForProfilesRequest(
     IReadOnlyList<string>? ProfileIds,
-    string? RaidSessionId = null) : IRequestData;
+    string? RaidSessionId = null,
+    bool? ReserveDeployment = null) : IRequestData;
 
 public sealed record VanguardGenerateOperatorBotRequest(
     GenerateBotsRequestData? Info,

@@ -26,6 +26,8 @@ public sealed class VanguardCareerRaidLedgerCommitService(
     private const int MaximumKillEvents = 512;
     private const int MaximumTerminalDeathTruthEvents = 64;
     private const int MaximumXpKillCreditEvents = 512;
+    private const int MaximumSuppressionExposureEvents = 512;
+    private const double MaximumQualifiedNearMissMeters = 5.0d;
 
     // Preparation is intentionally split from commit. First reject malformed raid/participant identity,
     // then normalize each bounded event family, and only then build per-owner ledger entries. This makes
@@ -196,6 +198,48 @@ public sealed class VanguardCareerRaidLedgerCommitService(
             }
         }
 
+        VanguardCareerRaidSuppressionExposureEventRequest[] suppressionExposureEvents = (request.SuppressionExposureEvents ?? Array.Empty<VanguardCareerRaidSuppressionExposureEventRequest>()).ToArray();
+        if (suppressionExposureEvents.Length > MaximumSuppressionExposureEvents)
+        {
+            return Skipped(raid, "suppression_exposure_event_limit_exceeded", operators.Count, killEvents.Length);
+        }
+
+        var seenSuppressionIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var seenSuppressionPairs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (VanguardCareerRaidSuppressionExposureEventRequest exposure in suppressionExposureEvents)
+        {
+            string operatorProfile = Normalize(exposure.OperatorProfileId);
+            string shooterProfile = Normalize(exposure.HostileShooterProfileId);
+            string eventId = Normalize(exposure.EventId);
+            if (string.IsNullOrWhiteSpace(operatorProfile)
+                || string.IsNullOrWhiteSpace(shooterProfile)
+                || string.IsNullOrWhiteSpace(eventId)
+                || exposure.FirstObservedAtUtc == default
+                || exposure.LastObservedAtUtc == default
+                || exposure.LastObservedAtUtc < exposure.FirstObservedAtUtc
+                || exposure.BurstCount <= 0
+                || exposure.ShotCount <= 0
+                || exposure.BurstCount > exposure.ShotCount
+                || !double.IsFinite(exposure.ClosestMeters)
+                || exposure.ClosestMeters < 0d
+                || exposure.ClosestMeters > MaximumQualifiedNearMissMeters
+                || (!exposure.ThreatenedOperator && !exposure.ThreatenedOwner)
+                || !string.Equals(Normalize(exposure.RaidSessionId), raid, StringComparison.OrdinalIgnoreCase)
+                || !participantByBotProfile.ContainsKey(operatorProfile)
+                || string.Equals(operatorProfile, shooterProfile, StringComparison.OrdinalIgnoreCase)
+                || !VanguardCareerRaidLedgerIntegrity.IsCompatibleSuppressionExposureEventId(eventId, raid, operatorProfile, shooterProfile)
+                || !string.Equals(Normalize(exposure.Source), "VanguardNearMissSuppressionService.Register", StringComparison.Ordinal))
+            {
+                return Skipped(raid, "suppression_exposure_event_invalid", operators.Count, killEvents.Length);
+            }
+
+            string pair = operatorProfile + "|" + shooterProfile;
+            if (!seenSuppressionIds.Add(eventId) || !seenSuppressionPairs.Add(pair))
+            {
+                return Skipped(raid, "suppression_exposure_event_duplicate", operators.Count, killEvents.Length);
+            }
+        }
+
         var candidateEntries = new List<VanguardCareerRaidLedgerEntry>(participantTruth.Length);
         foreach (VanguardCareerRaidLedgerOperatorTruth participant in participantTruth)
         {
@@ -232,6 +276,12 @@ public sealed class VanguardCareerRaidLedgerCommitService(
                 .OrderBy(value => value.KillSequence)
                 .ThenBy(value => Normalize(value.EventId), StringComparer.OrdinalIgnoreCase)
                 .Select(ToLedgerXpKillCredit)
+                .ToArray();
+            VanguardCareerRaidLedgerSuppressionExposure[] suppressionExposure = suppressionExposureEvents
+                .Where(value => string.Equals(Normalize(value.OperatorProfileId), botProfileId, StringComparison.OrdinalIgnoreCase))
+                .OrderBy(value => Normalize(value.HostileShooterProfileId), StringComparer.OrdinalIgnoreCase)
+                .ThenBy(value => Normalize(value.EventId), StringComparer.OrdinalIgnoreCase)
+                .Select(ToLedgerSuppressionExposure)
                 .ToArray();
 
             VanguardCareerRaidLedgerSkillSessionPoint[] skills = participant.CareerTruthProbe.SkillsWithSessionPointEntries
@@ -280,6 +330,14 @@ public sealed class VanguardCareerRaidLedgerCommitService(
                     XpKillCreditsFingerprint = VanguardCareerRaidLedgerIntegrity.ComputeXpKillCreditsFingerprint(xpKillCredits)
                 };
             }
+            if (suppressionExposure.Length > 0)
+            {
+                draft = draft with
+                {
+                    SuppressionExposure = suppressionExposure,
+                    SuppressionExposureFingerprint = VanguardCareerRaidLedgerIntegrity.ComputeSuppressionExposureFingerprint(suppressionExposure)
+                };
+            }
 
             candidateEntries.Add(draft with { SourceFingerprint = VanguardCareerRaidLedgerIntegrity.ComputeSourceFingerprint(draft) });
         }
@@ -320,6 +378,10 @@ public sealed class VanguardCareerRaidLedgerCommitService(
                     {
                         return Skipped(raid, "xp_kill_credit_conflict_" + candidate.OperatorId, operators.Count, killEvents.Length);
                     }
+                    if (!SuppressionExposureMatches(prior, candidate))
+                    {
+                        return Skipped(raid, "suppression_exposure_conflict_" + candidate.OperatorId, operators.Count, killEvents.Length);
+                    }
 
                     existing++;
                     expected.Add(prior);
@@ -341,7 +403,7 @@ public sealed class VanguardCareerRaidLedgerCommitService(
         }
 
         logger.Info(VanguardServerDiagnosticsLog.Present(
-            $"[{StatusTag}] phase=preflight; raid={raid}; admitted=true; operators={participantTruth.Length}; owners={preparedOwners.Count}; killEvents={killEvents.Length}; terminalDeathTruthEvents={terminalDeathTruthEvents.Length}; terminalTruthEntries={candidateEntries.Count(value => value.TerminalDeathTruth is not null)}; xpKillCreditEvents={xpKillCreditEvents.Length}; xpKillCreditEntries={candidateEntries.Count(value => (value.XpKillCredits?.Count ?? 0) > 0)}; xpKillShadowSubtotal={candidateEntries.Sum(value => value.XpKillCredits?.Sum(credit => credit.KillXpSubtotal) ?? 0)}; lastAggressorSemantics=context_only_not_direct_killer; added={added}; existing={existing}; exitStatus={Normalize(request.ExitStatus, "unknown")}; aggregateMutation=false; xpMutation=false; achievementsMutation=false; personaEvidenceMutation=false; tag={StatusTag}"));
+            $"[{StatusTag}] phase=preflight; raid={raid}; admitted=true; operators={participantTruth.Length}; owners={preparedOwners.Count}; killEvents={killEvents.Length}; terminalDeathTruthEvents={terminalDeathTruthEvents.Length}; terminalTruthEntries={candidateEntries.Count(value => value.TerminalDeathTruth is not null)}; xpKillCreditEvents={xpKillCreditEvents.Length}; xpKillCreditEntries={candidateEntries.Count(value => (value.XpKillCredits?.Count ?? 0) > 0)}; xpKillShadowSubtotal={candidateEntries.Sum(value => value.XpKillCredits?.Sum(credit => credit.KillXpSubtotal) ?? 0)}; suppressionExposureEvents={suppressionExposureEvents.Length}; suppressionExposureEntries={candidateEntries.Sum(value => value.SuppressionExposure?.Count ?? 0)}; suppressionBursts={candidateEntries.Sum(value => value.SuppressionExposure?.Sum(exposure => exposure.BurstCount) ?? 0)}; suppressionShots={candidateEntries.Sum(value => value.SuppressionExposure?.Sum(exposure => exposure.ShotCount) ?? 0)}; lastAggressorSemantics=context_only_not_direct_killer; behavioralEvidenceSemantics=observed_facts_only_no_persona_projection; added={added}; existing={existing}; exitStatus={Normalize(request.ExitStatus, "unknown")}; aggregateMutation=false; xpMutation=false; achievementsMutation=false; personaEvidenceMutation=false; sainProjectionMutation=false; tag={StatusTag}"));
         return new VanguardCareerRaidLedgerPreparedBatch(
             raid,
             true,
@@ -389,7 +451,8 @@ public sealed class VanguardCareerRaidLedgerCommitService(
                         VanguardCareerRaidLedgerIntegrity.ComputeSemanticSourceFingerprint(expected),
                         StringComparison.OrdinalIgnoreCase)
                     || !TerminalDeathTruthMatches(actual, expected)
-                    || !XpKillCreditsMatch(actual, expected))
+                    || !XpKillCreditsMatch(actual, expected)
+                    || !SuppressionExposureMatches(actual, expected))
                 {
                     throw new InvalidOperationException("career_ledger_readback_mismatch_" + expected.OperatorId);
                 }
@@ -398,7 +461,7 @@ public sealed class VanguardCareerRaidLedgerCommitService(
 
         bool replay = prepared.AddedEntryCount == 0 && prepared.ExistingEntryCount == prepared.OperatorCount;
         logger.Info(VanguardServerDiagnosticsLog.Present(
-            $"[{StatusTag}] phase=commit; raid={prepared.RaidSessionId}; admitted=true; committed=true; replay={Bool(replay)}; operators={prepared.OperatorCount}; owners={prepared.Owners.Count}; killEvents={prepared.KillEventCount}; terminalTruthEntries={prepared.Owners.SelectMany(value => value.ExpectedEntries).Count(value => value.TerminalDeathTruth is not null)}; xpKillCreditEvents={prepared.Owners.SelectMany(value => value.ExpectedEntries).Sum(value => value.XpKillCredits?.Count ?? 0)}; xpKillShadowSubtotal={prepared.Owners.SelectMany(value => value.ExpectedEntries).Sum(value => value.XpKillCredits?.Sum(credit => credit.KillXpSubtotal) ?? 0)}; lastAggressorSemantics=context_only_not_direct_killer; added={prepared.AddedEntryCount}; existing={prepared.ExistingEntryCount}; atomicReplace=true; readback=true; aggregateMutation=false; xpMutation=false; tag={StatusTag}"));
+            $"[{StatusTag}] phase=commit; raid={prepared.RaidSessionId}; admitted=true; committed=true; replay={Bool(replay)}; operators={prepared.OperatorCount}; owners={prepared.Owners.Count}; killEvents={prepared.KillEventCount}; terminalTruthEntries={prepared.Owners.SelectMany(value => value.ExpectedEntries).Count(value => value.TerminalDeathTruth is not null)}; xpKillCreditEvents={prepared.Owners.SelectMany(value => value.ExpectedEntries).Sum(value => value.XpKillCredits?.Count ?? 0)}; xpKillShadowSubtotal={prepared.Owners.SelectMany(value => value.ExpectedEntries).Sum(value => value.XpKillCredits?.Sum(credit => credit.KillXpSubtotal) ?? 0)}; suppressionExposureEntries={prepared.Owners.SelectMany(value => value.ExpectedEntries).Sum(value => value.SuppressionExposure?.Count ?? 0)}; suppressionBursts={prepared.Owners.SelectMany(value => value.ExpectedEntries).Sum(value => value.SuppressionExposure?.Sum(exposure => exposure.BurstCount) ?? 0)}; suppressionShots={prepared.Owners.SelectMany(value => value.ExpectedEntries).Sum(value => value.SuppressionExposure?.Sum(exposure => exposure.ShotCount) ?? 0)}; lastAggressorSemantics=context_only_not_direct_killer; behavioralEvidenceSemantics=observed_facts_only_no_persona_projection; added={prepared.AddedEntryCount}; existing={prepared.ExistingEntryCount}; atomicReplace=true; readback=true; aggregateMutation=false; xpMutation=false; personaEvidenceMutation=false; sainProjectionMutation=false; tag={StatusTag}"));
         return new VanguardCareerRaidLedgerCommitResult(
             "committed",
             true,
@@ -492,6 +555,20 @@ public sealed class VanguardCareerRaidLedgerCommitService(
             source.KillXpSubtotal,
             Normalize(source.Source));
 
+    private static VanguardCareerRaidLedgerSuppressionExposure ToLedgerSuppressionExposure(VanguardCareerRaidSuppressionExposureEventRequest source)
+        => new(
+            Normalize(source.EventId),
+            source.FirstObservedAtUtc,
+            source.LastObservedAtUtc,
+            Normalize(source.OperatorProfileId),
+            Normalize(source.HostileShooterProfileId),
+            source.BurstCount,
+            source.ShotCount,
+            source.ClosestMeters,
+            source.ThreatenedOperator,
+            source.ThreatenedOwner,
+            Normalize(source.Source));
+
     private static VanguardCareerRaidLedgerTerminalDeathTruth ToLedgerTerminalDeathTruth(VanguardCareerRaidTerminalDeathTruthEventRequest source)
         => new(
             Normalize(source.EventId),
@@ -538,12 +615,22 @@ public sealed class VanguardCareerRaidLedgerCommitService(
         }
 
         IReadOnlyList<VanguardCareerRaidLedgerXpKillCredit> credits = entry.XpKillCredits ?? Array.Empty<VanguardCareerRaidLedgerXpKillCredit>();
-        return credits.Count == 0
+        bool xpFingerprintValid = credits.Count == 0
             ? string.IsNullOrWhiteSpace(entry.XpKillCreditsFingerprint)
             : !string.IsNullOrWhiteSpace(entry.XpKillCreditsFingerprint)
                 && string.Equals(
                     VanguardCareerRaidLedgerIntegrity.ComputeXpKillCreditsFingerprint(credits),
                     entry.XpKillCreditsFingerprint,
+                    StringComparison.OrdinalIgnoreCase);
+        if (!xpFingerprintValid) return false;
+
+        IReadOnlyList<VanguardCareerRaidLedgerSuppressionExposure> suppression = entry.SuppressionExposure ?? Array.Empty<VanguardCareerRaidLedgerSuppressionExposure>();
+        return suppression.Count == 0
+            ? string.IsNullOrWhiteSpace(entry.SuppressionExposureFingerprint)
+            : !string.IsNullOrWhiteSpace(entry.SuppressionExposureFingerprint)
+                && string.Equals(
+                    VanguardCareerRaidLedgerIntegrity.ComputeSuppressionExposureFingerprint(suppression),
+                    entry.SuppressionExposureFingerprint,
                     StringComparison.OrdinalIgnoreCase);
     }
 
@@ -568,6 +655,18 @@ public sealed class VanguardCareerRaidLedgerCommitService(
         return string.Equals(
             VanguardCareerRaidLedgerIntegrity.ComputeSemanticXpKillCreditsFingerprint(leftCredits, left.RaidSessionId),
             VanguardCareerRaidLedgerIntegrity.ComputeSemanticXpKillCreditsFingerprint(rightCredits, right.RaidSessionId),
+            StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool SuppressionExposureMatches(VanguardCareerRaidLedgerEntry left, VanguardCareerRaidLedgerEntry right)
+    {
+        IReadOnlyList<VanguardCareerRaidLedgerSuppressionExposure> leftExposure = left.SuppressionExposure ?? Array.Empty<VanguardCareerRaidLedgerSuppressionExposure>();
+        IReadOnlyList<VanguardCareerRaidLedgerSuppressionExposure> rightExposure = right.SuppressionExposure ?? Array.Empty<VanguardCareerRaidLedgerSuppressionExposure>();
+        if (leftExposure.Count != rightExposure.Count) return false;
+        if (leftExposure.Count == 0) return true;
+        return string.Equals(
+            VanguardCareerRaidLedgerIntegrity.ComputeSemanticSuppressionExposureFingerprint(leftExposure, left.RaidSessionId),
+            VanguardCareerRaidLedgerIntegrity.ComputeSemanticSuppressionExposureFingerprint(rightExposure, right.RaidSessionId),
             StringComparison.OrdinalIgnoreCase);
     }
 

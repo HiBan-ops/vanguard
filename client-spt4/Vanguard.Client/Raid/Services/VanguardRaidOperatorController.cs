@@ -123,10 +123,9 @@ internal static class VanguardRaidOperatorController
 
     /// <summary>
     /// Headless does not always pass through the local matchmaker raid-start screen between
-    /// two raids.  The authoritative signal that a new raid runtime exists is the first
-    /// fresh BotsController instance captured by the spawn patches.  Resetting here fixes
-    /// the source of the second-raid no-spawn issue: stale spawn latches from the previous
-    /// authoritative raid, not a missing retry after the fact.
+    /// two raids. The authoritative signal that a new raid runtime exists is the first
+    /// fresh BotsController instance captured by the spawn patches. Resetting here clears
+    /// stale spawn latches from the prior authority raid so the new cycle starts from clean state.
     /// </summary>
     public static void ResetForNewAuthorityRaidCycle(string source)
     {
@@ -168,7 +167,7 @@ internal static class VanguardRaidOperatorController
         }
 
         string raidSessionId = "raid-" + DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-        var response = ApiClient.LoadRaidManifestForProfiles(ownerProfileIds, raidSessionId);
+        var response = ApiClient.LoadRaidManifestForProfiles(ownerProfileIds, raidSessionId, reserveDeployment: true);
         if (!response.Success)
         {
             VanguardClientDiagnosticsLog.Warning("VANGUARD_RAID_SPAWN_STATUS", $"prime failed source={source}; reason={response.Reason ?? "unknown"}; owners={ownerProfileIds.Length}");

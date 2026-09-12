@@ -15,7 +15,14 @@ namespace Vanguard.Client.UI.OffRaid.Panels;
 
 internal sealed class VanguardOperatorDossierPanel
 {
-    public VanguardOffRaidPanelModel Build(VanguardOperatorStateView state, string? operatorId, Action backToActiveService, Action<string?, string?> openInventory, Action<string?, bool, bool> setLootTargets)
+    public VanguardOffRaidPanelModel Build(
+        VanguardOperatorStateView state,
+        string? operatorId,
+        Action backToActiveService,
+        Action<string?, string?> openInventory,
+        Action<string?, string?> releaseFromService,
+        bool canReleaseFromService,
+        Action<string?, bool, bool> setLootTargets)
     {
         VanguardOperatorProfileDto? profile = state.Operators.FirstOrDefault(candidate => string.Equals(candidate.OperatorId, operatorId, StringComparison.OrdinalIgnoreCase));
         VanguardOperatorMedicalProjectionDto? medical = state.MedicalProjections.FirstOrDefault(candidate => string.Equals(candidate.OperatorId, operatorId, StringComparison.OrdinalIgnoreCase));
@@ -182,6 +189,7 @@ internal sealed class VanguardOperatorDossierPanel
             Actions = new List<VanguardOffRaidPanelAction>
             {
                 new() { Label = L("action.equipment"), Execute = () => openInventory(operatorId, displayName), Enabled = !string.IsNullOrWhiteSpace(operatorId) },
+                new() { Label = L("action.dismiss"), Execute = () => releaseFromService(operatorId, displayName), Enabled = canReleaseFromService && !string.IsNullOrWhiteSpace(operatorId) && service is not null },
                 new() { Label = L("dossier.action.back_service"), Execute = backToActiveService }
             }
         };

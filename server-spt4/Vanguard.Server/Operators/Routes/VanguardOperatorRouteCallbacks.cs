@@ -43,6 +43,7 @@ public sealed class VanguardOperatorRouteCallbacks(
     VanguardTacticalAuthoringLiveRelayService tacticalAuthoringLiveRelayService,
     VanguardOwnerLootInterestService ownerLootInterestService,
     VanguardOperatorLootTargetPolicyService lootTargetPolicyService,
+    VanguardOperatorPreviewVisualService previewVisualService,
     ISptLogger<VanguardOperatorRouteCallbacks> logger)
 {
     public async ValueTask<string> GetStateAsync(string url, EmptyRequestData request, MongoId sessionId)
@@ -68,7 +69,11 @@ public sealed class VanguardOperatorRouteCallbacks(
 
     public async ValueTask<string> GetRaidManifestForProfilesAsync(string url, VanguardRaidManifestForProfilesRequest request, MongoId sessionId)
     {
-        var manifests = await raidManifestService.LoadManifestForOwnersAsync(request.ProfileIds, request.RaidSessionId);
+        bool reserveDeployment = request.ReserveDeployment != false;
+        var manifests = await raidManifestService.LoadManifestForOwnersAsync(
+            request.ProfileIds,
+            request.RaidSessionId,
+            reserveDeployment);
         var firstRaidSessionId = manifests.Values.FirstOrDefault()?.RaidSessionId ?? request.RaidSessionId ?? string.Empty;
         var response = new VanguardRaidOperatorManifestForProfilesResponse(
             sessionId.ToString(),
@@ -80,7 +85,7 @@ public sealed class VanguardOperatorRouteCallbacks(
             "vanguard_raid_manifest_for_profiles_loaded",
             DateTimeOffset.UtcNow,
             VanguardBuildVersion.BuildLabel);
-        logger.Info(VanguardServerDiagnosticsLog.Present($"[VANGUARD_RAID_SPAWN_STATUS] route=manifest-for-profiles owners={response.OwnerCount}, operators={response.OperatorCount}, requestedBySession={sessionId}"));
+        logger.Info(VanguardServerDiagnosticsLog.Present($"[VANGUARD_RAID_SPAWN_STATUS] route=manifest-for-profiles owners={response.OwnerCount}, operators={response.OperatorCount}, requestedBySession={sessionId}, reserveDeployment={reserveDeployment}"));
         return httpResponseUtil.GetBody(response);
     }
 
@@ -308,6 +313,12 @@ public sealed class VanguardOperatorRouteCallbacks(
             OperatorId = operatorId,
             GeneratedAtUtc = DateTimeOffset.UtcNow
         };
+    }
+
+    public async ValueTask<string> GetPreviewVisualsAsync(string url, VanguardOperatorPreviewVisualRequest? request, MongoId sessionId)
+    {
+        var response = await previewVisualService.GetAsync(sessionId.ToString(), request?.OperatorIds);
+        return httpResponseUtil.GetBody(response);
     }
 
     public ValueTask<string> GetStorageDiagnosticsAsync(string url, EmptyRequestData request, MongoId sessionId)

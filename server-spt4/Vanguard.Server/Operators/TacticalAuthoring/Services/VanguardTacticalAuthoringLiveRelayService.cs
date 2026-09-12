@@ -9,8 +9,8 @@ using Vanguard.Server.Operators.TacticalAuthoring.Responses;
 namespace Vanguard.Server.Operators.TacticalAuthoring.Services;
 
 /// <summary>
-/// Transient in-memory relay for owner-published Vanguard Tactical Authoring state. It is deliberately not persistence:
-/// saved authoring JSON remains store-owned, while live raid-scoped state may be consumed by the current runtime authority without enabling persisted compatibility flags.
+/// Transient in-memory relay for Vanguard authoring preview. It is deliberately not persistence:
+/// saved tactical authoring JSON remains authoring-only and runtime consumption stays disabled.
 /// </summary>
 [Injectable(InjectionType.Singleton)]
 public sealed class VanguardTacticalAuthoringLiveRelayService

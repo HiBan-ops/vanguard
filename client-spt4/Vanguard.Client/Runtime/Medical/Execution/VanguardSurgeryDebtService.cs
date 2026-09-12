@@ -16,9 +16,10 @@ using Vanguard.Client.Runtime.Medical;
 namespace Vanguard.Client.Runtime.Medical.Execution;
 
 /// <summary>
-/// Keeps a short-lived but persistent surgery debt for operable black parts. The runtime prevents the scheduler
-/// from treating a failed, interrupted or no-effect surgery as a consumed opportunity while the same operable
-/// black part and actionable medical need are still present.
+/// Keeps a short-lived but persistent surgery debt for operable black parts.
+/// runtime qualification proved that the ideal surgery window works; the runtime prevents the scheduler from
+/// treating a failed/interrupted/no-effect surgery as a consumed opportunity while the
+/// same operable black part is still present.
 /// </summary>
 internal static class VanguardSurgeryDebtService
 {

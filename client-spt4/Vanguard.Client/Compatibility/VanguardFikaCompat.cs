@@ -22,7 +22,7 @@ internal static class VanguardFikaCompat
 
     public static bool IsInstalled => BackendUtilsType.Value is not null;
 
-    // Historical compatibility semantic retained for existing Vanguard systems. This combines
+    // Compatibility semantic used by existing Vanguard systems. This combines
     // the local-process flag with Fika's "raid host is headless" flag and must therefore NOT be
     // used when code needs to know whether this executable itself is the headless process.
     public static bool IsHeadless => GetStaticBool("IsHeadless") || GetStaticBool("IsHeadlessGame");
@@ -106,7 +106,7 @@ internal static class VanguardFikaCompat
         // Fika exposes a dedicated player-only collection under a legacy upstream member name. Once that surface
         // exists, do not union Players/RegisteredPlayers: observed AI can share Fika/Observed
         // runtime types and become false positives when an IsAI/IsBot member is unavailable.
-        // Keep the historical heuristic only as a version-agnostic fallback for Fika variants
+        // Keep the conservative heuristic only as a version-agnostic fallback for Fika variants
         // where that dedicated collection is genuinely absent or unreadable. An empty but readable
         // player-only collection remains authoritative during raid bootstrap.
         if (authoritativePlayerCollectionAvailable)
@@ -201,7 +201,7 @@ internal static class VanguardFikaCompat
         }
 
         // Compatibility fallback only. Older/alternate Fika surfaces may not expose the dedicated player collection;
-        // in that case preserve the previous Players inspection with its conservative flags.
+        // in that case use Players inspection with conservative AI/bot filtering.
         var players = GetInstanceMemberValue(coopHandler, "Players") as System.Collections.IEnumerable;
         if (players is null)
         {

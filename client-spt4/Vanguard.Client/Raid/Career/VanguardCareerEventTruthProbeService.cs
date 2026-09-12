@@ -74,6 +74,8 @@ internal static class VanguardCareerEventTruthProbeService
                 duplicateKillEvents = 0;
             }
 
+            VanguardBehavioralEvidenceTruthProbeService.ResetForRaidLifecycle(reason);
+
             VanguardClientDiagnosticsLog.Operational(
                 StatusTag,
                 () => $"VANGUARD_EVENT_TRUTH_RESET reason={Safe(reason)}; readOnly=true; careerMutation=false; persistenceSemanticsChanged=false");
@@ -595,6 +597,7 @@ internal static class VanguardCareerEventTruthProbeService
                     KillEvents = LedgerKillEvents.Select(CloneKillEvent).ToList(),
                     TerminalDeathTruthEvents = LedgerTerminalDeathTruthEvents.Select(CloneTerminalDeathTruthEvent).ToList(),
                     XpKillCreditEvents = LedgerXpKillCreditEvents.Select(CloneXpKillCreditEvent).ToList(),
+                    SuppressionExposureEvents = VanguardBehavioralEvidenceTruthProbeService.SnapshotSuppressionExposureEvents(stop.RaidSessionId).ToList(),
                     SchemaVersion = 1
                 };
                 payload = readyPayload;
@@ -603,7 +606,7 @@ internal static class VanguardCareerEventTruthProbeService
             reason = "ok";
             VanguardClientDiagnosticsLog.Operational(
                 LedgerStatusTag,
-                () => $"VANGUARD_LEDGER_PAYLOAD_READY raid={Safe(expectedRaidSessionId)}; exitStatus={Safe(readyPayload.ExitStatus)}; stopSource={Safe(readyPayload.StopSource)}; killEvents={readyPayload.KillEvents?.Count ?? 0}; terminalDeathTruthEvents={readyPayload.TerminalDeathTruthEvents?.Count ?? 0}; xpKillCreditEvents={readyPayload.XpKillCreditEvents?.Count ?? 0}; xpKillShadowSubtotal={readyPayload.XpKillCreditEvents?.Sum(value => value.KillXpSubtotal) ?? 0}; xpRecipientSemantics=OnBeenKilledByAggressor_aggressor_credit_recipient_not_direct_killer; terminalDeathLastAggressorSemantics=context_only_not_direct_killer; schema={readyPayload.SchemaVersion}; aggregateMutation=false; xpMutation=false; localCareerMutation=false");
+                () => $"VANGUARD_LEDGER_PAYLOAD_READY raid={Safe(expectedRaidSessionId)}; exitStatus={Safe(readyPayload.ExitStatus)}; stopSource={Safe(readyPayload.StopSource)}; killEvents={readyPayload.KillEvents?.Count ?? 0}; terminalDeathTruthEvents={readyPayload.TerminalDeathTruthEvents?.Count ?? 0}; xpKillCreditEvents={readyPayload.XpKillCreditEvents?.Count ?? 0}; xpKillShadowSubtotal={readyPayload.XpKillCreditEvents?.Sum(value => value.KillXpSubtotal) ?? 0}; suppressionExposureEntries={readyPayload.SuppressionExposureEvents?.Count ?? 0}; suppressionBursts={readyPayload.SuppressionExposureEvents?.Sum(value => value.BurstCount) ?? 0}; suppressionShots={readyPayload.SuppressionExposureEvents?.Sum(value => value.ShotCount) ?? 0}; xpRecipientSemantics=OnBeenKilledByAggressor_aggressor_credit_recipient_not_direct_killer; terminalDeathLastAggressorSemantics=context_only_not_direct_killer; behavioralEvidenceSemantics=observed_facts_only_no_persona_projection; schema={readyPayload.SchemaVersion}; aggregateMutation=false; xpMutation=false; personaEvidenceMutation=false; sainProjectionMutation=false; localCareerMutation=false");
             return true;
         }
         catch (Exception exception)

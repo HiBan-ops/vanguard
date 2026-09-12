@@ -28,7 +28,7 @@ internal sealed class VanguardDashboardPanel
         body.AppendLine();
         body.AppendLine(F("dashboard.body.player_level", state.Limits.PlayerLevel, state.Limits.Tier));
         body.AppendLine(F("dashboard.body.contracts", state.Contracts.Count));
-        body.AppendLine(F("dashboard.body.operators", state.Operators.Count, state.Limits.MaxHiredOperators));
+        body.AppendLine(F("dashboard.body.operators", state.ActiveService.Count, state.Limits.MaxHiredOperators));
         body.AppendLine(F("dashboard.body.active_service", state.ActiveService.Count));
         body.AppendLine(F("dashboard.body.raid_ready", readyForRaid));
         body.AppendLine(F("dashboard.body.raid_active", selectedForRaid, state.Limits.MaxDeployableOperators));
@@ -51,7 +51,7 @@ internal sealed class VanguardDashboardPanel
                     {
                         new() { Label = L("label.player_level"), Value = $"{state.Limits.PlayerLevel} ({state.Limits.Tier})" },
                         new() { Label = L("label.contracts_available"), Value = state.Contracts.Count.ToString() },
-                        new() { Label = L("label.operators_hired"), Value = $"{state.Operators.Count} / {state.Limits.MaxHiredOperators}" },
+                        new() { Label = L("label.operators_hired"), Value = $"{state.ActiveService.Count} / {state.Limits.MaxHiredOperators}" },
                         new() { Label = L("label.active_service"), Value = state.ActiveService.Count.ToString() },
                         new() { Label = L("label.raid_ready"), Value = readyForRaid.ToString() },
                         new() { Label = L("label.raid_active"), Value = $"{selectedForRaid} / {state.Limits.MaxDeployableOperators}" },

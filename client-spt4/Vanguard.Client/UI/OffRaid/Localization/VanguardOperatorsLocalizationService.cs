@@ -461,6 +461,10 @@ internal static class VanguardOperatorsLocalizationService
         ["confirm.service.body"] = "Confirm: {0}\n{1}\n\nActive means selected for the next raid; Resting keeps the Operator off duty.",
         ["confirm.service.set_active"] = "set active",
         ["confirm.service.set_rest"] = "set resting",
+        ["confirm.release.title"] = "Release From Service",
+        ["confirm.release.body"] = "Release {0} from active service?\n\nThe Operator remains a persistent Vanguard contact. Identity, career, equipment profile, medical state, EnrollmentBaseline and VisualIdentity are preserved, and the same person may be offered for rehire later.",
+        ["confirm.release.warning.medical"] = "\n\nWARNING: {0} still has unresolved Field Hospital care ({1}; outstanding care estimate {2}). Release is allowed, but the medical state and obligations are preserved.",
+        ["confirm.release.warning.billing"] = "\n\nWARNING: {0} still has {1} unpaid Vanguard invoice(s), totaling {2}. Release is allowed, but these debts are not cancelled.",
         ["confirm.treatment.title"] = "Treatment confirmation",
         ["confirm.treatment.body"] = "Treat {0}?\nMedical: {1}\nInjury: {2}\nEstimated deferred cost: {3}",
         ["confirm.billing.title"] = "Invoice confirmation",
@@ -471,6 +475,14 @@ internal static class VanguardOperatorsLocalizationService
         ["status.hire_failed"] = "Failed to hire {0}: {1}",
         ["status.service_success"] = "Active service updated for {0}: {1}.",
         ["status.service_failed"] = "Failed raid selection for {0}: {1}",
+        ["status.release_success"] = "Released from service: {0}. Active service slots now used: {1}.",
+        ["status.release_failed"] = "Failed to release {0}: {1}",
+        ["release.reason.inventory_session"] = "an Operator equipment session is active",
+        ["release.reason.inventory_mutation"] = "an Operator inventory mutation is in progress",
+        ["release.reason.raid_persistence"] = "a raid persistence commit is in progress",
+        ["release.reason.deployed"] = "the Operator is reserved or deployed for an active raid",
+        ["release.reason.busy"] = "another Release From Service transaction is already in progress",
+        ["release.reason.transaction_failed"] = "the Release From Service transaction could not be committed safely",
         ["status.loot_success"] = "Opportunistic loot updated for {0}: {1}.",
         ["status.loot_failed"] = "Failed to update opportunistic loot: {0}",
         ["status.treatment_success"] = "Treatment completed: {0}; health {1:P0} → {2:P0}; amount={3}.",
@@ -933,6 +945,10 @@ internal static class VanguardOperatorsLocalizationService
         ["confirm.service.body"] = "Confirmer : {0}\n{1}\n\nActif signifie sélectionné pour le prochain raid ; Repos maintient l’Operator hors service.",
         ["confirm.service.set_active"] = "mettre actif",
         ["confirm.service.set_rest"] = "mettre au repos",
+        ["confirm.release.title"] = "Libération du service",
+        ["confirm.release.body"] = "Libérer {0} du service actif ?\n\nL’Operator reste un contact Vanguard persistant. Son identité, sa carrière, son profil d’équipement, son état médical, EnrollmentBaseline et VisualIdentity sont conservés, et cette même personne pourra être reproposée ultérieurement.",
+        ["confirm.release.warning.medical"] = "\n\nATTENTION : {0} a encore des soins non soldés au Field Hospital ({1} ; estimation restante {2}). La libération reste possible, mais son état médical et ses obligations sont conservés.",
+        ["confirm.release.warning.billing"] = "\n\nATTENTION : {0} a encore {1} facture(s) Vanguard impayée(s), pour un total de {2}. La libération reste possible, mais ces dettes ne sont pas annulées.",
         ["confirm.treatment.title"] = "Confirmation soin",
         ["confirm.treatment.body"] = "Traiter {0}?\nMédical: {1}\nBlessure: {2}\nCoût différé estimé: {3}",
         ["confirm.billing.title"] = "Confirmation factures",
@@ -943,6 +959,14 @@ internal static class VanguardOperatorsLocalizationService
         ["status.hire_failed"] = "Échec engagement {0}: {1}",
         ["status.service_success"] = "Service actif mis à jour pour {0}: {1}.",
         ["status.service_failed"] = "Échec sélection raid pour {0}: {1}",
+        ["status.release_success"] = "Operator libéré du service : {0}. Emplacements de service actif utilisés : {1}.",
+        ["status.release_failed"] = "Échec de la libération de {0} : {1}",
+        ["release.reason.inventory_session"] = "une session équipement Operator est active",
+        ["release.reason.inventory_mutation"] = "une mutation d’inventaire Operator est en cours",
+        ["release.reason.raid_persistence"] = "un commit de persistance de raid est en cours",
+        ["release.reason.deployed"] = "l’Operator est réservé ou déployé dans un raid actif",
+        ["release.reason.busy"] = "une autre transaction de libération du service est déjà en cours",
+        ["release.reason.transaction_failed"] = "la transaction de libération du service n’a pas pu être validée de façon sûre",
         ["status.loot_success"] = "Loot opportuniste mis à jour pour {0} : {1}.",
         ["status.loot_failed"] = "Échec mise à jour loot opportuniste : {0}",
         ["status.treatment_success"] = "Soin effectué : {0}; santé {1:P0} → {2:P0}; montant={3}.",
@@ -999,40 +1023,6 @@ internal static class VanguardOperatorsLocalizationService
     public static string Format(string key, params object?[] args)
     {
         return string.Format(CultureInfo.InvariantCulture, Get(key), args);
-    }
-
-    internal static bool HasCatalogKey(string key)
-    {
-        if (string.IsNullOrWhiteSpace(key))
-        {
-            return false;
-        }
-
-        return EnglishValues.ContainsKey(key) && FrenchValues.ContainsKey(key);
-    }
-
-    internal static bool HasCatalogParity(out string details)
-    {
-        List<string> issues = new();
-
-        foreach (string key in EnglishValues.Keys)
-        {
-            if (!FrenchValues.ContainsKey(key))
-            {
-                issues.Add($"missing-fr:{key}");
-            }
-        }
-
-        foreach (string key in FrenchValues.Keys)
-        {
-            if (!EnglishValues.ContainsKey(key))
-            {
-                issues.Add($"missing-en:{key}");
-            }
-        }
-
-        details = issues.Count == 0 ? "OK" : string.Join(",", issues);
-        return issues.Count == 0;
     }
 
     private static bool IsFrenchLocale(string? localeCode)

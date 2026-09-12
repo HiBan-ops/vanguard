@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -29,6 +29,7 @@ namespace Vanguard.Server.Operators.Raid.Persistence.Services;
 public sealed class VanguardRaidOperatorPersistenceService(
     VanguardOperatorStore store,
     VanguardOperatorInventoryModeService inventoryModeService,
+    VanguardOperatorDeploymentStateService deploymentStateService,
     VanguardOperatorCareerTruthProbeService careerTruthProbeService,
     VanguardCareerRaidLedgerCommitService careerLedgerService,
     VanguardOperatorCareerXpCommitService careerXpCommitService,
@@ -37,6 +38,21 @@ public sealed class VanguardRaidOperatorPersistenceService(
 {
     private static readonly SemaphoreSlim CommitGate = new(1, 1);
     private readonly ConcurrentDictionary<string, VanguardRaidOperatorPersistenceBatchResponse> committedBatches = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Attempts to reserve the same durable-persistence gate used by raid-close commits for a bounded
+    /// off-raid mutation. The lease is deliberately non-blocking: callers must fail closed and retry
+    /// on a later convergence pass rather than waiting behind an in-flight raid commit.
+    /// </summary>
+    public async Task<IDisposable?> TryAcquireExternalMutationLeaseAsync()
+    {
+        if (!await CommitGate.WaitAsync(0))
+        {
+            return null;
+        }
+
+        return new CommitGateLease();
+    }
 
     public async Task<VanguardRaidOperatorPersistenceBatchResponse> CommitAsync(
         MongoId requesterSessionId,
@@ -189,10 +205,10 @@ public sealed class VanguardRaidOperatorPersistenceService(
                     }
                 }
 
-                // Runtime trees are forensic/corpse truth. They must already be globally unique across
-                // Operators; Vanguard never arbitrates ownership of the same ItemId.  Personal PMC dogtags
-                // are prevented at their source by raid-scoped materialization and persistent-profile
-                // sanitization, so this guard can remain strict.
+                // First validate the unmodified runtime trees.  A legal transfer removes an item
+                // from the donor corpse before it appears on the receiver.  Seeing the same ItemId
+                // in two final runtime Operator trees is therefore a transaction/replication fault,
+                // even if the donor is about to lose that item under the KIA policy.
                 foreach (string itemId in runtimeSnapshot.EquipmentItemIds)
                 {
                     if (runtimeItemOwners.TryGetValue(itemId, out string? existingRuntimeOwner))
@@ -203,9 +219,10 @@ public sealed class VanguardRaidOperatorPersistenceService(
                     runtimeItemOwners[itemId] = operatorKey;
                 }
 
-                // The Operator's own Dogtag equipment item is raid-scoped corpse truth and must never
-                // become next-raid persistence.  Strip only the direct Equipment/Dogtag tree; looted
-                // dogtags elsewhere in pockets/rig/backpack remain untouched.
+                // The raw runtime tree remains the forensic/corpse truth and therefore includes
+                // the Operator's own raid dogtag.  That item is intentionally raid-scoped: it must
+                // remain lootable on the corpse but must never become part of the persistent
+                // Operator inventory for the next raid.
                 if (!inventoryModeService.TryPreparePersistentRaidInventorySnapshot(
                         runtimeSnapshot,
                         out VanguardRaidInventoryPreparedSnapshot? persistentBaseSnapshot,
@@ -221,7 +238,10 @@ public sealed class VanguardRaidOperatorPersistenceService(
                 {
                     // SPT does not persist a dead PMC's residual corpse as survivor equipment.
                     // After the raw corpse has been reconciled exactly and the raid-scoped personal
-                    // dogtag has been excluded from persistence, apply SPT LostOnDeathConfig.
+                    // dogtag has been excluded from persistence, apply SPT LostOnDeathConfig to
+                    // derive the distinct persistence tree.  Recovered items have already left the
+                    // corpse and live in the receiver's runtime tree; unrecovered lost-on-death gear
+                    // is deliberately absent from the dead Operator's next-raid inventory.
                     if (!inventoryModeService.TryPrepareKiaRaidInventorySnapshot(
                             persistentBaseSnapshot,
                             out VanguardRaidInventoryPreparedSnapshot? kiaSnapshot,
@@ -247,7 +267,6 @@ public sealed class VanguardRaidOperatorPersistenceService(
 
                 prepared.Add(new PreparedEntry(entry, storageProfileId, persistentOperator, persistenceSnapshot, skillSnapshot, effectiveSnapshotSource, careerTruthProbe));
             }
-
 
             foreach (string owner in prepared.Select(entry => entry.StorageProfileId).Distinct(StringComparer.OrdinalIgnoreCase))
             {
@@ -497,6 +516,13 @@ public sealed class VanguardRaidOperatorPersistenceService(
                     careerLedgerResult);
                 await SaveCommittedBatchAsync(batchKey, success);
                 committedBatches[batchKey] = success;
+                foreach (IGrouping<string, PreparedEntry> ownerGroup in prepared.GroupBy(entry => entry.StorageProfileId, StringComparer.OrdinalIgnoreCase))
+                {
+                    deploymentStateService.CompleteRaidReservations(
+                        ownerGroup.Key,
+                        raidSessionId,
+                        ownerGroup.Select(entry => Normalize(entry.Request.OperatorId)));
+                }
                 try
                 {
                     logger.Info(VanguardServerDiagnosticsLog.Present($"[VANGUARD_RAID_PERSISTENCE_STATUS] commit_success raid={raidSessionId}; requester={requesterSessionId}; authority={Normalize(request.AuthorityKind, "unknown")}; operators={entries.Length}; owners={prepared.Select(x => x.StorageProfileId).Distinct(StringComparer.OrdinalIgnoreCase).Count()}; runtimeUniqueItems={runtimeItemOwners.Count}; persistentUniqueItems={globalItemOwners.Count}; skillCommon={responses.Sum(x => x.SkillProgression?.CommonSkillCount ?? 0)}; skillCommonProgressed={responses.Sum(x => x.SkillProgression?.CommonProgressedCount ?? 0)}; skillMastering={responses.Sum(x => x.SkillProgression?.MasteringSkillCount ?? 0)}; skillMasteringProgressed={responses.Sum(x => x.SkillProgression?.MasteringProgressedCount ?? 0)}; skillReadback=true; kia={prepared.Count(x => x.Request.Died)}; idempotency={batchKey}; durableLedger=true; careerLedgerAdmitted={Bool(careerLedgerResult.Admitted)}; careerLedgerCommitted={Bool(careerLedgerResult.Committed)}; careerLedgerReplay={Bool(careerLedgerResult.IdempotentReplay)}; careerLedgerAdded={careerLedgerResult.AddedEntryCount}; careerLedgerExisting={careerLedgerResult.ExistingEntryCount}; careerAggregateMutation=false; careerXpCommitActive=true; careerXpAppliedCredits={careerXpAppliedCredits}; careerXpDeferredCredits={careerXpDeferredCredits}; careerXpCommitted={careerXpCommitted}; careerLevelUps={careerLevelUps}; careerXpCoverage={VanguardOperatorCareerXpCommitPolicy.CoverageBoundary}; raidSalaryInvoices={raidSalaryInvoices.Count}; raidSalaryCreated={raidSalaryInvoices.Count(value => value.InvoiceCreated)}; raidSalaryReused={raidSalaryInvoices.Count(value => !value.InvoiceCreated)}; raidSalaryAmount={raidSalaryInvoices.Sum(value => value.Invoice.Amount)}; totalSessionExperienceClaimed=false; rollback=false; readback=true"));
@@ -659,6 +685,19 @@ public sealed class VanguardRaidOperatorPersistenceService(
         finally
         {
             CommitGate.Release();
+        }
+    }
+
+    private sealed class CommitGateLease : IDisposable
+    {
+        private int released;
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref released, 1) == 0)
+            {
+                CommitGate.Release();
+            }
         }
     }
 

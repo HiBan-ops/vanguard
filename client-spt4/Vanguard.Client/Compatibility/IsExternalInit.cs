@@ -1,5 +1,5 @@
 // Copyright (c) Vanguard.
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: MPL-2.0
 
 #if NETSTANDARD2_1
 

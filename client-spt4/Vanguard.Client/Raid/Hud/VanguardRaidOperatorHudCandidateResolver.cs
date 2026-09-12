@@ -238,7 +238,7 @@ internal sealed class VanguardRaidOperatorHudCandidateResolver
     {
         try
         {
-            return ObserverManifestLoadResult.Completed(apiClient.LoadRaidManifestForProfiles(owners, raidSessionId), owners.Length);
+            return ObserverManifestLoadResult.Completed(apiClient.LoadRaidManifestForProfiles(owners, raidSessionId, reserveDeployment: false), owners.Length);
         }
         catch (Exception exception)
         {

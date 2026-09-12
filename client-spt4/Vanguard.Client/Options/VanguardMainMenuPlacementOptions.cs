@@ -5,13 +5,13 @@ using BepInEx.Configuration;
 using Vanguard.Client.Compatibility;
 #endif
 
-// Responsibility: exposes exactly two F12 controls as a live editor for the currently qualified
+// Responsibility: exposes exactly two F12 controls as a live editor for the active
 // MainMenuPlacementProfiles.jsonc block.
 // Flow: profile resolution loads its persisted X/Y into the two ConfigEntries; user changes apply live
 // and are written back only to that active profile.
 // Authority boundary: these ConfigEntries are an editor surface, not the persistence authority. The
 // JSONC profile remains authoritative across topology changes/restarts. No-profile standalone mode ignores them.
-// Invariant: the F12 editor may update only the active external placement profile; standalone Vanguard menu geometry remains governed by the historical built-in layout.
+// Invariant: the F12 editor may update only the active external placement profile; standalone Vanguard menu geometry remains governed by the built-in layout.
 namespace Vanguard.Client.Options;
 
 internal static class VanguardMainMenuPlacementOptions
@@ -127,7 +127,7 @@ internal static class VanguardMainMenuPlacementOptions
         if (string.IsNullOrWhiteSpace(activeProfileId)
             && !SynchronizeFromResolvedProfile(force: false))
         {
-            // Standalone mode intentionally ignores these editor values and retains the historical
+            // Standalone mode intentionally ignores these editor values and retains the built-in
             // Vanguard-owned two-column menu geometry.
             return;
         }

@@ -19,15 +19,25 @@ public sealed class VanguardOperatorStateService(
     VanguardOperatorProjectionService projectionService,
     VanguardCareerRaidLedgerVerificationService careerLedgerVerificationService,
     VanguardOperatorExperienceReconciliationService experienceReconciliationService,
+    VanguardOperatorCumulativeMigrationService cumulativeMigrationService,
+    VanguardOperatorEnrollmentMigrationService enrollmentMigrationService,
     VanguardOperatorCareerProjectionService careerProjectionService,
     VanguardCanonicalRaidHistoryService canonicalRaidHistoryService,
     VanguardOperatorXpShadowProjectionService xpShadowProjectionService,
-    VanguardOperatorCareerXpCommitService careerXpCommitService)
+    VanguardOperatorCareerXpCommitService careerXpCommitService,
+    VanguardOperatorDeploymentStateService deploymentStateService)
 {
     public async Task<VanguardOperatorStateResponse> GetStateAsync(string profileId)
     {
         var requestedProfileId = profileId;
         var storageProfileId = await store.ResolveStorageProfileIdAsync(profileId);
+
+        // IsDeployed is a live-process interlock, not durable world history. Clear flags inherited from
+        // a dead server process at the normal Off-Raid state boundary so UI eligibility cannot strand
+        // Operators after restart. The deployment service logs and fails closed if this normalization
+        // cannot be committed; the subsequently loaded state then remains conservatively unavailable.
+        _ = await deploymentStateService.EnsureProcessBaselineAsync(storageProfileId);
+
         var limits = await deploymentLimitService.GetLimitsAsync(storageProfileId);
         await contractPoolService.EnsureContractPoolAsync(storageProfileId, limits.PlayerLevel);
         var state = await store.LoadStateAsync(storageProfileId);
@@ -38,6 +48,14 @@ public sealed class VanguardOperatorStateService(
         {
             state = state with { Operators = reconciledOperators };
         }
+        IReadOnlyList<VanguardOperatorProfile> cumulativeMigratedOperators = await cumulativeMigrationService.ConvergeAsync(
+            storageProfileId,
+            state.Operators);
+        if (!ReferenceEquals(cumulativeMigratedOperators, state.Operators))
+        {
+            state = state with { Operators = cumulativeMigratedOperators };
+        }
+        await enrollmentMigrationService.ObserveDryRunAsync(storageProfileId, state.Operators);
         var billing = await billingService.GetBillingSnapshotAsync(storageProfileId);
         var verifiedCareerLedger = await careerLedgerVerificationService.ReadAsync(storageProfileId);
         VanguardOperatorCareerXpSyncResult xpSync = await careerXpCommitService.SynchronizeAsync(

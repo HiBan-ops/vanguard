@@ -7,6 +7,7 @@ using UnityEngine;
 using Vanguard.Client.Diagnostics;
 using Vanguard.Client.Compatibility;
 using Vanguard.Client.Raid.Runtime;
+using Vanguard.Client.Raid.Career;
 using Vanguard.Client.Runtime.Alliance;
 
 // Responsibility: Tracks bullets that pass dangerously close to an Operator so short-lived suppression can influence safety decisions without inventing a confirmed attacker hit.
@@ -283,6 +284,7 @@ internal static class VanguardNearMissSuppressionService
         DateTimeOffset now)
     {
         bool emit;
+        bool startsNewBurst;
         int burstShots;
         lock (Sync)
         {
@@ -299,6 +301,7 @@ internal static class VanguardNearMissSuppressionService
             }
 
             bool sameBurst = now - state.LastObservedAtUtc <= BurstAggregationWindow;
+            startsNewBurst = !sameBurst;
             state.BurstShots = sameBurst ? state.BurstShots + 1 : 1;
             state.Direction = direction;
             state.ClosestMeters = sameBurst ? Math.Min(state.ClosestMeters, lateral) : lateral;
@@ -315,6 +318,15 @@ internal static class VanguardNearMissSuppressionService
             }
             burstShots = state.BurstShots;
         }
+
+        VanguardBehavioralEvidenceTruthProbeService.RecordNearMissShot(
+            record.BotProfileId,
+            shooterProfileId,
+            startsNewBurst,
+            lateral,
+            threatenedOperator,
+            threatenedOwner,
+            now);
 
         if (emit)
         {

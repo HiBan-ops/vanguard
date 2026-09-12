@@ -1,10 +1,18 @@
-Vanguard 0.7.9 public release source manifest
-Source base: released Vanguard 0.7.8
-Release delta: Player/Operator Off-Raid authority convergence, QuickFind, Equipment Builds, Trader/Flea commerce and spatial correctness, parity-gated fast Player reconciliation, Fika Headless persistence, and raid-scoped Operator DogTag identity sanitation
-Functional runtime qualification: PASS on SPT 4.0.13
+﻿Vanguard 0.8.0 source manifest
+Public predecessor: Vanguard 0.7.9
+0.8.0 branch point: Vanguard 0.7.8
+Current status: 0.8.0 release; persistent Operator lifecycle, cumulative schema/marker migration, native Squad Preview, Vanilla/Menu Overhaul hosts, unavailable-state presentation, startup health checks and historical 0.7.8/0.7.9 migration qualification are closed.
 
+Core source contracts:
+- persistent Operator world identity remains independent from transient contract offers and ActiveService membership
+- migration is driven by persisted schema/markers, supports cumulative convergence from supported historical 0.7.x states, and fails closed on unsupported/newer/conflicting shapes
+- renderer projection is read-only and uses persistent VisualIdentity/equipment truth without becoming a second gameplay authority
+- Vanilla and Menu Overhaul preview hosts share the same reconciler while preserving external host ownership boundaries
+- raid/Fika materialization consumes the same persistent Operator identity, progression, medical and equipment truth
+- release/rehire remains non-destructive and preserves the same Operator person/profile/history
+- startup health checks use isolated/sandbox verification and never mutate production data
 
-Canonical public source roots:
+Canonical source roots:
 - client-spt4/Vanguard.Client
 - client-spt4/Vanguard.MoreBotsPrePatch
 - server-spt4/Vanguard.Server
@@ -21,7 +29,7 @@ Local-only file:
 - client-spt4/Directory.Build.props (developer machine paths; do not publish)
 
 Policy:
-- functional subsystem nomenclature only in active/public source
+- 0.7.9 functionality already public is inherited semantically and must not be duplicated in 0.8.0 release notes
+- current 0.8.0 lifecycle/enrollment/VisualIdentity architecture remains authoritative over predecessor branches
 - historical development evidence remains outside the active/public source tree
 - local development pipeline and knowledge base are not part of the public source repository
-- release changes stay bounded to documented qualified contracts; historical evidence and local tooling remain outside the public repository

@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.CompilerServices;
@@ -22,6 +22,7 @@ using Vanguard.Server.Operators.Inventory.Models;
 using Vanguard.Server.Operators.Inventory.Responses;
 using Vanguard.Server.Operators.Raid.Persistence.Models;
 using Vanguard.Server.Operators.Models;
+using Vanguard.Server.Operators.Services;
 using Vanguard.Server.Operators.Storage;
 using Vanguard.Server.Diagnostics;
 
@@ -29,6 +30,8 @@ using Vanguard.Server.Diagnostics;
 // Flow: Enter snapshots the real player profile and exposes one Operator equipment tree through SPT’s native inventory routes; commits validate and copy only allowed changes back; exit restores the player profile and closes the session even after a recoverable commit failure.
 // Authority boundary: the Operator store is persistence authority; SPT profile services are used only to present/restore the player editing surface, and wallet/economy state is never synthesized here.
 // Invariant: enter/commit/exit are profile-locked and recoverable; a successful exit must converge the editing session inactive even when the best-effort direct commit reports a separate failure.
+// Raid skill persistence is monotonic: a stale/lower runtime value can never erase an already-persisted Operator skill baseline or abort unrelated post-raid persistence.
+// Personal PMC dogtags are raid-scoped only: persistent Operator descriptors must never inherit the player dogtag customization or retain the Operator's own Dogtag equipment item across raids.
 
 namespace Vanguard.Server.Operators.Inventory.Services;
 
@@ -39,6 +42,8 @@ public sealed class VanguardOperatorInventoryModeService(
     VanguardSpt40LostOnDeathConfigProvider lostOnDeathConfigProvider,
     PaymentHelper paymentHelper,
     JsonUtil jsonUtil,
+    VanguardOperatorEnrollmentBaselineService enrollmentBaselineService,
+    VanguardOperatorVisualIdentityService visualIdentityService,
     ISptLogger<VanguardOperatorInventoryModeService> logger)
 {
     private readonly ConcurrentDictionary<string, VanguardOperatorInventoryModeSession> activeSessions = new(StringComparer.OrdinalIgnoreCase);
@@ -428,9 +433,9 @@ public sealed class VanguardOperatorInventoryModeService(
 
     /// <summary>
     /// Derives the persistent Operator equipment truth from the raw runtime descriptor.
-    /// The Operator's own PMC dogtag is raid-scoped and must never be written back into
-    /// the persistent Operator profile. Looted dogtags are preserved because only the
-    /// direct Equipment/Dogtag tree is removed.
+    /// The Operator's own PMC dogtag is a raid-scoped corpse artifact and must never be
+    /// written back into the persistent Operator profile.  Looted dogtags are untouched
+    /// because only the direct Equipment/Dogtag tree is removed.
     /// </summary>
     public bool TryPreparePersistentRaidInventorySnapshot(
         VanguardRaidInventoryPreparedSnapshot runtimeSnapshot,
@@ -740,6 +745,10 @@ public sealed class VanguardOperatorInventoryModeService(
             Dictionary<string, JsonObject> persistentMasteringById = BuildSkillMap(persistentMastering);
             int commonProgressed = 0;
             int masteringProgressed = 0;
+            int commonProgressRegressionIgnored = 0;
+            int commonLastAccessRegressionIgnored = 0;
+            int masteringProgressRegressionIgnored = 0;
+            var regressionSamples = new List<string>();
             double commonDelta = 0.0;
             double masteringDelta = 0.0;
 
@@ -775,13 +784,17 @@ public sealed class VanguardOperatorInventoryModeService(
                 {
                     return SkillCommitFailure("persistent_common_last_access_invalid_" + id, storageProfileId, operatorId, prepared, profilePath);
                 }
+                double mergedCommonProgress = Math.Max(persistentProgress, runtimeProgress);
+                long mergedCommonLastAccess = Math.Max(persistentLastAccess, runtimeLastAccess);
                 if (runtimeProgress + tolerance < persistentProgress)
                 {
-                    return SkillCommitFailure("common_progress_regression_" + id, storageProfileId, operatorId, prepared, profilePath);
+                    commonProgressRegressionIgnored++;
+                    AddRegressionSample(regressionSamples, $"common:{id}:progress:persistent={persistentProgress.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture)}>runtime={runtimeProgress.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture)}");
                 }
                 if (runtimeLastAccess < persistentLastAccess)
                 {
-                    return SkillCommitFailure("common_last_access_regression_" + id, storageProfileId, operatorId, prepared, profilePath);
+                    commonLastAccessRegressionIgnored++;
+                    AddRegressionSample(regressionSamples, $"common:{id}:lastAccess:persistent={persistentLastAccess}>runtime={runtimeLastAccess}");
                 }
 
                 double delta = Math.Max(0.0, runtimeProgress - persistentProgress);
@@ -790,8 +803,8 @@ public sealed class VanguardOperatorInventoryModeService(
                     commonProgressed++;
                     commonDelta += delta;
                 }
-                SetJsonNumber(persistentSkill, "Progress", runtimeProgress);
-                SetJsonValue(persistentSkill, "LastAccess", runtimeLastAccess);
+                SetJsonNumber(persistentSkill, "Progress", mergedCommonProgress);
+                SetJsonValue(persistentSkill, "LastAccess", mergedCommonLastAccess);
                 SetJsonNumber(persistentSkill, "PointsEarnedDuringSession", 0.0);
             }
 
@@ -820,9 +833,11 @@ public sealed class VanguardOperatorInventoryModeService(
                 {
                     return SkillCommitFailure("persistent_mastering_progress_invalid_" + id, storageProfileId, operatorId, prepared, profilePath);
                 }
+                double mergedMasteringProgress = Math.Max(persistentProgress, runtimeProgress);
                 if (runtimeProgress + tolerance < persistentProgress)
                 {
-                    return SkillCommitFailure("mastering_progress_regression_" + id, storageProfileId, operatorId, prepared, profilePath);
+                    masteringProgressRegressionIgnored++;
+                    AddRegressionSample(regressionSamples, $"mastering:{id}:progress:persistent={persistentProgress.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture)}>runtime={runtimeProgress.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture)}");
                 }
 
                 double delta = Math.Max(0.0, runtimeProgress - persistentProgress);
@@ -831,7 +846,7 @@ public sealed class VanguardOperatorInventoryModeService(
                     masteringProgressed++;
                     masteringDelta += delta;
                 }
-                SetJsonNumber(persistentSkill, "Progress", runtimeProgress);
+                SetJsonNumber(persistentSkill, "Progress", mergedMasteringProgress);
             }
 
             // Session points are never a durable seed. Reset every persisted Common entry, including
@@ -869,7 +884,7 @@ public sealed class VanguardOperatorInventoryModeService(
                     masteringDelta, prepared.RuntimeFingerprint, readBackFingerprint, profilePath);
             }
 
-            logger.Info(VanguardServerDiagnosticsLog.Present($"[{VanguardBuildVersion.OperatorSkillAndMasteryPersistenceStatusTag}] phase=skill_commit; storage={storageProfileId}; operator={operatorId}; common={prepared.CommonSkillCount}; commonProgressed={commonProgressed}; commonDelta={commonDelta.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture)}; mastering={prepared.MasteringSkillCount}; masteringProgressed={masteringProgressed}; masteringDelta={masteringDelta.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture)}; sessionPointsReset=true; runtimeFingerprint={prepared.RuntimeFingerprint}; persistentFingerprint={readBackFingerprint}; readback=true; forwardOnly=true; tag={VanguardBuildVersion.OperatorSkillAndMasteryPersistenceStatusTag}"));
+            logger.Info(VanguardServerDiagnosticsLog.Present($"[{VanguardBuildVersion.OperatorSkillAndMasteryPersistenceStatusTag}] phase=skill_commit; storage={storageProfileId}; operator={operatorId}; common={prepared.CommonSkillCount}; commonProgressed={commonProgressed}; commonDelta={commonDelta.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture)}; mastering={prepared.MasteringSkillCount}; masteringProgressed={masteringProgressed}; masteringDelta={masteringDelta.ToString("0.####", System.Globalization.CultureInfo.InvariantCulture)}; commonProgressRegressionIgnored={commonProgressRegressionIgnored}; commonLastAccessRegressionIgnored={commonLastAccessRegressionIgnored}; masteringProgressRegressionIgnored={masteringProgressRegressionIgnored}; regressionSamples={(regressionSamples.Count == 0 ? "none" : string.Join(",", regressionSamples))}; monotonicMerge=true; sessionPointsReset=true; runtimeFingerprint={prepared.RuntimeFingerprint}; persistentFingerprint={readBackFingerprint}; readback=true; forwardOnly=true; tag={VanguardBuildVersion.OperatorSkillAndMasteryPersistenceStatusTag}"));
             return new VanguardRaidSkillCommitResult(true, "committed_readback_verified_forward_only", storageProfileId, operatorId,
                 prepared.CommonSkillCount, commonProgressed, commonDelta, prepared.MasteringSkillCount, masteringProgressed,
                 masteringDelta, prepared.RuntimeFingerprint, readBackFingerprint, profilePath);
@@ -923,8 +938,13 @@ public sealed class VanguardOperatorInventoryModeService(
         string requested = requestedProfileId.ToString();
         string storageProfileId = await operatorStore.ResolveStorageProfileIdAsync(requested);
         var operators = await operatorStore.LoadOperatorsAsync(storageProfileId);
+        var activeService = await operatorStore.LoadActiveServiceAsync(storageProfileId);
+        var activeOperatorIds = activeService
+            .Where(record => !string.IsNullOrWhiteSpace(record.OperatorId))
+            .Select(record => record.OperatorId)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
         var summaries = new List<VanguardOperatorInventorySummary>();
-        foreach (VanguardOperatorProfile operatorProfile in operators)
+        foreach (VanguardOperatorProfile operatorProfile in operators.Where(profile => activeOperatorIds.Contains(profile.OperatorId)))
         {
             string displayName = ResolveDisplayName(operatorProfile);
             string profilePath = operatorStore.GetOperatorInventoryProfilePath(storageProfileId, operatorProfile.OperatorId);
@@ -944,13 +964,21 @@ public sealed class VanguardOperatorInventoryModeService(
         };
     }
 
-    public async Task<VanguardOperatorInventorySummary> EnsurePersistentOperatorProfileAsync(MongoId requestedProfileId, string storageProfileId, VanguardOperatorProfile operatorProfile)
+    public async Task<VanguardOperatorInventorySummary> EnsurePersistentOperatorProfileAsync(
+        MongoId requestedProfileId,
+        string storageProfileId,
+        VanguardOperatorProfile operatorProfile,
+        bool firstEnrollment)
     {
         SemaphoreSlim guard = GetProfileLock(storageProfileId, operatorProfile.OperatorId);
         await guard.WaitAsync();
         try
         {
-            SptProfile profile = await LoadOrCreateOperatorProfileAsync(requestedProfileId, storageProfileId, operatorProfile);
+            SptProfile profile = await LoadOrCreateOperatorProfileAsync(
+                requestedProfileId,
+                storageProfileId,
+                operatorProfile,
+                applyNativeEnrollmentFoundationToExistingProfile: firstEnrollment);
             ValidateOperatorProfileOrThrow(profile, storageProfileId, operatorProfile.OperatorId, "hire_foundation");
             string profilePath = operatorStore.GetOperatorInventoryProfilePath(storageProfileId, operatorProfile.OperatorId);
             await SaveProfileToPathAsync(profilePath, profile);
@@ -978,6 +1006,32 @@ public sealed class VanguardOperatorInventoryModeService(
     }
 
     public bool IsActive(MongoId requestedProfileId) => activeSessions.ContainsKey(requestedProfileId.ToString());
+
+    /// <summary>
+    /// Reserves the existing per-Operator inventory mutation locks for a bounded external transaction.
+    /// Acquisition is non-blocking and deterministic to avoid lock-order inversions.
+    /// </summary>
+    public async Task<IDisposable?> TryAcquireExternalMutationLeaseAsync(string storageProfileId, IEnumerable<string> operatorIds)
+    {
+        SemaphoreSlim[] guards = operatorIds
+            .Where(operatorId => !string.IsNullOrWhiteSpace(operatorId))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(operatorId => operatorId, StringComparer.OrdinalIgnoreCase)
+            .Select(operatorId => GetProfileLock(storageProfileId, operatorId))
+            .ToArray();
+        var acquired = new List<SemaphoreSlim>(guards.Length);
+        foreach (SemaphoreSlim guard in guards)
+        {
+            if (!await guard.WaitAsync(0))
+            {
+                for (int index = acquired.Count - 1; index >= 0; index--) acquired[index].Release();
+                return null;
+            }
+            acquired.Add(guard);
+        }
+
+        return new ExternalMutationLease(acquired);
+    }
 
     public IDisposable? BeginPlayerPurchaseProfileAccess(
         MongoId requestedProfileId,
@@ -1587,7 +1641,11 @@ public sealed class VanguardOperatorInventoryModeService(
         return array?.Where(node => node != null).Select(node => (object)node!).ToArray() ?? Array.Empty<object>();
     }
 
-    private async Task<SptProfile> LoadOrCreateOperatorProfileAsync(MongoId requestedProfileId, string storageProfileId, VanguardOperatorProfile operatorProfile)
+    private async Task<SptProfile> LoadOrCreateOperatorProfileAsync(
+        MongoId requestedProfileId,
+        string storageProfileId,
+        VanguardOperatorProfile operatorProfile,
+        bool applyNativeEnrollmentFoundationToExistingProfile = false)
     {
         string profilePath = operatorStore.GetOperatorInventoryProfilePath(storageProfileId, operatorProfile.OperatorId);
         SptProfile? existing = await TryLoadInventoryProfileAsync(profilePath);
@@ -1595,10 +1653,43 @@ public sealed class VanguardOperatorInventoryModeService(
         {
             JsonObject existingNode = ProfileToNode(existing);
             ApplyOperatorIdentity(existingNode, storageProfileId, operatorProfile);
+            if (operatorProfile.VisualIdentity is not null)
+            {
+                visualIdentityService.ValidatePersistentIdentity(operatorProfile.VisualIdentity, operatorProfile.Identity.Side);
+            }
+            ApplyOperatorVisualIdentity(existingNode, operatorProfile);
+
+            bool applyNativeEnrollmentFoundation = applyNativeEnrollmentFoundationToExistingProfile
+                && HasNativeEnrollmentBaseline(operatorProfile);
+            VanguardOperatorEnrollmentBaselineApplication? existingEnrollmentApplication = null;
+            JsonObject existingPmc = GetPmcObject(existingNode);
+            if (applyNativeEnrollmentFoundation)
+            {
+                ResetProgressionAndRuntimeState(existingNode, operatorProfile);
+                ResetNewOperatorPhysicalState(existingPmc);
+                existingEnrollmentApplication = enrollmentBaselineService.ApplyToSkills(GetOrCreateObject(existingPmc, "Skills"), operatorProfile);
+            }
+
             EnsureOperatorProfileHasRequiredRoots(existingNode, storageProfileId, operatorProfile);
             NormalizeCompleteSessionProfileNode(existingNode, storageProfileId, operatorProfile.OperatorId, "persistent_existing");
+            ValidateOperatorVisualIdentity(existingNode, operatorProfile, "persistent_existing");
+            if (applyNativeEnrollmentFoundation && existingEnrollmentApplication is not null)
+            {
+                ValidateNativeEnrollmentFoundation(existingPmc, operatorProfile, existingEnrollmentApplication);
+            }
+
             SptProfile normalized = NodeToProfile(existingNode);
             await SaveProfileToPathAsync(profilePath, normalized);
+            if (operatorProfile.VisualIdentity is not null)
+            {
+                logger.Info(VanguardServerDiagnosticsLog.Present(
+                    $"[{VanguardOperatorVisualIdentityService.StatusTag}] phase=persistent_profile_readback; storage={storageProfileId}; operator={operatorProfile.OperatorId}; seed={operatorProfile.VisualIdentity.SeedFingerprint}; profileCustomizationMatch=true; source=existing; tag={VanguardOperatorVisualIdentityService.StatusTag}"));
+            }
+            if (applyNativeEnrollmentFoundation)
+            {
+                logger.Info(VanguardServerDiagnosticsLog.Present(
+                    $"[VANGUARD_OPERATOR_PROFILE_FOUNDATION_STATUS] first_enrollment_existing_profile_applied storage={storageProfileId}; operator={operatorProfile.OperatorId}; path={profilePath}; source=preexisting-profile; tag={VanguardOperatorEnrollmentBaselineService.StatusTag}"));
+            }
             return normalized;
         }
 
@@ -1615,12 +1706,35 @@ public sealed class VanguardOperatorInventoryModeService(
 
         JsonObject operatorNode = ProfileToNode(playerProfile);
         ApplyOperatorIdentity(operatorNode, storageProfileId, operatorProfile);
+        if (operatorProfile.VisualIdentity is not null)
+        {
+            visualIdentityService.ValidatePersistentIdentity(operatorProfile.VisualIdentity, operatorProfile.Identity.Side);
+        }
+        ApplyOperatorVisualIdentity(operatorNode, operatorProfile);
         ResetProgressionAndRuntimeState(operatorNode, operatorProfile);
-        ReplaceInventory(GetPmcObject(operatorNode), BuildDefaultOperatorInventory(operatorNode, storageProfileId, operatorProfile));
+        JsonObject operatorPmc = GetPmcObject(operatorNode);
+        VanguardOperatorEnrollmentBaselineApplication? createdEnrollmentApplication = null;
+        bool nativeEnrollment = HasNativeEnrollmentBaseline(operatorProfile);
+        if (nativeEnrollment)
+        {
+            ResetNewOperatorPhysicalState(operatorPmc);
+            createdEnrollmentApplication = enrollmentBaselineService.ApplyToSkills(GetOrCreateObject(operatorPmc, "Skills"), operatorProfile);
+        }
+        ReplaceInventory(operatorPmc, BuildDefaultOperatorInventory(operatorNode, storageProfileId, operatorProfile));
 
         NormalizeCompleteSessionProfileNode(operatorNode, storageProfileId, operatorProfile.OperatorId, "persistent_create");
+        ValidateOperatorVisualIdentity(operatorNode, operatorProfile, "persistent_create");
+        if (nativeEnrollment && createdEnrollmentApplication is not null)
+        {
+            ValidateNativeEnrollmentFoundation(operatorPmc, operatorProfile, createdEnrollmentApplication);
+        }
         SptProfile created = NodeToProfile(operatorNode);
         await SaveProfileToPathAsync(profilePath, created);
+        if (operatorProfile.VisualIdentity is not null)
+        {
+            logger.Info(VanguardServerDiagnosticsLog.Present(
+                $"[{VanguardOperatorVisualIdentityService.StatusTag}] phase=persistent_profile_created; storage={storageProfileId}; operator={operatorProfile.OperatorId}; seed={operatorProfile.VisualIdentity.SeedFingerprint}; profileCustomizationMatch=true; source=player-template-replaced; playerCustomizationInherited=false; tag={VanguardOperatorVisualIdentityService.StatusTag}"));
+        }
         logger.Info(VanguardServerDiagnosticsLog.Present($"[VANGUARD_OPERATOR_PROFILE_FOUNDATION_STATUS] created storage={storageProfileId}; operator={operatorProfile.OperatorId}; path={profilePath}; source=player-template; equipment=operator-owned; stash=operator-minimal"));
         return created;
     }
@@ -1934,6 +2048,53 @@ public sealed class VanguardOperatorInventoryModeService(
         SetJsonValue(scavInfo, "Nickname", nickname);
         SetJsonValue(scavInfo, "LowerNickname", lowerNickname);
         SetJsonValue(scavInfo, "MainProfileNickname", displayName);
+    }
+
+    private static void ApplyOperatorVisualIdentity(JsonObject profile, VanguardOperatorProfile operatorProfile)
+    {
+        VanguardOperatorVisualIdentity? visualIdentity = operatorProfile.VisualIdentity;
+        if (visualIdentity is null)
+        {
+            // Existing Operators without persistent visual truth are intentionally left untouched until explicit legacy migration owns the backfill.
+            return;
+        }
+
+        JsonObject pmc = GetPmcObject(profile);
+        JsonObject customization = GetOrCreateObject(pmc, "Customization");
+        SetJsonValue(customization, "Head", visualIdentity.Head);
+        SetJsonValue(customization, "Body", visualIdentity.Body);
+        SetJsonValue(customization, "Feet", visualIdentity.Feet);
+        SetJsonValue(customization, "Hands", visualIdentity.Hands);
+        SetJsonValue(customization, "Voice", visualIdentity.Voice);
+        foreach (string key in customization.Select(property => property.Key).ToArray())
+        {
+            if (string.Equals(key, "Dogtag", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(key, "DogTag", StringComparison.OrdinalIgnoreCase))
+            {
+                customization.Remove(key);
+            }
+        }
+    }
+
+    private static void ValidateOperatorVisualIdentity(JsonObject profile, VanguardOperatorProfile operatorProfile, string context)
+    {
+        VanguardOperatorVisualIdentity? visualIdentity = operatorProfile.VisualIdentity;
+        if (visualIdentity is null)
+        {
+            return;
+        }
+
+        JsonObject pmc = GetPmcObject(profile);
+        JsonObject customization = GetOrCreateObject(pmc, "Customization");
+        bool matches = string.Equals(GetString(customization, "Head"), visualIdentity.Head, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(GetString(customization, "Body"), visualIdentity.Body, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(GetString(customization, "Feet"), visualIdentity.Feet, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(GetString(customization, "Hands"), visualIdentity.Hands, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(GetString(customization, "Voice"), visualIdentity.Voice, StringComparison.OrdinalIgnoreCase);
+        if (!matches)
+        {
+            throw new InvalidOperationException($"operator_visual_identity_profile_mismatch_{context}");
+        }
     }
 
     private static void ResetProgressionAndRuntimeState(JsonObject profile, VanguardOperatorProfile operatorProfile)
@@ -3010,6 +3171,15 @@ public sealed class VanguardOperatorInventoryModeService(
         return Convert.ToHexString(sha256.ComputeHash(Encoding.UTF8.GetBytes(string.Join("\n", lines))));
     }
 
+    private static void AddRegressionSample(List<string> samples, string value)
+    {
+        const int maxSamples = 8;
+        if (samples.Count < maxSamples)
+        {
+            samples.Add(value);
+        }
+    }
+
     private static bool RuntimeSkillIdsPersistedWithSessionReset(
         JsonObject runtimeSkills,
         JsonObject persistedSkills,
@@ -3034,14 +3204,14 @@ public sealed class VanguardOperatorInventoryModeService(
             long expectedLastAccess = ReadNonNegativeInt64OrDefault(runtime, "LastAccess", -1);
             long actualLastAccess = ReadNonNegativeInt64OrDefault(persisted, "LastAccess", -1);
             double sessionPoints = ReadFiniteDoubleOrDefault(persisted, "PointsEarnedDuringSession", double.NaN);
-            if (!double.IsFinite(expected) || !double.IsFinite(actual) || Math.Abs(expected - actual) > tolerance)
+            if (!double.IsFinite(expected) || !double.IsFinite(actual) || actual + tolerance < expected)
             {
-                reason = "common_progress_mismatch_" + id;
+                reason = "common_progress_below_runtime_" + id;
                 return false;
             }
-            if (expectedLastAccess < 0 || actualLastAccess != expectedLastAccess)
+            if (expectedLastAccess < 0 || actualLastAccess < expectedLastAccess)
             {
-                reason = "common_last_access_mismatch_" + id;
+                reason = "common_last_access_below_runtime_" + id;
                 return false;
             }
             if (!double.IsFinite(sessionPoints) || Math.Abs(sessionPoints) > tolerance)
@@ -3072,9 +3242,9 @@ public sealed class VanguardOperatorInventoryModeService(
             }
             double expected = ReadFiniteDoubleOrDefault(runtime, "Progress", double.NaN);
             double actual = ReadFiniteDoubleOrDefault(persisted, "Progress", double.NaN);
-            if (!double.IsFinite(expected) || !double.IsFinite(actual) || Math.Abs(expected - actual) > tolerance)
+            if (!double.IsFinite(expected) || !double.IsFinite(actual) || actual + tolerance < expected)
             {
-                reason = "mastering_progress_mismatch_" + id;
+                reason = "mastering_progress_below_runtime_" + id;
                 return false;
             }
         }
@@ -3200,7 +3370,7 @@ public sealed class VanguardOperatorInventoryModeService(
         // The runtime CompleteProfileDescriptor is the final truth for Operator
         // equipment quick-slots too.  Copy it for survivors; KIA preparation
         // explicitly clears it to mirror SPT death handling.
-        if (TryGetObject(sessionInventory, "fastPanel", out JsonObject? fastPanel) && fastPanel is not null)
+        if (TryGetObject(persistentSessionInventory, "fastPanel", out JsonObject? fastPanel) && fastPanel is not null)
         {
             result[FindPropertyName(result, "fastPanel") ?? "fastPanel"] = fastPanel.DeepClone();
         }
@@ -3388,6 +3558,118 @@ public sealed class VanguardOperatorInventoryModeService(
         EnsureObject(descriptor, "TradersInfo");
 
         logger.Info(VanguardServerDiagnosticsLog.Present($"[VANGUARD_OPERATOR_SESSION_PROFILE_NORMALIZATION_STATUS] normalized context={context}; storage={storageProfileId}; operator={operatorId}; profile={profileId}; inventoryItems={GetItemsArray(GetOrCreateObject(descriptor, "Inventory")).Count}"));
+    }
+
+    private static void ResetNewOperatorPhysicalState(JsonObject descriptor)
+    {
+        JsonObject health = GetOrCreateObject(descriptor, "Health");
+        JsonObject bodyParts = GetOrCreateObject(health, "BodyParts");
+        ResetBodyPart(bodyParts, "Head", 35d);
+        ResetBodyPart(bodyParts, "Chest", 85d);
+        ResetBodyPart(bodyParts, "Stomach", 70d);
+        ResetBodyPart(bodyParts, "LeftArm", 60d);
+        ResetBodyPart(bodyParts, "RightArm", 60d);
+        ResetBodyPart(bodyParts, "LeftLeg", 65d);
+        ResetBodyPart(bodyParts, "RightLeg", 65d);
+        ResetValueInfo(health, "Energy", 100d, 0d, 100d);
+        ResetValueInfo(health, "Hydration", 100d, 0d, 100d);
+        ResetCurrentValue(health, "Temperature", 36.6d);
+        ResetCurrentValue(health, "Poison", 0d);
+        SetJsonNumber(health, "UpdateTime", 0d);
+    }
+
+    private static void ResetBodyPart(JsonObject bodyParts, string name, double maximum)
+    {
+        JsonObject part = GetOrCreateObject(bodyParts, name);
+        ResetValueInfo(part, "Health", maximum, 0d, maximum);
+        string effectsName = FindPropertyName(part, "Effects") ?? "Effects";
+        part[effectsName] = new JsonObject();
+    }
+
+    private static void ResetValueInfo(JsonObject parent, string name, double current, double minimum, double maximum)
+    {
+        JsonObject value = GetOrCreateObject(parent, name);
+        SetJsonNumber(value, "Current", current);
+        SetJsonNumber(value, "Minimum", minimum);
+        SetJsonNumber(value, "Maximum", maximum);
+        EnsureNumber(value, "OverDamageReceivedMultiplier", 0d);
+        EnsureNumber(value, "EnvironmentDamageMultiplier", 0d);
+    }
+
+    private static void ResetCurrentValue(JsonObject parent, string name, double current)
+    {
+        JsonObject value = GetOrCreateObject(parent, name);
+        SetJsonNumber(value, "Current", current);
+    }
+
+    private static bool HasNativeEnrollmentBaseline(VanguardOperatorProfile operatorProfile)
+        => operatorProfile.EnrollmentBaseline is not null
+            && string.Equals(operatorProfile.EnrollmentBaseline.Origin, "native_enrollment", StringComparison.OrdinalIgnoreCase);
+
+    private void ValidateNativeEnrollmentFoundation(
+        JsonObject descriptor,
+        VanguardOperatorProfile operatorProfile,
+        VanguardOperatorEnrollmentBaselineApplication application)
+    {
+        bool physicalCanonical = IsCanonicalNewOperatorPhysicalState(descriptor);
+        bool commonBaselinePresent = application.CommonSkillCount > 0 && application.CommonSeededCount > 0;
+        bool valid = physicalCanonical && commonBaselinePresent;
+        logger.Info(VanguardServerDiagnosticsLog.Present(
+            $"[{VanguardOperatorEnrollmentBaselineService.StatusTag}] phase=profile_foundation; operator={operatorProfile.OperatorId}; policy={operatorProfile.EnrollmentBaseline?.PolicyId ?? "missing"}; physicalCanonical={physicalCanonical.ToString().ToLowerInvariant()}; commonSeen={application.CommonSkillCount}; commonSeeded={application.CommonSeededCount}; masteringSeen={application.MasteringSkillCount}; masteringSeeded={application.MasteringSeededCount}; masteringAuthority={application.MasteringAuthorityResolved.ToString().ToLowerInvariant()}; valid={valid.ToString().ToLowerInvariant()}; tag={VanguardOperatorEnrollmentBaselineService.StatusTag}"));
+
+        if (!valid)
+        {
+            throw new InvalidOperationException(physicalCanonical
+                ? "operator_enrollment_common_baseline_missing"
+                : "operator_enrollment_physical_baseline_invalid");
+        }
+    }
+
+    private static bool IsCanonicalNewOperatorPhysicalState(JsonObject descriptor)
+    {
+        if (!TryGetObject(descriptor, "Health", out JsonObject? health) || health is null
+            || !TryGetObject(health, "BodyParts", out JsonObject? bodyParts) || bodyParts is null)
+        {
+            return false;
+        }
+
+        return IsCanonicalBodyPart(bodyParts, "Head", 35d)
+            && IsCanonicalBodyPart(bodyParts, "Chest", 85d)
+            && IsCanonicalBodyPart(bodyParts, "Stomach", 70d)
+            && IsCanonicalBodyPart(bodyParts, "LeftArm", 60d)
+            && IsCanonicalBodyPart(bodyParts, "RightArm", 60d)
+            && IsCanonicalBodyPart(bodyParts, "LeftLeg", 65d)
+            && IsCanonicalBodyPart(bodyParts, "RightLeg", 65d)
+            && IsCanonicalValueInfo(health, "Energy", 100d, 100d)
+            && IsCanonicalValueInfo(health, "Hydration", 100d, 100d)
+            && TryGetObject(health, "Poison", out JsonObject? poison)
+            && poison is not null
+            && Math.Abs(ReadFiniteDoubleOrDefault(poison, "Current", double.NaN)) < 0.0001d;
+    }
+
+    private static bool IsCanonicalBodyPart(JsonObject bodyParts, string name, double maximum)
+    {
+        if (!TryGetObject(bodyParts, name, out JsonObject? part) || part is null
+            || !IsCanonicalValueInfo(part, "Health", maximum, maximum))
+        {
+            return false;
+        }
+
+        string? effectsName = FindPropertyName(part, "Effects");
+        return effectsName is not null && part[effectsName] is JsonObject effects && effects.Count == 0;
+    }
+
+    private static bool IsCanonicalValueInfo(JsonObject parent, string name, double current, double maximum)
+    {
+        if (!TryGetObject(parent, name, out JsonObject? value) || value is null)
+        {
+            return false;
+        }
+
+        double actualCurrent = ReadFiniteDoubleOrDefault(value, "Current", double.NaN);
+        double actualMaximum = ReadFiniteDoubleOrDefault(value, "Maximum", double.NaN);
+        return Math.Abs(actualCurrent - current) < 0.0001d
+            && Math.Abs(actualMaximum - maximum) < 0.0001d;
     }
 
     private static void EnsureProfileHealth(JsonObject descriptor)
@@ -3682,6 +3964,17 @@ public sealed class VanguardOperatorInventoryModeService(
         }
 
         return false;
+    }
+
+    private sealed class ExternalMutationLease(IReadOnlyList<SemaphoreSlim> guards) : IDisposable
+    {
+        private int released;
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref released, 1) != 0) return;
+            for (int index = guards.Count - 1; index >= 0; index--) guards[index].Release();
+        }
     }
 
     private SemaphoreSlim GetProfileLock(string storageProfileId, string operatorId)

@@ -35,12 +35,17 @@ public sealed class VanguardOperatorLootTargetPolicyService(VanguardOperatorStor
             return Build(false, requestedProfileId, storageProfileId, "loot_target_policy_invalid", operatorId, CorpsesOnly, now);
         }
 
-        IReadOnlyList<Vanguard.Server.Operators.Models.VanguardOperatorProfile> operators = await store.LoadOperatorsAsync(storageProfileId);
-        Vanguard.Server.Operators.Models.VanguardOperatorProfile? existing = operators.FirstOrDefault(item =>
+        VanguardOperatorStorageState state = await store.LoadStateAsync(storageProfileId);
+        Vanguard.Server.Operators.Models.VanguardOperatorProfile? existing = state.Operators.FirstOrDefault(item =>
             string.Equals(item.OperatorId, operatorId, StringComparison.OrdinalIgnoreCase));
         if (existing is null)
         {
             return Build(false, requestedProfileId, storageProfileId, "operator_not_found", operatorId, normalizedPolicy, now);
+        }
+        if (!state.ActiveService.Any(item => string.Equals(item.OperatorId, existing.OperatorId, StringComparison.OrdinalIgnoreCase)))
+        {
+            // World Operators are not player-commandable merely because their persistent identity exists.
+            return Build(false, requestedProfileId, storageProfileId, "operator_not_in_active_service", operatorId, normalizedPolicy, now);
         }
 
         Vanguard.Server.Operators.Models.VanguardOperatorProfile updated = existing with
@@ -48,7 +53,7 @@ public sealed class VanguardOperatorLootTargetPolicyService(VanguardOperatorStor
             LootTargetPolicy = normalizedPolicy,
             UpdatedAtUtc = now
         };
-        Vanguard.Server.Operators.Models.VanguardOperatorProfile[] next = operators
+        Vanguard.Server.Operators.Models.VanguardOperatorProfile[] next = state.Operators
             .Select(item => string.Equals(item.OperatorId, existing.OperatorId, StringComparison.OrdinalIgnoreCase) ? updated : item)
             .ToArray();
         await store.SaveOperatorsAsync(storageProfileId, next);

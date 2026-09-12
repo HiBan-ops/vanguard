@@ -104,6 +104,21 @@ public sealed class VanguardCareerRaidLedgerVerificationService(VanguardOperator
                 }
             }
 
+            if (!IsSuppressionExposureSemanticShapeValid(entry))
+            {
+                semanticRejectedEntryCount++;
+                continue;
+            }
+            if ((entry.SuppressionExposure?.Count ?? 0) > 0)
+            {
+                string expectedSuppressionFingerprint = VanguardCareerRaidLedgerIntegrity.ComputeSuppressionExposureFingerprint(entry.SuppressionExposure!);
+                if (!string.Equals(expectedSuppressionFingerprint, entry.SuppressionExposureFingerprint, StringComparison.OrdinalIgnoreCase))
+                {
+                    integrityRejectedEntryCount++;
+                    continue;
+                }
+            }
+
             accepted.Add(entry);
         }
 
@@ -286,6 +301,51 @@ public sealed class VanguardCareerRaidLedgerVerificationService(VanguardOperator
                 return false;
             }
         }
+        return true;
+    }
+
+    private static bool IsSuppressionExposureSemanticShapeValid(VanguardCareerRaidLedgerEntry entry)
+    {
+        IReadOnlyList<VanguardCareerRaidLedgerSuppressionExposure> exposures = entry.SuppressionExposure ?? Array.Empty<VanguardCareerRaidLedgerSuppressionExposure>();
+        if (exposures.Count == 0)
+        {
+            return string.IsNullOrWhiteSpace(entry.SuppressionExposureFingerprint);
+        }
+        if (string.IsNullOrWhiteSpace(entry.SuppressionExposureFingerprint)
+            || exposures.Count > 512
+            || exposures.GroupBy(value => Normalize(value.EventId), StringComparer.OrdinalIgnoreCase).Any(group => group.Count() != 1)
+            || exposures.GroupBy(value => Normalize(value.HostileShooterProfileId), StringComparer.OrdinalIgnoreCase).Any(group => group.Count() != 1))
+        {
+            return false;
+        }
+
+        foreach (VanguardCareerRaidLedgerSuppressionExposure exposure in exposures)
+        {
+            if (exposure.SchemaVersion != VanguardCareerSuppressionExposureTruthSchema.CurrentVersion
+                || !VanguardCareerRaidLedgerIntegrity.IsCompatibleTruthVersion(exposure.TruthVersion, VanguardCareerSuppressionExposureTruthSchema.TruthVersion)
+                || exposure.FirstObservedAtUtc == default
+                || exposure.LastObservedAtUtc == default
+                || exposure.LastObservedAtUtc < exposure.FirstObservedAtUtc
+                || string.IsNullOrWhiteSpace(exposure.EventId)
+                || string.IsNullOrWhiteSpace(exposure.OperatorProfileId)
+                || string.IsNullOrWhiteSpace(exposure.HostileShooterProfileId)
+                || !string.Equals(exposure.OperatorProfileId, entry.BotProfileId, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(exposure.OperatorProfileId, exposure.HostileShooterProfileId, StringComparison.OrdinalIgnoreCase)
+                || exposure.BurstCount <= 0
+                || exposure.ShotCount <= 0
+                || exposure.BurstCount > exposure.ShotCount
+                || !double.IsFinite(exposure.ClosestMeters)
+                || exposure.ClosestMeters < 0d
+                || exposure.ClosestMeters > 5.0d
+                || (!exposure.ThreatenedOperator && !exposure.ThreatenedOwner)
+                || !string.Equals(exposure.Source, "VanguardNearMissSuppressionService.Register", StringComparison.Ordinal)
+                || !VanguardCareerRaidLedgerIntegrity.IsCompatibleSuppressionExposureEventId(
+                    exposure.EventId, entry.RaidSessionId, exposure.OperatorProfileId, exposure.HostileShooterProfileId))
+            {
+                return false;
+            }
+        }
+
         return true;
     }
 

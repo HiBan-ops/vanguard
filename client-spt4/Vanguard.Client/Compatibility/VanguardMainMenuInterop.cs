@@ -9,8 +9,8 @@ using Vanguard.Client.Diagnostics;
 // Responsibility: declares the small set of third-party main-menu capabilities that Vanguard must
 // cooperate with beyond button positioning (visual-style ownership and visibility/rebuild lifecycle).
 // Flow: the Off-Raid controller asks only for generic capabilities; BepInEx GUIDs remain isolated here.
-// Authority boundary: main-menu POSITION is intentionally not resolved here. Placement belongs to the
-// external MainMenuPlacementProfiles.jsonc engine, while this registry retains only behavior that
+// Authority boundary: main-menu POSITION is intentionally not resolved here. Placement is delegated to
+// the external MainMenuPlacementProfiles.jsonc engine, while this registry retains only behavior that
 // genuinely requires a known interoperability capability.
 // Invariant: no per-mod branch or third-party identity may leak into the generic Off-Raid UI controller.
 namespace Vanguard.Client.Compatibility;
@@ -25,7 +25,7 @@ internal enum VanguardMainMenuInteropCapability
 
 internal static class VanguardMainMenuInterop
 {
-    // Retains the already runtime-validated optional load-order hint for Menu Overhaul. Placement itself
+    // Retains the optional load-order hint for Menu Overhaul. Placement itself
     // is profile-driven and does not depend on this constant.
     public const string PreferredLoadOrderPluginGuid = "com.moxopixel.menuoverhaul";
 

@@ -320,10 +320,24 @@ internal static class VanguardOperatorDirectEquipmentScreenEntry
             return false;
         }
 
-        VanguardClientDiagnosticsLog.Info("VANGUARD_OPERATOR_DIRECT_EQUIPMENT_SCREEN_STATUS", $"inventory_screen_ctor_begin profile={operatorProfileId ?? "<none>"}; screenType={screenType.FullName ?? screenType.Name}");
-        screenController = screenConstructor.Invoke(new[]
-        {
+        object screenSession = session;
+        bool screenSessionProjected = VanguardOperatorInventoryPresentationSession.TryCreate(
             session,
+            operatorProfile,
+            screenConstructor.GetParameters()[0].ParameterType,
+            out object? projectedScreenSession,
+            out string screenSessionProjectionReason);
+        if (screenSessionProjected && projectedScreenSession != null)
+        {
+            screenSession = projectedScreenSession;
+        }
+
+        VanguardClientDiagnosticsLog.Info(
+            "VANGUARD_OPERATOR_DIRECT_EQUIPMENT_SCREEN_STATUS",
+            $"inventory_screen_ctor_begin profile={operatorProfileId ?? "<none>"}; screenType={screenType.FullName ?? screenType.Name}; screenSessionProjected={screenSessionProjected}; projectionReason={screenSessionProjectionReason}; realSessionProfilePreserved=true");
+        object?[] screenArguments =
+        {
+            screenSession,
             healthController,
             inventoryController,
             questController,
@@ -331,7 +345,21 @@ internal static class VanguardOperatorDirectEquipmentScreenEntry
             prestigeController,
             stash,
             inventoryTabGear
-        });
+        };
+        try
+        {
+            screenController = screenConstructor.Invoke(screenArguments);
+        }
+        catch (Exception projectedException) when (screenSessionProjected)
+        {
+            Exception root = Unwrap(projectedException);
+            VanguardClientDiagnosticsLog.Warning(
+                VanguardOperatorInventoryPresentationSession.StatusTag,
+                $"state=constructor_fallback; reason={root.GetType().Name}:{root.Message}; action=retry_real_session; realSessionProfileMutation=false; operatorInventoryPreserved=true");
+            screenArguments[0] = session;
+            screenController = screenConstructor.Invoke(screenArguments);
+            screenSessionProjected = false;
+        }
 
         object? stashId = ResolveMember(stash, "Id") ?? "<none>";
         VanguardClientDiagnosticsLog.Info(

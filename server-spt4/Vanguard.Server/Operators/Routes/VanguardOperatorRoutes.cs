@@ -123,6 +123,10 @@ public sealed class VanguardOperatorRoutes(JsonUtil jsonUtil, VanguardOperatorRo
             "/vanguard/operators/loot-interest/get",
             async (url, info, sessionId, output) => await callbacks.GetOwnerLootInterestAsync(url, info, sessionId)
         ),
+        new RouteAction<VanguardOperatorPreviewVisualRequest>(
+            "/vanguard/operators/preview/visuals",
+            async (url, info, sessionId, output) => await callbacks.GetPreviewVisualsAsync(url, info, sessionId)
+        ),
         new RouteAction<EmptyRequestData>(
             "/vanguard/operators/diagnostics/storage",
             async (url, info, sessionId, output) => await callbacks.GetStorageDiagnosticsAsync(url, info, sessionId)

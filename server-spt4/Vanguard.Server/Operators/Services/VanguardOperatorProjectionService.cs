@@ -19,7 +19,11 @@ public sealed class VanguardOperatorProjectionService(VanguardEftExperienceCurve
         var activeByOperator = activeService.ToDictionary(record => record.OperatorId, StringComparer.OrdinalIgnoreCase);
         var medicalByOperator = medicalRecords.ToDictionary(record => record.OperatorId, StringComparer.OrdinalIgnoreCase);
 
+        // Service projection is roster-scoped. operators.json is the durable world population authority,
+        // while ActiveService is the authority for who is currently under the player's service contract.
+        // Keeping this boundary here prevents released/future world-only Operators from leaking into Active Service UI.
         return operators
+            .Where(operatorProfile => activeByOperator.ContainsKey(operatorProfile.OperatorId))
             .OrderBy(operatorProfile => operatorProfile.Identity.DisplayName, StringComparer.OrdinalIgnoreCase)
             .Select(operatorProfile =>
             {
@@ -91,7 +95,11 @@ public sealed class VanguardOperatorProjectionService(VanguardEftExperienceCurve
         var activeByOperator = activeService.ToDictionary(record => record.OperatorId, StringComparer.OrdinalIgnoreCase);
         var operatorById = operators.ToDictionary(operatorProfile => operatorProfile.OperatorId, StringComparer.OrdinalIgnoreCase);
 
+        // Medical persistence is world-lifecycle truth and survives Release From Service, but the
+        // Field Hospital/Dashboard projection is roster-scoped. Keep released Operators' medical
+        // records durable for rehire without presenting them as current patients.
         return medicalRecords
+            .Where(record => activeByOperator.ContainsKey(record.OperatorId))
             .OrderBy(record => record.DisplayName, StringComparer.OrdinalIgnoreCase)
             .Select(record =>
             {

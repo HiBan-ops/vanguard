@@ -7,6 +7,7 @@ using Vanguard.Server.Operators.Models;
 namespace Vanguard.Server.Operators.Storage;
 
 public sealed record VanguardOperatorStorageState(
+    // Durable Vanguard world population. Membership here does not imply a visible contract or ActiveService membership.
     IReadOnlyList<VanguardOperatorProfile> Operators,
     IReadOnlyList<VanguardActiveServiceRecord> ActiveService,
     IReadOnlyList<VanguardOperatorContractOffer> Contracts,
