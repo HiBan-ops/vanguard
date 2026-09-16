@@ -93,6 +93,7 @@ public sealed class VanguardPlugin
             EnablePatch("VanguardOffRaidMenuPatch", () => new VanguardOffRaidMenuPatch().Enable());
             EnablePatch("VanguardSquadPreviewMenuMinimizePatch", () => new VanguardSquadPreviewMenuMinimizePatch().Enable());
             EnablePatch("VanguardSquadPreviewMainMenuControllerCapturePatch", () => new VanguardSquadPreviewMainMenuControllerCapturePatch().Enable());
+            EnablePatch("VanguardSquadPreviewHideoutVisibilityPatch", () => new VanguardSquadPreviewHideoutVisibilityPatch().Enable());
             EnablePatch("VanguardOperatorInventoryGetProfilesPatch", () => new VanguardOperatorInventoryGetProfilesPatch().Enable());
             EnablePatch("VanguardOperatorInventoryProfileRebindPatch", () => new VanguardOperatorInventoryProfileRebindPatch().Enable());
             EnablePatch("VanguardOperatorContextualRagfairNavigationPatch", () => new VanguardOperatorContextualRagfairNavigationPatch().Enable());

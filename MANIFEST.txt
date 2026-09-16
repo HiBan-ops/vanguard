@@ -1,7 +1,7 @@
-﻿Vanguard 0.8.0 source manifest
-Public predecessor: Vanguard 0.7.9
-0.8.0 branch point: Vanguard 0.7.8
-Current status: 0.8.0 release; persistent Operator lifecycle, cumulative schema/marker migration, native Squad Preview, Vanilla/Menu Overhaul hosts, unavailable-state presentation, startup health checks and historical 0.7.8/0.7.9 migration qualification are closed.
+﻿Vanguard 0.8.1 hotfix source manifest
+Public predecessor: Vanguard 0.8.0
+Functional source base: Vanguard 0.8.0
+Current status: 0.8.1 hotfix line derived directly from public 0.8.0; persistent Operator lifecycle, cumulative schema/marker migration, native Squad Preview, Vanilla/Menu Overhaul hosts, unavailable-state presentation, startup health checks and historical 0.7.8/0.7.9 migration qualification remain inherited. HF-080-001 adds Hideout lifecycle suppression for Squad Preview.
 
 Core source contracts:
 - persistent Operator world identity remains independent from transient contract offers and ActiveService membership
@@ -29,7 +29,7 @@ Local-only file:
 - client-spt4/Directory.Build.props (developer machine paths; do not publish)
 
 Policy:
-- 0.7.9 functionality already public is inherited semantically and must not be duplicated in 0.8.0 release notes
-- current 0.8.0 lifecycle/enrollment/VisualIdentity architecture remains authoritative over predecessor branches
+- public 0.8.0 functionality is inherited semantically by 0.8.1; HF-080-001 is the maintenance delta
+- current public 0.8.0 lifecycle/enrollment/VisualIdentity architecture remains authoritative for unchanged hotfix surfaces
 - historical development evidence remains outside the active/public source tree
 - local development pipeline and knowledge base are not part of the public source repository

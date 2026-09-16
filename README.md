@@ -12,7 +12,7 @@ You build a roster, prepare Operators Off-Raid, deploy with them, survive togeth
 
 Vanguard is designed around Operators as independent combat entities rather than disposable followers waiting for constant player input.
 
-**Current release:** Vanguard **0.8.0** for **SPT 4.0.13**.
+**Current release:** Vanguard **0.8.1** for **SPT 4.0.13**.
 
 ## What Vanguard adds
 
@@ -58,7 +58,7 @@ Opening an Operator inventory creates a persistent Off-Raid authority context ra
 
 ### Main Menu squad preview
 
-Vanguard 0.8.0 can render the selected squad directly in the main-menu presentation using EFT's native character rendering path.
+Vanguard 0.8.1 can render the selected squad directly in the main-menu presentation using EFT's native character rendering path.
 
 The preview is a **read-only projection** of persistent Operator truth:
 
@@ -71,6 +71,8 @@ The preview is a **read-only projection** of persistent Operator truth:
 Both the Vanilla main menu and **Menu Overhaul** are supported. Menu Overhaul retains ownership of its PMC, camera, lights and viewport; Vanguard owns only its Operator presentation and never takes ownership of the Menu Overhaul PMC.
 
 During raid loading the selected squad can remain visible until the effective BattleUI boundary, where Vanguard-owned preview bodies/cameras/lights are cleaned up.
+
+**0.8.1 hotfix:** entering the EFT Hideout now acquires the same screen-lifetime presentation suppression used by weapon-edit/build flows, so Squad Preview Operators do not remain rendered over the Hideout view. Leaving the Hideout releases the lease and restores normal menu eligibility.
 
 ### Main Menu placement profiles
 
@@ -139,7 +141,7 @@ Fika is required only for Fika topologies. The exact versions qualified for the 
 
 ## Requirements
 
-Vanguard 0.8.0 targets **SPT 4.0.13**. The shipping release was qualified against this exact reference stack:
+Vanguard 0.8.1 targets **SPT 4.0.13**. The shipping release was qualified against this exact reference stack:
 
 | Component | Qualified version | Status |
 |---|---:|---|
@@ -167,7 +169,7 @@ Vanguard owns the persistent player-allied Operator squad domain. Mods that also
 
 Compatibility is classified by authority and runtime evidence rather than by “it starts without crashing” alone.
 
-Menu Overhaul coexistence is supported in 0.8.0, including shared main-menu presentation without Vanguard taking ownership of Menu Overhaul's PMC/camera/lights. Career Log button coexistence continues to use placement profiles.
+Menu Overhaul coexistence remains supported in 0.8.1, including shared main-menu presentation without Vanguard taking ownership of Menu Overhaul's PMC/camera/lights. Career Log button coexistence continues to use placement profiles.
 
 The release page may carry additional compatibility notes; the exact core shipping-reference versions are frozen in this README.
 
@@ -248,7 +250,7 @@ These are post-release roadmap goals with no committed delivery date.
 
 ## Building from source
 
-Build Vanguard 0.8.0 against an **SPT 4.0.13** installation. Copy `client-spt4/Directory.Build.props.example` to `client-spt4/Directory.Build.props`, set `SptRoot`, and keep that local file out of commits. The three shipping projects share their release identity through `build/Vanguard.Version.props`.
+Build Vanguard 0.8.1 against an **SPT 4.0.13** installation. Copy `client-spt4/Directory.Build.props.example` to `client-spt4/Directory.Build.props`, set `SptRoot`, and keep that local file out of commits. The three shipping projects share their release identity through `build/Vanguard.Version.props`.
 
 Internal development KBs, handoffs, runtime evidence and private project artifacts are intentionally excluded from the public repository.
 
