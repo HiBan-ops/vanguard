@@ -1,11 +1,14 @@
 #if SPT_CLIENT
 using System;
 using System.Reflection;
+using System.Collections.Generic;
 using EFT;
 using HarmonyLib;
 using SPT.Reflection.Patching;
 using UnityEngine;
 using Vanguard.Client.Runtime.Grenades;
+using Vanguard.Client.Runtime.Audit;
+using Vanguard.Client.Diagnostics;
 
 // Responsibility: Bridges EFT/SPT/Fika callbacks into Grenade Diagnostic Patches for the raid lifecycle patch bridge.
 // Flow: A narrowly-scoped patch observes/intercepts the host callback, translates the event into Vanguard state/service input, then returns control to the original lifecycle.
@@ -14,8 +17,8 @@ using Vanguard.Client.Runtime.Grenades;
 namespace Vanguard.Client.Raid.Patches;
 
 /// <summary>
-/// Passive hooks for grenade subsystem. Every patch only forwards already-available runtime evidence to the
-/// grenade audit service. No prefix suppresses an original method and no argument is mutated.
+/// Passive grenade diagnostics. The separate compatibility classes below are explicitly
+/// mutating only for a currently authorized exact grenade movement lease.
 /// </summary>
 internal sealed class VanguardSainGrenadeThrownDiagnosticPatch : ModulePatch
 {
@@ -237,9 +240,128 @@ internal sealed class VanguardSainGrenadeDecisionDiagnosticPatch : ModulePatch
     private static void PatchPostfix(object __instance, object[] __args)
         => VanguardGrenadeHazardAuditService.ObserveSainDecision(__instance, __args);
 }
+
+/// <summary>
+/// SAIN's BotMoverManualFixedUpdatePatch.PatchPrefix returns false whenever
+/// SAINLayersActive, including while BigBrain's higher-priority grenade layer owns the mover.
+/// Change only that prefix's answer, not EFT's native method or other SAIN combat decisions.
+/// </summary>
+internal sealed class VanguardGrenadeSainFixedUpdateCompatibilityPatch : ModulePatch
+{
+    private const string Tag = "GRENADE_SAIN_FIXED_TICK_BRIDGE";
+    private static readonly HashSet<string> Logged = new(StringComparer.OrdinalIgnoreCase);
+
+    protected override MethodBase GetTargetMethod()
+    {
+        Type type = AccessTools.TypeByName("SAIN.Patches.Movement.BotMoverManualFixedUpdatePatch")
+            ?? throw new InvalidOperationException("SAIN fixed tick compatibility type not found");
+        MethodInfo method = AccessTools.Method(type, "PatchPrefix", new[] { typeof(global::BotMover) })
+            ?? throw new InvalidOperationException("SAIN fixed tick prefix not found");
+        if (!method.IsStatic || method.ReturnType != typeof(bool))
+        {
+            throw new InvalidOperationException("SAIN fixed tick prefix signature mismatch");
+        }
+        VanguardClientDiagnosticsLog.Info(Tag,
+            "GRENADE_SAIN_FIXED_TICK_BRIDGE_BOUND target=SAIN.BotMoverManualFixedUpdatePatch.PatchPrefix; postprocessPrefixResult=true; exactGrenadeBigBrainLeaseOnly=true; nativeEftOriginalRunsOnce=true; sainCombatStateUnchanged=true");
+        return method;
+    }
+
+    [PatchPostfix]
+    private static void PatchPostfix(global::BotMover __0, ref bool __result)
+    {
+        try
+        {
+            if (__result || __0 is null)
+            {
+                return;
+            }
+            BotOwner owner = __0.BotOwner_0;
+            if (owner is null || !VanguardGrenadeEmergencyPhysicalDriver.TryGetExclusiveGrenadeEftTickLease(
+                    owner, DateTimeOffset.UtcNow, out string lease, out long generation))
+            {
+                return;
+            }
+            __result = true; // Permit the normal single EFT ManualFixedUpdate, not a second writer.
+            string key = lease + "|" + generation;
+            lock (Logged)
+            {
+                if (Logged.Count >= 256) Logged.Clear();
+                if (!Logged.Add(key)) return;
+            }
+            VanguardClientDiagnosticsLog.Operational(Tag, () =>
+                $"GRENADE_SAIN_FIXED_TICK_RESTORED botProfile={owner.ProfileId}; lease={lease}; generation={generation}; originalSainPrefixResult=false; modifiedSainPrefixResult=true; priority97AlreadyAcquired=true; nativeEftTickWillRunNormally=true; tag={Tag}");
+        }
+        catch (Exception e)
+        {
+            VanguardClientDiagnosticsLog.Warning(Tag,
+                "GRENADE_SAIN_FIXED_TICK_BRIDGE_FAILED exception=" + e.GetType().Name + ":" + e.Message + "; failOpenSainUnchanged=true");
+        }
+    }
+}
+
+/// <summary>
+/// In an exact emergency EFT lease SAIN's stale BotPathDataManual must not issue
+/// competing translation. It resumes automatically after the lease is released.
+/// This changes no SAIN path contents, enemy/aim/weapon, or controller lifetime.
+/// </summary>
+internal sealed class VanguardGrenadeSainManualPathExclusionPatch : ModulePatch
+{
+    private const string Tag = "GRENADE_SAIN_MANUAL_PATH_EXCLUSION";
+    private static readonly HashSet<string> Logged = new(StringComparer.OrdinalIgnoreCase);
+
+    protected override MethodBase GetTargetMethod()
+    {
+        Type type = AccessTools.TypeByName("SAIN.SAINComponent.Classes.Mover.SAINMoverClass")
+            ?? throw new InvalidOperationException("SAIN mover unavailable");
+        MethodInfo method = AccessTools.Method(type, "CheckTickPath")
+            ?? throw new InvalidOperationException("SAIN CheckTickPath unavailable");
+        if (method.IsStatic || method.ReturnType != typeof(bool) || method.GetParameters().Length != 0)
+        {
+            throw new InvalidOperationException("SAIN CheckTickPath signature mismatch");
+        }
+        VanguardClientDiagnosticsLog.Info(Tag,
+            "GRENADE_SAIN_MANUAL_PATH_EXCLUSION_BOUND hook=SAINMoverClass.CheckTickPath; exclusiveGrenadeEftTickReceiptOnly=true; noPathMutation=true; noTargetMutation=true");
+        return method;
+    }
+
+    [PatchPrefix]
+    private static bool PatchPrefix(object __instance, ref bool __result)
+    {
+        try
+        {
+            object? ownerObj = VanguardOperatorRuntimeAuditReflection.GetPropertyOrField(__instance, "BotOwner")
+                ?? VanguardOperatorRuntimeAuditReflection.GetDeep(__instance, "Bot", "BotOwner");
+            if (ownerObj is not BotOwner owner
+                || !VanguardGrenadeEmergencyPhysicalDriver.TryGetExclusiveGrenadeEftTickLease(
+                    owner, DateTimeOffset.UtcNow, out string lease, out long generation))
+            {
+                return true;
+            }
+            __result = false;
+            string key = lease + "|" + generation;
+            lock (Logged)
+            {
+                if (Logged.Count >= 256) Logged.Clear();
+                if (!Logged.Add(key)) return false;
+            }
+            VanguardClientDiagnosticsLog.Operational(Tag, () =>
+                $"GRENADE_SAIN_MANUAL_PATH_EXCLUDED botProfile={owner.ProfileId}; lease={lease}; generation={generation}; nativeEftPathIsSolePhysicalWriter=true; decisionAndTargetUnchanged=true; tag={Tag}");
+            return false;
+        }
+        catch (Exception e)
+        {
+            VanguardClientDiagnosticsLog.Warning(Tag,
+                "GRENADE_SAIN_MANUAL_PATH_EXCLUSION_FAILED exception=" + e.GetType().Name + ":" + e.Message + "; failOpenSainUnchanged=true");
+            return true;
+        }
+    }
+}
+
 #else
 namespace Vanguard.Client.Raid.Patches;
 internal sealed class VanguardSainGrenadeThrownDiagnosticPatch { public void Enable() { } }
+internal sealed class VanguardGrenadeSainFixedUpdateCompatibilityPatch { public void Enable() { } }
+internal sealed class VanguardGrenadeSainManualPathExclusionPatch { public void Enable() { } }
 internal sealed class VanguardSainGrenadeExplosionDiagnosticPatch { public void Enable() { } }
 internal sealed class VanguardSainGrenadeCollisionDiagnosticPatch { public void Enable() { } }
 internal sealed class VanguardSainGrenadeReactionDiagnosticPatch { public void Enable() { } }

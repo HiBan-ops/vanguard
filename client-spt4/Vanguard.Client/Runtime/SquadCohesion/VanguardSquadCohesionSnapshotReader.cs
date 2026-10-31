@@ -6,7 +6,7 @@ using Vanguard.Client.Raid.Runtime;
 using Vanguard.Client.Runtime.Audit;
 using Vanguard.Client.Runtime.Movement;
 
-// Responsibility: Reads and normalizes live evidence for Squad Cohesion Snapshot Reader in the squad-cohesion analysis.
+// Responsibility: Reads and normalizes live evidence for squad-cohesion analysis.
 // Flow: Live EFT/Fika/Vanguard objects are inspected defensively, normalized into a bounded snapshot, then handed to policy/decision code.
 // Authority boundary: Read-only observer; it does not create missing truth or mutate the game state it inspects.
 // Invariant: Missing/stale evidence degrades explicitly and reader failures must not silently fabricate an actionable state.
@@ -52,6 +52,7 @@ internal sealed partial class VanguardOperatorDecisionSnapshotBuilder
             };
         }
 
+        var ownerPolicy = VanguardMovementAuthorityDoctrine.ForOwner(record.OwnerProfileId);
         Vector3 ownerPosition = ownerAnchor.Position;
         Vector3 ownerForward = ownerAnchor.Forward;
         Vector3 toOperator = operatorPosition - ownerPosition;
@@ -59,9 +60,9 @@ internal sealed partial class VanguardOperatorDecisionSnapshotBuilder
         float verticalDelta = operatorPosition.y - ownerPosition.y;
         float angle = SignedHorizontalAngle(ownerForward, toOperator);
         string sector = Vanguard.Client.Runtime.SquadCohesion.VanguardSquadCohesionDoctrine.SectorFromAngle(angle);
-        string band = Vanguard.Client.Runtime.SquadCohesion.VanguardSquadCohesionDoctrine.BubbleBand(distance);
+        string band = Vanguard.Client.Runtime.SquadCohesion.VanguardSquadCohesionDoctrine.BubbleBand(distance, ownerPolicy.TacticalBubbleMeters);
         var tacticalEnvironment = Vanguard.Client.Runtime.SquadCohesion.VanguardTacticalEnvironmentAnalyzer.Analyze(ownerPosition, ownerForward, operatorPosition, sector);
-        bool inBubble = distance <= Vanguard.Client.Runtime.SquadCohesion.VanguardSquadCohesionDoctrine.TacticalBubbleRadiusMeters;
+        bool inBubble = distance <= ownerPolicy.TacticalBubbleMeters;
         var sameOwnerOperators = VanguardRaidOperatorRuntimeRegistry.GetOperatorsForOwner(record.OwnerProfileId)
             .Where(candidate => candidate.BotOwner is not null && !candidate.BotOwner.IsDead)
             .ToArray();
@@ -115,7 +116,7 @@ internal sealed partial class VanguardOperatorDecisionSnapshotBuilder
             OwnerForward = ownerForward,
             OperatorDistanceToOwner = distance,
             VerticalDelta = verticalDelta,
-            BubbleRadius = Vanguard.Client.Runtime.SquadCohesion.VanguardSquadCohesionDoctrine.TacticalBubbleRadiusMeters,
+            BubbleRadius = ownerPolicy.TacticalBubbleMeters,
             BubbleBand = band,
             InBubble = inBubble,
             Sector = sector,
@@ -174,6 +175,7 @@ internal sealed partial class VanguardOperatorDecisionSnapshotBuilder
             };
         }
 
+        var ownerPolicy = VanguardMovementAuthorityDoctrine.ForOwner(record.OwnerProfileId);
         Vector3 ownerPosition = ownerAnchor.Position;
         Vector3 ownerForward = ownerAnchor.Forward;
         Vector3 toOperator = operatorPosition - ownerPosition;
@@ -181,8 +183,8 @@ internal sealed partial class VanguardOperatorDecisionSnapshotBuilder
         float verticalDelta = operatorPosition.y - ownerPosition.y;
         float angle = SignedHorizontalAngle(ownerForward, toOperator);
         string sector = Vanguard.Client.Runtime.SquadCohesion.VanguardSquadCohesionDoctrine.SectorFromAngle(angle);
-        string band = Vanguard.Client.Runtime.SquadCohesion.VanguardSquadCohesionDoctrine.BubbleBand(distance);
-        bool inBubble = distance <= Vanguard.Client.Runtime.SquadCohesion.VanguardSquadCohesionDoctrine.TacticalBubbleRadiusMeters;
+        string band = Vanguard.Client.Runtime.SquadCohesion.VanguardSquadCohesionDoctrine.BubbleBand(distance, ownerPolicy.TacticalBubbleMeters);
+        bool inBubble = distance <= ownerPolicy.TacticalBubbleMeters;
         bool hasPath = movement.HasPath == true;
         bool useful = Vanguard.Client.Runtime.SquadCohesion.VanguardSquadCohesionDoctrine.IsUsefulSectorPosition(
             inBubble, threat.DirectThreat, sector, cached.SameSectorCount, cached.RearSectorCount, operatorRealSpeed, hasPath);
@@ -195,7 +197,7 @@ internal sealed partial class VanguardOperatorDecisionSnapshotBuilder
             Enabled = true, ReadOnly = true, OwnerKnown = true, OwnerProfileId = record.OwnerProfileId,
             OwnerReliableForActiveMovement = ownerAnchor.ReliableForActiveMovement, OwnerAnchorSource = ownerAnchor.Source,
             OwnerAnchorAgeSeconds = ownerAnchor.AgeSeconds, OwnerPosition = ownerPosition, OwnerForward = ownerForward,
-            OperatorDistanceToOwner = distance, VerticalDelta = verticalDelta, BubbleRadius = cached.BubbleRadius,
+            OperatorDistanceToOwner = distance, VerticalDelta = verticalDelta, BubbleRadius = ownerPolicy.TacticalBubbleMeters,
             BubbleBand = band, InBubble = inBubble, Sector = sector,
             TacticalRole = Vanguard.Client.Runtime.SquadCohesion.VanguardSquadCohesionDoctrine.TacticalRoleForSector(sector),
             TacticalEnvironmentKind = cached.TacticalEnvironmentKind, TacticalPlacementMode = cached.TacticalPlacementMode,

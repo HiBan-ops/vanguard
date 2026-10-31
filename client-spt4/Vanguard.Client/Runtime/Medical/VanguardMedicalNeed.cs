@@ -1,9 +1,9 @@
 #if SPT_CLIENT
 
-// Responsibility: Provides Medical Need support for the medical runtime.
-// Flow: The file encapsulates one bounded piece of the subsystem and exchanges explicit inputs/results with neighboring services instead of relying on hidden cross-system state.
-// Authority boundary: Authority remains with the owning subsystem and any external EFT/SPT/Fika/SAIN component explicitly referenced by its call path.
-// Invariant: Behavior stays scoped to the current profile/raid/process contract and preserves existing safety and compatibility boundaries.
+// Responsibility: Define stable medical need categories and the roles assigned to candidate treatments.
+// Flow: Represent bleed, injury, healing and surgery needs as distinct enum values consumed by medical selection.
+// Authority boundary: These enums are vocabulary for other components and do not initiate treatment or own health state.
+// Invariant: Explicit medical need and capability role discriminants remain unchanged for existing consumers.
 namespace Vanguard.Client.Runtime.Medical;
 
 internal enum VanguardMedicalNeed

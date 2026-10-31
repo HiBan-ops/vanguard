@@ -12,10 +12,10 @@ using Vanguard.Client.Diagnostics;
 using Vanguard.Client.Runtime.Integrations.MoreBots;
 using Vanguard.Client.Runtime.Movement;
 
-// Responsibility: Provides Return Movement Big Brain Bootstrap support for the movement/cohesion runtime.
-// Flow: The file encapsulates one bounded piece of the subsystem and exchanges explicit inputs/results with neighboring services instead of relying on hidden cross-system state.
-// Authority boundary: Authority remains with the owning subsystem and any external EFT/SPT/Fika/SAIN component explicitly referenced by its call path.
-// Invariant: Behavior stays scoped to the current profile/raid/process contract and preserves existing safety and compatibility boundaries.
+// Responsibility: Register the Vanguard return-movement layer with BigBrain and protect Operator-specific custom-layer registration.
+// Flow: Install the one-time authority guard, filter existing and future Operator-role registrations, and add VanguardReturnMovementLayer.
+// Authority boundary: BigBrain owns layer execution; the guard restricts Operator roles without replacing native layers or SAIN behavior.
+// Invariant: Operator role filtering preserves non-Operator roles; failure to install the guard does not prevent Vanguard layer registration.
 namespace Vanguard.Client.Runtime.Movement.Brain;
 
 internal static class VanguardReturnMovementBigBrainBootstrap

@@ -663,6 +663,28 @@ internal static class VanguardInteriorSecurityPlanner
         return false;
     }
 
+    public static bool ForgetRuntimePresence(string? botProfileId)
+    {
+        string bot = Normalize(botProfileId);
+        if (string.IsNullOrWhiteSpace(bot))
+        {
+            return false;
+        }
+
+        bool removed;
+        lock (Sync)
+        {
+            removed = AssignmentByBot.Remove(bot);
+            foreach (string retryKey in AssignmentRetryAfterByKey.Keys
+                .Where(key => key.StartsWith(bot + "|", StringComparison.OrdinalIgnoreCase))
+                .ToArray())
+            {
+                AssignmentRetryAfterByKey.Remove(retryKey);
+            }
+        }
+        return removed;
+    }
+
     public static bool InvalidateAssignment(string? botProfileId, DateTimeOffset now, string reason)
     {
         string bot = Normalize(botProfileId);

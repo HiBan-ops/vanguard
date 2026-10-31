@@ -5,10 +5,10 @@ using Vanguard.Client.Runtime.Decision;
 using Vanguard.Client.Runtime.Medical;
 using Vanguard.Client.Runtime.Execution;
 
-// Responsibility: Provides Medical Plan Intent Producer support for the intent production pipeline.
-// Flow: The file encapsulates one bounded piece of the subsystem and exchanges explicit inputs/results with neighboring services instead of relying on hidden cross-system state.
-// Authority boundary: Authority remains with the owning subsystem and any external EFT/SPT/Fika/SAIN component explicitly referenced by its call path.
-// Invariant: Behavior stays scoped to the current profile/raid/process contract and preserves existing safety and compatibility boundaries.
+// Responsibility: Convert the medical plan snapshot into scored observational or actionable medical intent candidates.
+// Flow: Respect combat quieting and mobile-sidecar policy, evaluate plan readiness and map the next medical step to a candidate.
+// Authority boundary: Medical plan and primary execution policies own admissibility; intent generation does not execute item use or surgery.
+// Invariant: Unreadable plans yield an invalid observation and quiet-under-combat gating prevents unqualified medical actions.
 namespace Vanguard.Client.Runtime.Intents;
 
 internal sealed class VanguardMedicalPlanIntentProducer : IVanguardIntentProducer

@@ -29,6 +29,8 @@ internal static class VanguardOperatorDecisionSnapshotService
     private static readonly Dictionary<string, OperatorDecisionSnapshot> LatestByBotProfileId = new(StringComparer.OrdinalIgnoreCase);
     private static volatile OperatorDecisionSnapshot[] latestSnapshots = Array.Empty<OperatorDecisionSnapshot>();
     private static readonly VanguardOperatorDecisionSnapshotBuilder Builder = new();
+    private static readonly TimeSpan CoreSnapshotInterval = TimeSpan.FromSeconds(1.0d);
+    private static readonly TimeSpan CoreSnapshotFreshnessLimit = TimeSpan.FromSeconds(2.0d);
     private static DateTimeOffset lastSnapshotAtUtc = DateTimeOffset.MinValue;
     private static int nextOwnerIndex;
     private static readonly Dictionary<string, int> NextBotIndexByOwner = new(StringComparer.OrdinalIgnoreCase);
@@ -54,6 +56,31 @@ internal static class VanguardOperatorDecisionSnapshotService
             $"decision snapshot runtime state reset reason={reason}; readOnly=true");
     }
 
+    public static void ForgetRuntimePresence(string? botProfileId, string reason)
+    {
+        if (string.IsNullOrWhiteSpace(botProfileId))
+        {
+            return;
+        }
+
+        string key = botProfileId.Trim();
+        bool latestRemoved;
+        bool logStateRemoved;
+        lock (Sync)
+        {
+            latestRemoved = LatestByBotProfileId.Remove(key);
+            logStateRemoved = LastByBotProfileId.Remove(key);
+            latestSnapshots = latestSnapshots
+                .Where(snapshot => snapshot != null && !string.Equals(snapshot.BotProfileId, key, StringComparison.OrdinalIgnoreCase))
+                .ToArray();
+        }
+
+        Builder.ForgetRuntimePresence(key);
+        VanguardClientDiagnosticsLog.Info(
+            VanguardBuildVersion.OperatorDecisionSnapshotStatusTag,
+            $"decision snapshot runtime presence forgotten botProfile={key}; reason={reason}; latestRemoved={latestRemoved}; logStateRemoved={logStateRemoved}; staleSnapshotCarryForward=false");
+    }
+
     public static IReadOnlyList<OperatorDecisionSnapshot> GetLatestSnapshots() => latestSnapshots;
 
     public static bool TryGetLatestSnapshot(string botProfileId, out OperatorDecisionSnapshot snapshot)
@@ -69,6 +96,30 @@ internal static class VanguardOperatorDecisionSnapshotService
 
         snapshot = OperatorDecisionSnapshot.Empty;
         return false;
+    }
+
+    public static bool IsFresh(OperatorDecisionSnapshot snapshot, DateTimeOffset now, out string reason)
+    {
+        if (snapshot == null || snapshot.CapturedAtUtc == DateTimeOffset.MinValue)
+        {
+            reason = "decision_snapshot_missing_capture_time";
+            return false;
+        }
+
+        TimeSpan age = now - snapshot.CapturedAtUtc;
+        if (age < TimeSpan.Zero)
+        {
+            reason = "decision_snapshot_from_future";
+            return false;
+        }
+        if (age > CoreSnapshotFreshnessLimit)
+        {
+            reason = "decision_snapshot_stale:age=" + age.TotalSeconds.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture);
+            return false;
+        }
+
+        reason = "ok";
+        return true;
     }
 
     public static void Tick()
@@ -89,14 +140,13 @@ internal static class VanguardOperatorDecisionSnapshotService
         // Vanguard: snapshots are a core runtime dependency of the scheduler, awareness,
         // medical and cohesion systems. Diagnostic switches only control log emission.
         bool auditEnabled = VanguardOperatorRuntimeAuditSyncService.EffectiveEnabled;
-        bool activeMobileMedicalEnabled = VanguardOperatorRuntimeAuditOptions.GetFirstActiveMobileMedicalLeaseEnabled();
         bool snapshotLogsEnabled = auditEnabled && VanguardOperatorRuntimeAuditOptions.GetDecisionSnapshotLogEnabled();
         bool intentDryRunEnabled = auditEnabled && VanguardOperatorRuntimeAuditOptions.GetIntentDryRunEnabled();
         bool threatScannerLogsEnabled = auditEnabled && VanguardOperatorRuntimeAuditOptions.GetThreatScannerDryRunEnabled();
         bool runtimeDecisionSnapshotsEnabled = true;
 
         var now = DateTimeOffset.UtcNow;
-        if (now - lastSnapshotAtUtc < TimeSpan.FromSeconds(VanguardOperatorRuntimeAuditOptions.GetSnapshotIntervalSeconds()))
+        if (now - lastSnapshotAtUtc < CoreSnapshotInterval)
         {
             return;
         }
@@ -107,7 +157,7 @@ internal static class VanguardOperatorDecisionSnapshotService
             bootLogged = true;
             VanguardClientDiagnosticsLog.Info(
                 VanguardBuildVersion.OperatorDecisionSnapshotStatusTag,
-                $"VANGUARD_OPERATOR_DECISION_SNAPSHOT_BOOT enabled=true; readOnly=true; authority=headless_or_host; postSpawnOnly=true; headless={VanguardFikaCompat.IsHeadless}; host={VanguardFikaCompat.IsHost}; build={VanguardBuildVersion.BuildLabel}; snapshotLogs={snapshotLogsEnabled}; intentDryRun={intentDryRunEnabled}; threatScannerRuntime=true; threatScannerLogs={threatScannerLogsEnabled}; runtimeDecisionSnapshots={runtimeDecisionSnapshotsEnabled}; firstActiveMobileMedicalLease={activeMobileMedicalEnabled}; verboseTransitions={VanguardOperatorRuntimeAuditOptions.GetVerboseTransitionLogEnabled()}");
+                $"VANGUARD_OPERATOR_DECISION_SNAPSHOT_BOOT enabled=true; readOnly=true; authority=headless_or_host; postSpawnOnly=true; headless={VanguardFikaCompat.IsHeadless}; host={VanguardFikaCompat.IsHost}; build={VanguardBuildVersion.BuildLabel}; snapshotLogs={snapshotLogsEnabled}; intentDryRun={intentDryRunEnabled}; threatScannerRuntime=true; threatScannerLogs={threatScannerLogsEnabled}; runtimeDecisionSnapshots={runtimeDecisionSnapshotsEnabled}; coreSnapshotIntervalSeconds={CoreSnapshotInterval.TotalSeconds:0.00}; coreSnapshotFreshnessSeconds={CoreSnapshotFreshnessLimit.TotalSeconds:0.00}; auditSnapshotIntervalSeconds={VanguardOperatorRuntimeAuditOptions.GetSnapshotIntervalSeconds():0.00}; firstActiveMobileMedicalLease=player_scoped_owner_profile_id; verboseTransitions={VanguardOperatorRuntimeAuditOptions.GetVerboseTransitionLogEnabled()}");
         }
 
         var records = VanguardRaidOperatorRuntimeRegistry.GetAllRuntimeOperators();

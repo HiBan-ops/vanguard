@@ -20,7 +20,9 @@ using Vanguard.Client.Runtime.Awareness;
 using Vanguard.Client.Runtime.Combat;
 using Vanguard.Client.Runtime.Medical.Execution;
 using Vanguard.Client.Runtime.Medical;
+using Vanguard.Client.Runtime.Medical.Support;
 using Vanguard.Client.Runtime.Movement;
+using Vanguard.Client.Runtime.SquadCohesion;
 using Vanguard.Client.Runtime.PostLoot;
 using Vanguard.Client.Runtime.Weapon;
 using Vanguard.Client.Runtime.External;
@@ -45,6 +47,18 @@ internal static class VanguardRaidOperatorController
     private static bool manifestPrimed;
     private static bool spawnQueued;
     private static bool spawnRunning;
+    private static bool postPersistenceRuntimeTeardownApplied;
+
+    public static bool IsPostPersistenceRuntimeTeardownApplied
+    {
+        get
+        {
+            lock (Sync)
+            {
+                return postPersistenceRuntimeTeardownApplied;
+            }
+        }
+    }
 
     /// <summary>
     /// Resets raid-scoped spawn controller latches before a new PMC raid is primed.
@@ -62,6 +76,7 @@ internal static class VanguardRaidOperatorController
             manifestPrimed = false;
             spawnQueued = false;
             spawnRunning = false;
+            postPersistenceRuntimeTeardownApplied = false;
         }
 
         VanguardRaidOperatorSpawnService.ResetStaticCachesForRaidLifecycle(source);
@@ -72,10 +87,16 @@ internal static class VanguardRaidOperatorController
         VanguardOperatorRuntimeAuditSyncService.ResetForRaidLifecycle(source);
         VanguardRuntimeSettingsAuthorityResolver.ResetForRaidLifecycle(source);
         VanguardOperatorDecisionSnapshotService.ResetForRaidLifecycle(source);
+        VanguardSquadMedicalSupportBoard.ResetForRaidLifecycle(source);
+        VanguardMedicSupplyDropExecutor.ResetForRaidLifecycle(source);
         VanguardFikaHudTelemetryService.ResetForRaidLifecycle(source);
         VanguardSainAutonomousExtractGuardService.ResetForRaidLifecycle(source);
         Vanguard.Client.Raid.Patches.VanguardFikaOperatorDogtagGuardPatch.ResetForRaidLifecycle(source);
         VanguardOperatorIntentDryRunService.ResetForRaidLifecycle(source);
+        AltDevelopMovementService.ResetForRaidLifecycle(source);
+        DirectCommitMovementService.ResetForRaidLifecycle(source);
+        SearchTranslationGateBridge.ResetForRaidLifecycle(source);
+        TacticalCoordinationRaidLifecycleService.ResetForRaidLifecycle(source);
         VanguardMainIntentScheduler.ResetForRaidLifecycle(source);
         VanguardMobileMedicalLeaseExecutor.ResetForRaidLifecycle(source);
         VanguardHardReturnMovementExecutor.ResetForRaidLifecycle(source);
@@ -117,6 +138,59 @@ internal static class VanguardRaidOperatorController
         VanguardClientDiagnosticsLog.Info(
             VanguardBuildVersion.RaidSpawnStatusTag,
             $"spawn controller reset source={source}; manifestPrimed=false; spawnQueued=false; spawnRunning=false");
+#endif
+    }
+
+
+    /// <summary>
+    /// Seals the raid-scoped runtime immediately after the stop boundary has attempted persistence,
+    /// while EFT/Fika still owns live raid objects. This is intentionally narrower than a new-raid reset:
+    /// persistence/Career dedupe state is preserved so duplicate Stop surfaces remain idempotent.
+    /// </summary>
+    public static void ReleaseRuntimeAfterPersistenceAtRaidStop(string source)
+    {
+#if SPT_CLIENT
+        bool shouldTeardown;
+        lock (Sync)
+        {
+            shouldTeardown = !postPersistenceRuntimeTeardownApplied;
+            if (shouldTeardown)
+            {
+                postPersistenceRuntimeTeardownApplied = true;
+                manifestPrimed = false;
+                spawnQueued = false;
+                spawnRunning = false;
+            }
+        }
+
+        if (!shouldTeardown)
+        {
+            VanguardClientDiagnosticsLog.Info(
+                VanguardBuildVersion.RaidSpawnStatusTag,
+                $"raid runtime stop teardown skipped source={source}; reason=already_applied; persistenceStatePreserved=true");
+            return;
+        }
+
+        string reason = "raid_stop_after_persistence:" + (string.IsNullOrWhiteSpace(source) ? "unknown" : source.Trim());
+
+        // Stop-time ordering is deliberate: retire exact physical TC leases while the old BotOwner/SAIN
+        // objects are still live, then clear bridge/planning/scheduler truth, then invalidate snapshot and
+        // runtime identity surfaces so a late Unity Update cannot reconstruct the retired raid.
+        AltDevelopMovementService.ResetForRaidLifecycle(reason);
+        DirectCommitMovementService.ResetForRaidLifecycle(reason);
+        SearchTranslationGateBridge.ResetForRaidLifecycle(reason);
+        TacticalCoordinationRaidLifecycleService.ResetForRaidLifecycle(reason);
+        VanguardMainIntentScheduler.ResetForRaidLifecycle(reason);
+        VanguardOperatorDecisionSnapshotService.ResetForRaidLifecycle(reason);
+        VanguardSquadMedicalSupportBoard.ResetForRaidLifecycle(reason);
+        VanguardMedicSupplyDropExecutor.ResetForRaidLifecycle(reason);
+        VanguardOperatorIntentDryRunService.ResetForRaidLifecycle(reason);
+        VanguardRaidOperatorRuntimeRegistry.Reset(reason);
+        VanguardFriendlyIdentityRegistry.Reset(reason);
+
+        VanguardClientDiagnosticsLog.Info(
+            VanguardBuildVersion.RaidSpawnStatusTag,
+            $"raid runtime stop teardown completed source={source}; persistenceStatePreserved=true; careerStopEvidencePreserved=true; tcPhysicalReleased=true; tcPlanningCleared=true; schedulerCleared=true; snapshotsCleared=true; runtimeRegistryCleared=true; staleRaidReactivation=false");
 #endif
     }
 
@@ -189,9 +263,22 @@ internal static class VanguardRaidOperatorController
     public static void QueueSpawn(string source)
     {
 #if SPT_CLIENT
+        bool accepted;
         lock (Sync)
         {
-            spawnQueued = true;
+            accepted = !postPersistenceRuntimeTeardownApplied;
+            if (accepted)
+            {
+                spawnQueued = true;
+            }
+        }
+
+        if (!accepted)
+        {
+            VanguardClientDiagnosticsLog.Info(
+                "VANGUARD_RAID_SPAWN_STATUS",
+                $"spawn queue ignored source={source}; reason=raid_runtime_sealed_after_persistence");
+            return;
         }
 
         VanguardClientDiagnosticsLog.Info("VANGUARD_RAID_SPAWN_STATUS", $"spawn queued source={source}");
@@ -227,9 +314,25 @@ internal static class VanguardRaidOperatorController
     {
         try
         {
+            if (IsPostPersistenceRuntimeTeardownApplied)
+            {
+                VanguardClientDiagnosticsLog.Info(
+                    "VANGUARD_RAID_SPAWN_STATUS",
+                    "spawn aborted reason=raid_runtime_sealed_after_persistence stage=before_lazy_prime");
+                return;
+            }
+
             if (!manifestPrimed)
             {
                 PrimeFromRaidPlayers("spawn_lazy_prime");
+            }
+
+            if (IsPostPersistenceRuntimeTeardownApplied)
+            {
+                VanguardClientDiagnosticsLog.Info(
+                    "VANGUARD_RAID_SPAWN_STATUS",
+                    "spawn aborted reason=raid_runtime_sealed_after_persistence stage=before_spawn_service");
+                return;
             }
 
             if (context is null)

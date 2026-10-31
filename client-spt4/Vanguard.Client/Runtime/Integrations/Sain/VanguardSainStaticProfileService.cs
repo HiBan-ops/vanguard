@@ -168,6 +168,35 @@ internal static class VanguardSainStaticProfileService
         }
     }
 
+    public static bool ForgetRuntimePresence(string? botProfileId, BotOwner? exactBotOwner, string reason)
+    {
+        if (string.IsNullOrWhiteSpace(botProfileId) || exactBotOwner == null)
+        {
+            return false;
+        }
+
+        string key = botProfileId.Trim();
+        bool removed = false;
+        lock (Sync)
+        {
+            if (StateByBotProfileId.TryGetValue(key, out OperatorState? state)
+                && state != null
+                && ReferenceEquals(state.BotOwner, exactBotOwner))
+            {
+                StateByBotProfileId.Remove(key);
+                removed = true;
+            }
+        }
+
+        if (removed)
+        {
+            VanguardClientDiagnosticsLog.Info(
+                VanguardSainStaticProfilePolicy.StatusTag,
+                $"VANGUARD_SAIN_PERSONA_RUNTIME_PRESENCE_FORGOTTEN botProfile={Safe(key)}; reason={Safe(reason)}; exactBotOwner=true; staleOwnerReference=false; futureIncarnationRequiresFreshRegister=true");
+        }
+        return removed;
+    }
+
     public static bool TryEnforceRuntimeSearchTiming(object? sainInfo, string source, out string summary)
     {
         summary = "not_vanguard_operator";

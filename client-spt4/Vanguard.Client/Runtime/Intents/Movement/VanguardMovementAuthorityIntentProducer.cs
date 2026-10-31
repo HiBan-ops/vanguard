@@ -4,10 +4,10 @@ using System.Collections.Generic;
 using Vanguard.Client.Runtime.Decision;
 using Vanguard.Client.Runtime.Movement;
 
-// Responsibility: Provides Movement Authority Intent Producer support for the intent production pipeline.
-// Flow: The file encapsulates one bounded piece of the subsystem and exchanges explicit inputs/results with neighboring services instead of relying on hidden cross-system state.
-// Authority boundary: Authority remains with the owning subsystem and any external EFT/SPT/Fika/SAIN component explicitly referenced by its call path.
-// Invariant: Behavior stays scoped to the current profile/raid/process contract and preserves existing safety and compatibility boundaries.
+// Responsibility: Convert movement-authority broker plans into candidate intents for Operator arbitration.
+// Flow: Inspect the broker request kind, owner distance and cohesion limits before projecting the corresponding movement intent.
+// Authority boundary: Movement policy and broker contracts supply authority; this producer does not create a live movement lease.
+// Invariant: Dead Operators or disabled movement authority produce no movement candidate.
 namespace Vanguard.Client.Runtime.Intents;
 
 internal sealed class VanguardMovementAuthorityIntentProducer : IVanguardIntentProducer
@@ -23,7 +23,7 @@ internal sealed class VanguardMovementAuthorityIntentProducer : IVanguardIntentP
         var broker = authority.BrokerPlan;
         string request = broker.Contract.RequestKind;
         float distance = snapshot.SquadCohesion.OperatorDistanceToOwner;
-        bool forcedCatchup = distance >= VanguardMovementAuthorityDoctrine.CombatCohesionForcedCatchupMeters;
+        bool forcedCatchup = distance >= VanguardMovementAuthorityDoctrine.ForOwner(snapshot.OwnerProfileId).CombatCohesionForcedCatchupMeters;
         bool hardCatchup = distance >= VanguardMovementAuthorityDoctrine.CombatCohesionHardReturnMeters;
 
         // The runtime cross-brick regression guard: a physically verified guard position inside the live

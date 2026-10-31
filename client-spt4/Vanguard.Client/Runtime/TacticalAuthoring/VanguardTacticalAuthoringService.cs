@@ -3,6 +3,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using BepInEx.Configuration;
 using Comfort.Common;
 using EFT;
 using Newtonsoft.Json;
@@ -14,8 +15,8 @@ using Vanguard.Client.Diagnostics;
 using Vanguard.Client.Options;
 
 // Responsibility: owns the local tactical-authoring editor state, visualization and live author snapshot produced by the player client.
-// Flow: The player toggles the editor in raid, map data is loaded and edited as zones/slots/access points, each change is validated and saved through the store, and the service renders both the editor UI/world guides and the bounded live author snapshot consumed by raid transport.
-// Authority boundary: authoring describes slots/zones; runtime consumption remains disabled for persisted maps and live execution is mediated by the dedicated raid transport/runtime services.
+// Flow: The player toggles the editor in raid, map data is loaded and edited as HOLD zones/slots plus TC Portal/PassagePath/TacticalAnchor/PoseSlot topology, each change is validated and saved through the store, and the service renders both the editor UI/world guides and the bounded live author snapshot consumed by raid transport.
+// Authority boundary: authoring describes HOLD geometry and TC topology; runtime consumption remains disabled for persisted maps and live execution is mediated by the dedicated raid transport/runtime services.
 // Invariant: the editor is silent off-raid for live exchange, keeps snapshots raid-scoped and never turns unsaved authoring geometry directly into unbounded AI movement authority.
 
 namespace Vanguard.Client.Runtime.TacticalAuthoring;
@@ -30,6 +31,20 @@ internal static class VanguardTacticalAuthoringService
     private const int MaximumZoneNameLength = 64;
     private const string ZoneNamePromptControl = "VanguardTacticalAuthoringZoneName";
 
+    // Draft-only shortcuts are deliberately code-owned rather than F12 settings: they are
+    // transient editor controls, not persistent authoring configuration. KeyboardShortcut
+    // uses Vanguard's existing BepInEx input path and avoids a direct dependency on the
+    // Unity legacy Input module, which is not referenced by the netstandard2.1 client build.
+    private static readonly KeyboardShortcut DraftConfirmShortcut = new(KeyCode.Return);
+    private static readonly KeyboardShortcut DraftConfirmKeypadShortcut = new(KeyCode.KeypadEnter);
+    private static readonly KeyboardShortcut DraftCancelShortcut = new(KeyCode.Escape);
+    private static readonly KeyboardShortcut DraftRadiusIncreaseKeypadShortcut = new(KeyCode.KeypadPlus);
+    private static readonly KeyboardShortcut DraftRadiusIncreaseMainShortcut = new(KeyCode.Equals);
+    private static readonly KeyboardShortcut DraftRadiusIncreaseFallbackShortcut = new(KeyCode.UpArrow, KeyCode.LeftControl);
+    private static readonly KeyboardShortcut DraftRadiusDecreaseKeypadShortcut = new(KeyCode.KeypadMinus);
+    private static readonly KeyboardShortcut DraftRadiusDecreaseMainShortcut = new(KeyCode.Minus);
+    private static readonly KeyboardShortcut DraftRadiusDecreaseFallbackShortcut = new(KeyCode.DownArrow, KeyCode.LeftControl);
+
     private static bool active;
     private static bool dirty;
     private static string activeMapId = string.Empty;
@@ -43,13 +58,15 @@ internal static class VanguardTacticalAuthoringService
     private static bool? headlessRuntime;
     private static string liveSessionId = string.Empty;
     private static long liveRevision;
+    private static string portalValidationSetSignature = string.Empty;
     private static ZoneNamePromptMode zoneNamePromptMode;
     private static string zoneNamePromptText = string.Empty;
     private static string zoneNamePromptZoneId = string.Empty;
     private static PendingZoneCreation? pendingZoneCreation;
+    private static AuthoringMode currentMode = AuthoringMode.Hold;
 
     public static bool IsActive => active;
-    public static bool HasUnsavedChanges => dirty;
+    public static bool HasUnsavedChanges => dirty || VanguardTacticalCoordinationPortalEditor.HasUnsavedChanges;
 
     public static bool TryBuildLiveAuthorSnapshot(out VanguardTacticalAuthoringLiveAuthorSnapshotDto snapshot)
     {
@@ -60,7 +77,46 @@ internal static class VanguardTacticalAuthoringService
             return false;
         }
 
-        mapFile.RuntimeConsumptionEnabled = false;
+        if (currentMode == AuthoringMode.PassagePath || currentMode == AuthoringMode.TacticalAnchor)
+        {
+            // PassagePath and TacticalAnchor/PoseSlot authoring are topology-only. Returning no active author snapshot
+            // makes live sync close any prior HOLD/Portal authoring state instead of leaking movement authority.
+            portalValidationSetSignature = string.Empty;
+            return false;
+        }
+
+        VanguardTacticalAuthoringMapFile liveMap;
+        string selectedZoneId;
+        if (currentMode == AuthoringMode.Portal)
+        {
+            if (!VanguardTacticalCoordinationPortalEditor.TryBuildLiveValidationMap(
+                    player.Position,
+                    activeMapId,
+                    mapFile.MapRevision,
+                    mapFile.EftClientVersion,
+                    out liveMap,
+                    out var validationSetSignature))
+            {
+                portalValidationSetSignature = string.Empty;
+                return false;
+            }
+
+            if (!string.Equals(portalValidationSetSignature, validationSetSignature, StringComparison.Ordinal))
+            {
+                portalValidationSetSignature = validationSetSignature;
+                liveRevision = liveRevision == long.MaxValue ? 1 : Math.Max(1L, liveRevision + 1L);
+                VanguardTacticalAuthoringLivePreviewClientState.Expect(liveSessionId, activeMapId, liveRevision);
+            }
+            selectedZoneId = VanguardTacticalAuthoringLiveValidationContract.PortalValidationZoneId;
+        }
+        else
+        {
+            portalValidationSetSignature = string.Empty;
+            mapFile.RuntimeConsumptionEnabled = false;
+            liveMap = mapFile;
+            selectedZoneId = GetSelectedZone()?.ZoneId ?? string.Empty;
+        }
+
         snapshot = new VanguardTacticalAuthoringLiveAuthorSnapshotDto
         {
             OwnerProfileId = player.ProfileId ?? string.Empty,
@@ -68,8 +124,8 @@ internal static class VanguardTacticalAuthoringService
             MapId = activeMapId,
             Active = true,
             Revision = Math.Max(1L, liveRevision),
-            SelectedZoneId = GetSelectedZone()?.ZoneId ?? string.Empty,
-            MapJson = JsonConvert.SerializeObject(mapFile),
+            SelectedZoneId = selectedZoneId,
+            MapJson = JsonConvert.SerializeObject(liveMap),
             UpdatedAtUtc = DateTimeOffset.UtcNow,
             ClientBuild = VanguardBuildVersion.BuildLabel
         };
@@ -139,12 +195,85 @@ internal static class VanguardTacticalAuthoringService
             return;
         }
 
-        if (zoneNamePromptMode != ZoneNamePromptMode.None)
+        if (zoneNamePromptMode != ZoneNamePromptMode.None || VanguardTacticalCoordinationPortalEditor.HasNamePrompt || VanguardTacticalCoordinationPassagePathEditor.HasNamePrompt || VanguardTacticalCoordinationTacticalAnchorEditor.HasNamePrompt)
         {
-            // The modal text field owns keyboard events through Unity IMGUI. Prompt-local
-            // Enter/Escape/emergency-close handling therefore lives in DrawZoneNamePrompt(),
-            // before GUILayout.TextField can consume the KeyDown event. While the prompt is open,
-            // normal authoring hotkeys stay blocked here so no unrelated mutation can occur.
+            // IMGUI naming prompts own keyboard events. While any authoring domain has an active text
+            // transaction, normal authoring hotkeys stay blocked so no unrelated mutation occurs.
+            return;
+        }
+
+        if (pendingZoneCreation is not null)
+        {
+            UpdatePendingZoneDraft(player);
+            return;
+        }
+
+        if (VanguardTacticalCoordinationPortalEditor.HasPendingPortal)
+        {
+            if (VanguardTacticalCoordinationPortalEditor.UpdatePendingPortal(player, out var portalDraftStatus, out var portalDraftWarning)
+                && !string.IsNullOrWhiteSpace(portalDraftStatus))
+            {
+                SetStatus(portalDraftStatus, portalDraftWarning);
+            }
+            return;
+        }
+
+        if (VanguardTacticalCoordinationPassagePathEditor.HasPendingPath)
+        {
+            if (VanguardTacticalCoordinationPassagePathEditor.UpdatePendingPath(player, out var passageDraftStatus, out var passageDraftWarning)
+                && !string.IsNullOrWhiteSpace(passageDraftStatus))
+            {
+                SetStatus(passageDraftStatus, passageDraftWarning);
+            }
+            return;
+        }
+
+        if (VanguardTacticalCoordinationTacticalAnchorEditor.HasPendingAnchor)
+        {
+            if (VanguardTacticalCoordinationTacticalAnchorEditor.UpdatePendingAnchor(player, out var anchorDraftStatus, out var anchorDraftWarning)
+                && !string.IsNullOrWhiteSpace(anchorDraftStatus))
+            {
+                SetStatus(anchorDraftStatus, anchorDraftWarning);
+            }
+            return;
+        }
+
+        if (VanguardTacticalAuthoringOptions.CycleSlotTypeShortcut.IsDown())
+        {
+            CycleEditorMode();
+            return;
+        }
+
+        if (VanguardTacticalAuthoringOptions.SaveShortcut.IsDown())
+        {
+            Save();
+            return;
+        }
+
+        if (VanguardTacticalAuthoringOptions.ReloadShortcut.IsDown())
+        {
+            Reload(player);
+            return;
+        }
+
+        if (currentMode == AuthoringMode.Portal)
+        {
+            HandlePortalMode(player);
+            _ = world;
+            return;
+        }
+
+        if (currentMode == AuthoringMode.PassagePath)
+        {
+            HandlePassagePathMode(player);
+            _ = world;
+            return;
+        }
+
+        if (currentMode == AuthoringMode.TacticalAnchor)
+        {
+            HandleTacticalAnchorMode(player);
+            _ = world;
             return;
         }
 
@@ -247,55 +376,192 @@ internal static class VanguardTacticalAuthoringService
             return;
         }
 
-        var selectedZone = GetSelectedZone();
-        GUILayout.BeginArea(new Rect(18f, 110f, 760f, 590f), GUI.skin.box);
-        GUILayout.Label($"VANGUARD TACTICAL AUTHORING - map={activeMapId}");
-        GUILayout.Label("AUTHORING DATA remains non-runtime; while this editor is active, the selected zone drives transient headless preview. When closed, saved zones can auto-occupy by owner position if enabled in F12.");
-        GUILayout.Label($"File: {VanguardTacticalAuthoringStore.GetMapPath(activeMapId)}");
-        GUILayout.Label($"Dirty: {dirty} | Slot type: {selectedSlotType} | Zones: {mapFile.Zones.Count} | Auto occupancy outside editor: {VanguardTacticalAuthoringOptions.AutomaticAuthoredZoneOccupancyEnabled}");
-
-        if (selectedZone is null)
+        var modeText = currentMode switch
         {
-            GUILayout.Label("Selected zone: none. Ctrl+Home starts guarded creation at the current player position.");
+            AuthoringMode.Hold => "HOLD",
+            AuthoringMode.Portal => "PORTAL",
+            AuthoringMode.PassagePath => "PASSAGE PATH",
+            _ => "TACTICAL ANCHOR"
+        };
+        var saveState = HasUnsavedChanges ? "MODIFIED" : "SAVED";
+        GUILayout.BeginArea(new Rect(18f, 110f, 620f, 270f), GUI.skin.box);
+        GUILayout.Label($"VANGUARD TACTICAL AUTHORING  |  {modeText}  |  {activeMapId}");
+
+        if (currentMode == AuthoringMode.Hold)
+        {
+            DrawHoldModeGui(saveState);
+        }
+        else if (currentMode == AuthoringMode.Portal)
+        {
+            DrawPortalModeGui(saveState);
+        }
+        else if (currentMode == AuthoringMode.PassagePath)
+        {
+            DrawPassagePathModeGui(saveState);
         }
         else
         {
-            var selectedAccess = GetSelectedAccess(selectedZone);
-            GUILayout.Label($"ZONE NAME: {selectedZone.DisplayZoneName}");
-            GUILayout.Label($"Zone [{selectedZoneIndex + 1}/{mapFile.Zones.Count}] id={selectedZone.ZoneId}");
-            GUILayout.Label($"Building={DisplayOrDash(selectedZone.BuildingId)} | Floor={selectedZone.FloorId} | Y=[{selectedZone.MinY:0.00}, {selectedZone.MaxY:0.00}] | explicitMin={selectedZone.MinYExplicit} | explicitMax={selectedZone.MaxYExplicit}");
-            GUILayout.Label($"Radius={selectedZone.ZoneRadius:0.0}m | CenterDist={GetSelectedZoneCenterDistanceText(selectedZone)} | Slots={selectedZone.Slots.Count} | Accesses={selectedZone.Accesses.Count} | Selected access={selectedAccess?.AccessId ?? "none"}");
-            GUILayout.Label(GetNearestSlotSummary(selectedZone));
-            GUILayout.Label(GetNearestAccessSummary(selectedZone));
+            DrawTacticalAnchorModeGui(saveState);
         }
 
-        GUILayout.Label(VanguardTacticalAuthoringLivePreviewClientState.OverallSummary);
-        GUILayout.Label($"F12 slot template: type={selectedSlotType} | priority={VanguardTacticalAuthoringOptions.Priority} | minSquad={VanguardTacticalAuthoringOptions.MinimumSquadSize} | maxOwner={VanguardTacticalAuthoringOptions.MaximumOwnerDistanceMeters:0.0}m | arc={VanguardTacticalAuthoringOptions.WatchArcDegrees:0}deg");
-        GUILayout.Label($"F12 affinities: role={DisplayOrDash(VanguardTacticalAuthoringOptions.RoleAffinity)} | exclusion={DisplayOrDash(VanguardTacticalAuthoringOptions.MutualExclusionGroup)} | nearbyEdit={VanguardTacticalAuthoringOptions.NearbyEditRadiusMeters:0.0}m");
-        GUILayout.Space(4f);
-        GUILayout.Label("Ctrl+F6 toggle | Ctrl+Home guarded new zone | Ctrl+Shift+Home FORCE nested zone | Ctrl+Shift+N rename");
-        GUILayout.Label("Ctrl+PgDn next zone | Ctrl+M apply F12 building/floor/radius (name preserved)");
-        GUILayout.Label("Ctrl+[ / Ctrl+] floor min/max | Ctrl+PgUp slot type | Ctrl+Insert add slot | Ctrl+U apply F12 slot settings");
-        GUILayout.Label("Ctrl+P recapture nearest slot pos/watch | Ctrl+Delete enable/disable | Ctrl+L link/unlink nearest slot + nearest access");
-        GUILayout.Label("Ctrl+End add access | Ctrl+Down next access | Ctrl+Up recapture selected access");
-        GUILayout.Label("Ctrl+Shift+Delete HARD DELETE nearest slot | Ctrl+Shift+Backspace HARD DELETE selected zone");
-        GUILayout.Label("Ctrl+V revalidate | Ctrl+S save | Ctrl+R reload/undo unsaved deletes | Ctrl+I export invalid/warning report");
         GUILayout.Space(5f);
-        GUILayout.Label("Status: " + lastStatus);
+        GUILayout.Label("Ctrl+PgUp mode  |  Ctrl+S save  |  Ctrl+R reload");
+        GUILayout.Label("STATUS  |  " + CompactHudText(lastStatus, 96));
         GUILayout.EndArea();
         DrawZoneNamePrompt();
+        if (VanguardTacticalCoordinationPortalEditor.DrawNamePrompt(out var portalNameStatus, out var portalNameWarning)
+            && !string.IsNullOrWhiteSpace(portalNameStatus))
+        {
+            SetStatus(portalNameStatus, portalNameWarning);
+        }
+        if (VanguardTacticalCoordinationPassagePathEditor.DrawNamePrompt(out var passageNameStatus, out var passageNameWarning)
+            && !string.IsNullOrWhiteSpace(passageNameStatus))
+        {
+            SetStatus(passageNameStatus, passageNameWarning);
+        }
+        if (VanguardTacticalCoordinationTacticalAnchorEditor.DrawNamePrompt(out var anchorNameStatus, out var anchorNameWarning)
+            && !string.IsNullOrWhiteSpace(anchorNameStatus))
+        {
+            SetStatus(anchorNameStatus, anchorNameWarning);
+        }
         DrawWorldLabels();
     }
 
-    public static void RenderWorld()
+    private static void DrawHoldModeGui(string saveState)
     {
-        if (!active || mapFile is null)
+        if (mapFile is null)
         {
             return;
         }
 
-        var zone = GetSelectedZone();
-        if (zone is null || !CameraClass.Exist)
+        var selectedZone = GetSelectedZone();
+        var totalSlots = mapFile.Zones.Sum(zone => zone.Slots.Count);
+        var occupancyState = VanguardTacticalAuthoringOptions.AutomaticAuthoredZoneOccupancyEnabled ? "AUTO HOLD ON" : "AUTO HOLD OFF";
+        GUILayout.Label($"{saveState}  |  schema {mapFile.SchemaVersion}  |  zones {mapFile.Zones.Count}  |  hold slots {totalSlots}  |  {occupancyState}");
+
+        if (pendingZoneCreation is not null)
+        {
+            GUILayout.Space(4f);
+            GUILayout.Label(pendingZoneCreation.ForcedNested ? "NEW HOLDZONE PREVIEW  |  FORCED/NESTED" : "NEW HOLDZONE PREVIEW  |  GUARDED");
+            GUILayout.Label($"radius {pendingZoneCreation.ZoneRadius:0}m  |  center follows author  |  + / - adjusts 1m");
+            GUILayout.Label("Enter freezes center/radius and opens naming  |  Esc cancels preview");
+        }
+        else if (selectedZone is null)
+        {
+            GUILayout.Space(4f);
+            GUILayout.Label("No HoldZone selected");
+            GUILayout.Label("Ctrl+Home starts a movable HoldZone preview.");
+        }
+        else
+        {
+            GUILayout.Space(4f);
+            GUILayout.Label($"ZONE {selectedZoneIndex + 1}/{mapFile.Zones.Count}  |  {selectedZone.DisplayZoneName}");
+            GUILayout.Label($"{DisplayOrDash(selectedZone.BuildingId)} / {DisplayOrDash(selectedZone.FloorId)}  |  radius {selectedZone.ZoneRadius:0.0}m  |  center {GetSelectedZoneCenterDistanceText(selectedZone)}  |  slots {selectedZone.Slots.Count}");
+            GUILayout.Label(GetCompactNearestHoldSlotSummary(selectedZone));
+        }
+
+        if (mapFile.LegacyPortalCandidates.Count > 0)
+        {
+            GUILayout.Label($"Legacy Portal candidates: {mapFile.LegacyPortalCandidates.Count}  |  review in PORTAL mode");
+        }
+
+        GUILayout.Space(5f);
+        GUILayout.Label("Ctrl+Home preview zone  |  Ctrl+Insert HOLD  |  Ctrl+PgDn next zone  |  Ctrl+Shift+N rename");
+        GUILayout.Label("Ctrl+P recapture nearby HOLD  |  Ctrl+V validate");
+    }
+
+    private static void DrawPortalModeGui(string saveState)
+    {
+        if (mapFile is null || activeWorld?.MainPlayer is not Player player)
+        {
+            return;
+        }
+
+        var unpromoted = VanguardTacticalCoordinationPortalEditor.CountUnpromotedLegacyCandidates(mapFile);
+        GUILayout.Label($"{saveState}  |  Base {VanguardTacticalCoordinationPortalEditor.BasePortalCount} read-only  |  User {VanguardTacticalCoordinationPortalEditor.UserPortalCount}  |  legacy review {unpromoted}");
+        GUILayout.Space(4f);
+        if (VanguardTacticalCoordinationPortalEditor.HasNamePrompt)
+        {
+            GUILayout.Label("PORTAL POSITION FROZEN  |  naming transaction active");
+            GUILayout.Label("Enter creates User Portal  |  Esc resumes movable preview");
+        }
+        else if (VanguardTacticalCoordinationPortalEditor.HasPendingPortal)
+        {
+            GUILayout.Label(VanguardTacticalCoordinationPortalEditor.GetPendingPortalSummary());
+            GUILayout.Label("Move to place  |  Enter freezes and names  |  Esc cancel");
+        }
+        else
+        {
+            GUILayout.Label(VanguardTacticalCoordinationPortalEditor.GetNearestPortalSummary(player.Position));
+            GUILayout.Label("Ctrl+Insert preview Portal  |  Ctrl+End promote nearby legacy candidate");
+            GUILayout.Label("Ctrl+Delete enable/disable User  |  Ctrl+Shift+Delete delete User  |  Ctrl+V revalidate");
+        }
+        GUILayout.Space(4f);
+        GUILayout.Label("BASE is package-owned/read-only. USER changes never modify HOLD data.");
+    }
+
+    private static void DrawPassagePathModeGui(string saveState)
+    {
+        if (activeWorld?.MainPlayer is not Player player)
+        {
+            return;
+        }
+
+        GUILayout.Label($"{saveState}  |  Base {VanguardTacticalCoordinationPortalEditor.BasePassagePathCount} read-only  |  User {VanguardTacticalCoordinationPortalEditor.UserPassagePathCount}");
+        GUILayout.Space(4f);
+        if (VanguardTacticalCoordinationPassagePathEditor.HasNamePrompt)
+        {
+            GUILayout.Label("PASSAGE PATH FROZEN  |  naming transaction active");
+            GUILayout.Label("Enter creates User PassagePath  |  Esc resumes control-point capture");
+        }
+        else if (VanguardTacticalCoordinationPassagePathEditor.HasPendingPath)
+        {
+            GUILayout.Label(VanguardTacticalCoordinationPassagePathEditor.GetPendingPathSummary());
+            GUILayout.Label("Enter add point  |  Ctrl+Insert finish/name  |  Backspace undo  |  Esc cancel");
+        }
+        else
+        {
+            GUILayout.Label(VanguardTacticalCoordinationPassagePathEditor.GetNearestPathSummary(player.Position));
+            GUILayout.Label("Ctrl+Insert start path  |  Ctrl+Delete enable/disable User  |  Ctrl+Shift+Delete delete User");
+            GUILayout.Label("Ctrl+V re-resolve locally; authored control points are never discarded by resolution failure");
+        }
+        GUILayout.Space(4f);
+        GUILayout.Label("PASSAGE PATH is Tactical Coordination topology only. It does not command Operator movement.");
+    }
+
+    private static void DrawTacticalAnchorModeGui(string saveState)
+    {
+        if (activeWorld?.MainPlayer is not Player player)
+        {
+            return;
+        }
+
+        GUILayout.Label($"{saveState}  |  Base {VanguardTacticalCoordinationTacticalAnchorEditor.BaseAnchorCount} read-only  |  User {VanguardTacticalCoordinationTacticalAnchorEditor.UserAnchorCount}  |  User PoseSlots {VanguardTacticalCoordinationTacticalAnchorEditor.UserPoseSlotCount}");
+        GUILayout.Space(4f);
+        if (VanguardTacticalCoordinationTacticalAnchorEditor.HasNamePrompt)
+        {
+            GUILayout.Label("TACTICAL ANCHOR FROZEN  |  naming transaction active");
+            GUILayout.Label("Enter creates User TacticalAnchor  |  Esc resumes movable preview");
+        }
+        else if (VanguardTacticalCoordinationTacticalAnchorEditor.HasPendingAnchor)
+        {
+            GUILayout.Label(VanguardTacticalCoordinationTacticalAnchorEditor.GetPendingAnchorSummary());
+            GUILayout.Label("Move to place  |  + / - radius  |  Enter freeze/name  |  Esc cancel");
+        }
+        else
+        {
+            GUILayout.Label(VanguardTacticalCoordinationTacticalAnchorEditor.GetNearestAnchorSummary(player.Position));
+            GUILayout.Label("Ctrl+Home preview Anchor  |  Ctrl+Insert capture PoseSlot  |  Ctrl+P recapture nearest PoseSlot");
+            GUILayout.Label("Ctrl+Delete enable/disable PoseSlot  |  Ctrl+Shift+Delete delete PoseSlot  |  Ctrl+End enable/disable Anchor");
+            GUILayout.Label("Ctrl+Shift+Backspace delete Anchor  |  Ctrl+V revalidate PoseSlot");
+        }
+        GUILayout.Space(4f);
+        GUILayout.Label("Pose capture stores position + view + physical pose. Ctrl+P enriches an existing PoseSlot in place without changing its id.");
+    }
+
+    public static void RenderWorld()
+    {
+        if (!active || mapFile is null || !CameraClass.Exist)
         {
             return;
         }
@@ -306,27 +572,65 @@ internal static class VanguardTacticalAuthoringService
             return;
         }
 
+        if (currentMode == AuthoringMode.Hold && GetSelectedZone() is null && pendingZoneCreation is null)
+        {
+            return;
+        }
+
         lineMaterial!.SetPass(0);
         GL.PushMatrix();
         GL.Begin(GL.LINES);
         try
         {
-            DrawZoneRing(zone);
-
-            var slotLimit = Math.Min(zone.Slots.Count, MaximumVisualizedSlots);
-            for (var index = 0; index < slotLimit; index++)
+            if (currentMode == AuthoringMode.Portal)
             {
-                DrawSlot(zone.Slots[index]);
-            }
-            for (var index = 0; index < slotLimit; index++)
-            {
-                DrawSlotAccessLink(zone, zone.Slots[index]);
+                VanguardTacticalCoordinationPortalEditor.DrawWorldLines(mapFile);
+                return;
             }
 
-            var accessLimit = Math.Min(zone.Accesses.Count, MaximumVisualizedAccesses);
-            for (var index = 0; index < accessLimit; index++)
+            if (currentMode == AuthoringMode.PassagePath)
             {
-                DrawAccess(zone.Accesses[index], index == selectedAccessIndex);
+                if (activeWorld?.MainPlayer is Player passageAuthor)
+                {
+                    VanguardTacticalCoordinationPassagePathEditor.DrawWorldLines(passageAuthor);
+                }
+                return;
+            }
+
+            if (currentMode == AuthoringMode.TacticalAnchor)
+            {
+                if (activeWorld?.MainPlayer is Player anchorAuthor)
+                {
+                    VanguardTacticalCoordinationTacticalAnchorEditor.DrawWorldLines(anchorAuthor);
+                }
+                return;
+            }
+
+            var zone = GetSelectedZone();
+            if (zone is not null)
+            {
+                DrawZoneRing(zone);
+
+                var slotLimit = Math.Min(zone.Slots.Count, MaximumVisualizedSlots);
+                for (var index = 0; index < slotLimit; index++)
+                {
+                    DrawSlot(zone.Slots[index]);
+                }
+                for (var index = 0; index < slotLimit; index++)
+                {
+                    DrawSlotAccessLink(zone, zone.Slots[index]);
+                }
+
+                var accessLimit = Math.Min(zone.Accesses.Count, MaximumVisualizedAccesses);
+                for (var index = 0; index < accessLimit; index++)
+                {
+                    DrawAccess(zone.Accesses[index], index == selectedAccessIndex);
+                }
+            }
+
+            if (pendingZoneCreation is not null)
+            {
+                DrawPendingZoneRing(pendingZoneCreation);
             }
         }
         finally
@@ -352,7 +656,7 @@ internal static class VanguardTacticalAuthoringService
     {
         if (active)
         {
-            Deactivate(dirty
+            Deactivate(HasUnsavedChanges
                 ? "Editor disabled with unsaved changes still in memory. Re-enable in the same raid and Ctrl+S to persist them."
                 : "Editor disabled.");
             return;
@@ -379,7 +683,7 @@ internal static class VanguardTacticalAuthoringService
                 var resumedSelection = resumedNearest
                     ? $" Nearest zone selected automatically: {selectedZoneIndex + 1}/{mapFile.Zones.Count}, center={resumedDistance:0.0}m, inside={resumedInside}."
                     : string.Empty;
-                SetStatus((dirty
+                SetStatus((HasUnsavedChanges
                     ? "Editor resumed from same-raid in-memory state with unsaved changes preserved. Ctrl+S persists them."
                     : "Editor resumed from same-raid in-memory state.") + resumedSelection);
                 return;
@@ -390,6 +694,7 @@ internal static class VanguardTacticalAuthoringService
             var mapRevision = "eft-client-" + (string.IsNullOrWhiteSpace(eftClientVersion) ? "unknown" : eftClientVersion.Trim());
             mapFile = VanguardTacticalAuthoringStore.LoadOrCreate(mapId, mapRevision, eftClientVersion, out var loadedExisting);
             mapFile.RuntimeConsumptionEnabled = false;
+            VanguardTacticalCoordinationPortalEditor.Load(mapId, mapRevision, eftClientVersion, out var baseLoaded, out var userLoaded);
             activeWorld = world;
             activeMapId = mapId;
             var nearestSelected = SelectNearestZoneToPlayer(player.Position, out var nearestDistance, out var nearestInside);
@@ -402,8 +707,9 @@ internal static class VanguardTacticalAuthoringService
                 ? $" Nearest zone selected automatically: {selectedZoneIndex + 1}/{mapFile.Zones.Count}, center={nearestDistance:0.0}m, inside={nearestInside}."
                 : string.Empty;
             SetStatus((loadedExisting
-                ? $"Editor active; existing schema-{mapFile.SchemaVersion} data loaded. Runtime consumption remains disabled."
-                : $"Editor active; new schema-{mapFile.SchemaVersion} map document created in memory. Ctrl+S persists it.") + selectionStatus);
+                ? $"Editor active; schema-{mapFile.SchemaVersion} HOLD data loaded."
+                : $"Editor active; new schema-{mapFile.SchemaVersion} HOLD map created in memory.")
+                + $" TC Base={(baseLoaded ? "loaded" : "empty")}; TC User={(userLoaded ? "loaded" : "new")}." + selectionStatus);
         }
         catch (Exception exception)
         {
@@ -428,9 +734,14 @@ internal static class VanguardTacticalAuthoringService
         selectedZoneIndex = -1;
         selectedAccessIndex = -1;
         dirty = false;
+        currentMode = AuthoringMode.Hold;
         liveSessionId = string.Empty;
         liveRevision = 0;
+        portalValidationSetSignature = string.Empty;
         ClearZoneNamePromptState();
+        VanguardTacticalCoordinationPortalEditor.Reset();
+        VanguardTacticalCoordinationPassagePathEditor.ResetDraft();
+        VanguardTacticalCoordinationTacticalAnchorEditor.ResetDraft();
         VanguardTacticalAuthoringLivePreviewClientState.Clear();
     }
 
@@ -491,6 +802,112 @@ internal static class VanguardTacticalAuthoringService
         return true;
     }
 
+    private static void CycleEditorMode()
+    {
+        currentMode = currentMode switch
+        {
+            AuthoringMode.Hold => AuthoringMode.Portal,
+            AuthoringMode.Portal => AuthoringMode.PassagePath,
+            AuthoringMode.PassagePath => AuthoringMode.TacticalAnchor,
+            _ => AuthoringMode.Hold
+        };
+        portalValidationSetSignature = string.Empty;
+        VanguardTacticalAuthoringLivePreviewClientState.Clear();
+        liveRevision = Math.Max(1L, liveRevision + 1L);
+        SetStatus(currentMode switch
+        {
+            AuthoringMode.Hold => "HOLD mode active. Ctrl+Insert captures HOLD slots; Ctrl+Home starts a HoldZone preview.",
+            AuthoringMode.Portal => "PORTAL mode active. Ctrl+Insert starts a User Portal preview; TC Base remains read-only.",
+            AuthoringMode.PassagePath => "PASSAGE PATH mode active. Ctrl+Insert starts a User PassagePath draft; control points are durable TC User intent and no movement authority is acquired.",
+            _ => "TACTICAL ANCHOR mode active. Ctrl+Home previews a User TacticalAnchor; Ctrl+Insert captures PoseSlots by standing and looking in-world."
+        });
+    }
+
+    private static void HandlePortalMode(Player player)
+    {
+        if (mapFile is null)
+        {
+            return;
+        }
+
+        if (VanguardTacticalAuthoringOptions.AddSlotShortcut.IsDown())
+        {
+            SetStatus(VanguardTacticalCoordinationPortalEditor.BeginPortalPreview(player));
+        }
+        else if (VanguardTacticalAuthoringOptions.AddAccessShortcut.IsDown())
+        {
+            SetStatus(VanguardTacticalCoordinationPortalEditor.PromoteNearestLegacyCandidate(mapFile, player, out var warning), warning);
+        }
+        else if (VanguardTacticalAuthoringOptions.DeleteNearestSlotShortcut.IsDown())
+        {
+            SetStatus(VanguardTacticalCoordinationPortalEditor.DeleteNearestUserPortal(player, out var warning), warning);
+        }
+        else if (VanguardTacticalAuthoringOptions.ToggleNearestSlotEnabledShortcut.IsDown())
+        {
+            SetStatus(VanguardTacticalCoordinationPortalEditor.ToggleNearestUserPortalEnabled(player, out var warning), warning);
+        }
+        else if (VanguardTacticalAuthoringOptions.RevalidateShortcut.IsDown())
+        {
+            SetStatus(VanguardTacticalCoordinationPortalEditor.RevalidateNearestUserPortal(player, out var warning), warning);
+        }
+    }
+
+    private static void HandlePassagePathMode(Player player)
+    {
+        if (VanguardTacticalAuthoringOptions.AddSlotShortcut.IsDown())
+        {
+            SetStatus(VanguardTacticalCoordinationPassagePathEditor.BeginPathDraft(player));
+        }
+        else if (VanguardTacticalAuthoringOptions.DeleteNearestSlotShortcut.IsDown())
+        {
+            SetStatus(VanguardTacticalCoordinationPassagePathEditor.DeleteNearestUserPath(player, out var warning), warning);
+        }
+        else if (VanguardTacticalAuthoringOptions.ToggleNearestSlotEnabledShortcut.IsDown())
+        {
+            SetStatus(VanguardTacticalCoordinationPassagePathEditor.ToggleNearestUserPathEnabled(player, out var warning), warning);
+        }
+        else if (VanguardTacticalAuthoringOptions.RevalidateShortcut.IsDown())
+        {
+            SetStatus(VanguardTacticalCoordinationPassagePathEditor.RevalidateNearestUserPath(player, out var warning), warning);
+        }
+    }
+
+    private static void HandleTacticalAnchorMode(Player player)
+    {
+        if (VanguardTacticalAuthoringOptions.CreateZoneShortcut.IsDown())
+        {
+            SetStatus(VanguardTacticalCoordinationTacticalAnchorEditor.BeginAnchorPreview(player));
+        }
+        else if (VanguardTacticalAuthoringOptions.AddSlotShortcut.IsDown())
+        {
+            SetStatus(VanguardTacticalCoordinationTacticalAnchorEditor.AddPoseSlot(player, out var warning), warning);
+        }
+        else if (VanguardTacticalAuthoringOptions.RecaptureNearestSlotShortcut.IsDown())
+        {
+            SetStatus(VanguardTacticalCoordinationTacticalAnchorEditor.RecaptureNearestPoseSlot(player, out var warning), warning);
+        }
+        else if (VanguardTacticalAuthoringOptions.DeleteNearestSlotShortcut.IsDown())
+        {
+            SetStatus(VanguardTacticalCoordinationTacticalAnchorEditor.DeleteNearestPoseSlot(player, out var warning), warning);
+        }
+        else if (VanguardTacticalAuthoringOptions.ToggleNearestSlotEnabledShortcut.IsDown())
+        {
+            SetStatus(VanguardTacticalCoordinationTacticalAnchorEditor.ToggleNearestPoseSlotEnabled(player, out var warning), warning);
+        }
+        else if (VanguardTacticalAuthoringOptions.AddAccessShortcut.IsDown())
+        {
+            SetStatus(VanguardTacticalCoordinationTacticalAnchorEditor.ToggleNearestUserAnchorEnabled(player, out var warning), warning);
+        }
+        else if (VanguardTacticalAuthoringOptions.DeleteSelectedZoneShortcut.IsDown())
+        {
+            SetStatus(VanguardTacticalCoordinationTacticalAnchorEditor.DeleteNearestUserAnchor(player, out var warning), warning);
+        }
+        else if (VanguardTacticalAuthoringOptions.RevalidateShortcut.IsDown())
+        {
+            SetStatus(VanguardTacticalCoordinationTacticalAnchorEditor.RevalidateNearestPoseSlot(player, out var warning), warning);
+        }
+    }
+
     private static void BeginCreateZone(Player player, bool forceNested)
     {
         if (mapFile is null)
@@ -498,29 +915,113 @@ internal static class VanguardTacticalAuthoringService
             return;
         }
 
-        var position = player.Position;
-        if (!forceNested && TryFindBlockingZone(position, out var blockingZone, out var distance))
-        {
-            SetStatus($"Zone creation blocked: center is inside '{blockingZone.DisplayZoneName}' ({blockingZone.ZoneId}), centerDistance={distance:0.00}m < radius={blockingZone.ZoneRadius:0.00}m, centerY={position.y:0.00} within floorY=[{blockingZone.MinY:0.00}, {blockingZone.MaxY:0.00}]. Move to the horizontal/vertical boundary or outside, or use Ctrl+Shift+Home for deliberate same-volume nested authoring.", warning: true);
-            return;
-        }
-
         pendingZoneCreation = new PendingZoneCreation
         {
-            Position = position,
+            Position = player.Position,
             BuildingId = VanguardTacticalAuthoringOptions.BuildingId,
             FloorId = VanguardTacticalAuthoringOptions.FloorId,
-            ZoneRadius = VanguardTacticalAuthoringOptions.ZoneRadiusMeters,
+            ZoneRadius = GetInitialDraftZoneRadius(),
             DefaultFloorBelowMeters = VanguardTacticalAuthoringOptions.DefaultFloorBelowMeters,
             DefaultFloorAboveMeters = VanguardTacticalAuthoringOptions.DefaultFloorAboveMeters,
             ForcedNested = forceNested
         };
+        zoneNamePromptMode = ZoneNamePromptMode.None;
+        zoneNamePromptZoneId = string.Empty;
+        zoneNamePromptText = string.Empty;
+        SetStatus(forceNested
+            ? $"FORCED/NESTED HoldZone preview started. Center follows author; radius={pendingZoneCreation.ZoneRadius:0}m. Use + / - in 1m steps, Enter to name/confirm, Esc to cancel."
+            : $"Guarded HoldZone preview started. Center follows author; radius={pendingZoneCreation.ZoneRadius:0}m. Use + / - in 1m steps, Enter to name/confirm, Esc to cancel.");
+    }
+
+    private static void UpdatePendingZoneDraft(Player player)
+    {
+        var pending = pendingZoneCreation;
+        if (pending is null)
+        {
+            return;
+        }
+
+        pending.Position = player.Position;
+
+        if (IsDraftRadiusIncreasePressed())
+        {
+            AdjustPendingZoneRadius(+1f);
+            return;
+        }
+
+        if (IsDraftRadiusDecreasePressed())
+        {
+            AdjustPendingZoneRadius(-1f);
+            return;
+        }
+
+        if (DraftConfirmShortcut.IsDown() || DraftConfirmKeypadShortcut.IsDown())
+        {
+            BeginPendingZoneNaming();
+            return;
+        }
+
+        if (DraftCancelShortcut.IsDown())
+        {
+            pendingZoneCreation = null;
+            SetStatus("HoldZone preview cancelled; no authoring data was changed.");
+        }
+    }
+
+    private static bool IsDraftRadiusIncreasePressed()
+    {
+        return DraftRadiusIncreaseKeypadShortcut.IsDown()
+            || DraftRadiusIncreaseMainShortcut.IsDown()
+            || DraftRadiusIncreaseFallbackShortcut.IsDown();
+    }
+
+    private static bool IsDraftRadiusDecreasePressed()
+    {
+        return DraftRadiusDecreaseKeypadShortcut.IsDown()
+            || DraftRadiusDecreaseMainShortcut.IsDown()
+            || DraftRadiusDecreaseFallbackShortcut.IsDown();
+    }
+
+    private static void AdjustPendingZoneRadius(float deltaMeters)
+    {
+        var pending = pendingZoneCreation;
+        if (pending is null)
+        {
+            return;
+        }
+
+        pending.ZoneRadius = Mathf.Clamp(Mathf.Round(pending.ZoneRadius + deltaMeters), 2f, 80f);
+        SetStatus($"HoldZone preview radius={pending.ZoneRadius:0}m. Center continues to follow author; Enter opens naming, Esc cancels.");
+    }
+
+    private static void BeginPendingZoneNaming()
+    {
+        var pending = pendingZoneCreation;
+        if (pending is null)
+        {
+            return;
+        }
+
+        if (!pending.ForcedNested && TryFindBlockingZone(pending.Position, out var blockingZone, out var distance))
+        {
+            SetStatus($"HoldZone preview cannot be committed here: center is inside '{blockingZone.DisplayZoneName}' ({blockingZone.ZoneId}), centerDistance={distance:0.00}m < radius={blockingZone.ZoneRadius:0.00}m. Move the preview center outside or cancel and restart with Ctrl+Shift+Home for deliberate nested authoring.", warning: true);
+            return;
+        }
+
         zoneNamePromptMode = ZoneNamePromptMode.Create;
         zoneNamePromptZoneId = string.Empty;
         zoneNamePromptText = GetNextDefaultZoneName();
-        SetStatus(forceNested
-            ? $"FORCED/NESTED zone creation staged at player position. Enter a name and press Enter to create; Escape cancels entirely. Proposed name: {zoneNamePromptText}."
-            : $"Guarded zone creation staged at player position. Enter a name and press Enter to create; Escape cancels entirely. Proposed name: {zoneNamePromptText}.");
+        SetStatus($"HoldZone preview frozen at radius={pending.ZoneRadius:0}m. Enter a name and press Enter to create; Escape returns to movable preview.");
+    }
+
+    private static float GetInitialDraftZoneRadius()
+    {
+        if (mapFile is not null && mapFile.Zones.Count > 0)
+        {
+            return Mathf.Clamp(Mathf.Round(mapFile.Zones[mapFile.Zones.Count - 1].ZoneRadius), 2f, 80f);
+        }
+
+        return Mathf.Clamp(Mathf.Round(VanguardTacticalAuthoringOptions.ZoneRadiusMeters), 2f, 80f);
     }
 
     private static void BeginRenameSelectedZone()
@@ -583,7 +1084,7 @@ internal static class VanguardTacticalAuthoringService
             dirty = true;
             var forced = pending.ForcedNested;
             ClearZoneNamePromptState();
-            SetStatus($"Created {(forced ? "FORCED/NESTED " : string.Empty)}zone '{zone.DisplayZoneName}' ({zone.ZoneId}) at the staged player position. Floor bounds are provisional until Ctrl+[ and Ctrl+] are captured.");
+            SetStatus($"Created {(forced ? "FORCED/NESTED " : string.Empty)}HoldZone '{zone.DisplayZoneName}' ({zone.ZoneId}) from the validated preview center with radius={zone.ZoneRadius:0}m. Floor bounds are provisional until Ctrl+[ and Ctrl+] are captured.");
             return;
         }
 
@@ -612,10 +1113,17 @@ internal static class VanguardTacticalAuthoringService
     {
         var mode = zoneNamePromptMode;
         var previousZone = zoneNamePromptZoneId;
+        if (mode == ZoneNamePromptMode.Create && pendingZoneCreation is not null)
+        {
+            zoneNamePromptMode = ZoneNamePromptMode.None;
+            zoneNamePromptText = string.Empty;
+            zoneNamePromptZoneId = string.Empty;
+            SetStatus($"Zone naming cancelled; movable HoldZone preview resumed at radius={pendingZoneCreation.ZoneRadius:0}m.");
+            return;
+        }
+
         ClearZoneNamePromptState();
-        SetStatus(mode == ZoneNamePromptMode.Create
-            ? "Zone creation cancelled; no partial zone was created."
-            : $"Zone rename cancelled for {previousZone}; existing name preserved.");
+        SetStatus($"Zone rename cancelled for {previousZone}; existing name preserved.");
     }
 
     private static void DrawZoneNamePrompt()
@@ -639,14 +1147,14 @@ internal static class VanguardTacticalAuthoringService
         GUILayout.Label(zoneNamePromptMode == ZoneNamePromptMode.Create
             ? "NAME NEW TACTICAL ZONE"
             : "RENAME TACTICAL ZONE");
-        GUILayout.Label("Type the reader-friendly name. Enter confirms; Escape cancels; Ctrl+F6 closes the editor.");
+        GUILayout.Label("Type the author-facing name. Enter creates the zone; Escape returns to preview; Ctrl+F6 closes the editor.");
         GUI.SetNextControlName(ZoneNamePromptControl);
         zoneNamePromptText = GUILayout.TextField(zoneNamePromptText ?? string.Empty, MaximumZoneNameLength);
         GUI.FocusControl(ZoneNamePromptControl);
         GUILayout.Label(zoneNamePromptMode == ZoneNamePromptMode.Create && pendingZoneCreation?.ForcedNested == true
             ? "Mode: FORCED/NESTED (near-duplicate center guard bypassed deliberately)."
             : "Mode: guarded/explicit.");
-        GUILayout.Label("Fail-safe: Esc cancels without mutation; Ctrl+F6 cancels the staged prompt and closes Tactical Authoring.");
+        GUILayout.Label("Fail-safe: Esc returns to the movable preview without mutation; Ctrl+F6 cancels the staged zone and closes Tactical Authoring.");
         GUILayout.EndArea();
     }
 
@@ -863,8 +1371,9 @@ internal static class VanguardTacticalAuthoringService
         }
 
         var rawPosition = player.Position;
-        var watchDirection = FlattenAndNormalize(player.LookDirection);
+        var watchDirection = NormalizeViewDirection(player.LookDirection);
         var projected = TryProjectNavMesh(rawPosition, out var projectedPosition);
+        var physicalPose = VanguardTacticalAuthoringPhysicalPoseCapture.Capture(player);
         var now = VanguardTacticalAuthoringStore.UtcNowText();
         var slot = new VanguardTacticalAuthoringSlot
         {
@@ -873,6 +1382,7 @@ internal static class VanguardTacticalAuthoringService
             Position = VanguardVector3Dto.FromVector3(rawPosition),
             NavMeshProjectedPosition = projected ? VanguardVector3Dto.FromVector3(projectedPosition) : null,
             WatchDirection = VanguardVector3Dto.FromVector3(watchDirection),
+            PhysicalPoseSnapshot = physicalPose,
             WatchArc = VanguardTacticalAuthoringOptions.WatchArcDegrees,
             // Slot creation is intentionally unlinked. Ctrl+L is the sole explicit
             // nearest-slot/nearest-access link authority, avoiding stale hidden selection.
@@ -896,7 +1406,7 @@ internal static class VanguardTacticalAuthoringService
         zone.Slots.Add(slot);
         ValidateSlot(zone, slot, player);
         dirty = true;
-        SetStatus($"Added unlinked {slot.SlotType} slot {slot.SlotId}; state={slot.ValidationState}; runtimeEligible=false. Ctrl+L explicitly links it to the nearest access in this zone (access distance is not capped).");
+        SetStatus($"Added unlinked {slot.SlotType} slot {slot.SlotId}; state={slot.ValidationState}; presentation={VanguardTacticalAuthoringPhysicalPoseCapture.Describe(physicalPose)}; runtimeEligible=false. Ctrl+L explicitly links it to the nearest access in this zone (access distance is not capped).");
     }
 
     private static void AddAccess(Player player)
@@ -1042,20 +1552,22 @@ internal static class VanguardTacticalAuthoringService
             return;
         }
 
-        var watchDirection = FlattenAndNormalize(player.LookDirection);
+        var watchDirection = NormalizeViewDirection(player.LookDirection);
         if (watchDirection.sqrMagnitude < 0.25f)
         {
-            SetStatus("Current gaze cannot produce a valid horizontal WatchDirection; slot was not moved.", warning: true);
+            SetStatus("Current gaze cannot produce a valid WatchDirection; slot was not moved.", warning: true);
             return;
         }
 
+        var physicalPose = VanguardTacticalAuthoringPhysicalPoseCapture.Capture(player);
         slot.Position = VanguardVector3Dto.FromVector3(player.Position);
         slot.WatchDirection = VanguardVector3Dto.FromVector3(watchDirection);
+        slot.PhysicalPoseSnapshot = physicalPose;
         slot.NavMeshProjectedPosition = null;
         slot.RuntimeEligible = false;
         ValidateSlot(zone, slot, player);
         dirty = true;
-        SetStatus($"Recaptured slot {slot.SlotId} at player position with current gaze; tactical settings/access/enabled state preserved; state={slot.ValidationState}.");
+        SetStatus($"Recaptured slot {slot.SlotId} at player position with current gaze/presentation={VanguardTacticalAuthoringPhysicalPoseCapture.Describe(physicalPose)}; tactical settings/access/enabled state preserved; state={slot.ValidationState}.");
     }
 
     private static void RecaptureSelectedAccess(Player player)
@@ -1279,7 +1791,7 @@ internal static class VanguardTacticalAuthoringService
             reasons.Add("slot_outside_zone_radius");
         }
 
-        var watch = FlattenAndNormalize(slot.WatchDirection.ToVector3());
+        var watch = NormalizeViewDirection(slot.WatchDirection.ToVector3());
         if (watch.sqrMagnitude < 0.25f)
         {
             invalid = true;
@@ -1287,6 +1799,7 @@ internal static class VanguardTacticalAuthoringService
         }
         else
         {
+            // Preserve full authored yaw + pitch. Rendering may flatten the arrow, but persistence must not.
             slot.WatchDirection = VanguardVector3Dto.FromVector3(watch);
         }
 
@@ -1346,67 +1859,17 @@ internal static class VanguardTacticalAuthoringService
 
     private static bool TryProjectNavMesh(Vector3 position, out Vector3 projected)
     {
-        // EFT.Player.Position is PlayerBones.BodyTransform.position, not a ground/NavMesh point.
-        // The authoring probe therefore needs enough vertical reach to project the body anchor
-        // down to the walkable surface. Do not add an upward offset here: that moves the probe
-        // farther away from the floor for the local player.
-        var sampleRadius = Math.Max(VanguardTacticalAuthoringOptions.NavMeshProjectionMeters, 2.5f);
-        if (NavMesh.SamplePosition(position, out var hit, sampleRadius, NavMesh.AllAreas))
-        {
-            var horizontal = new Vector2(hit.position.x - position.x, hit.position.z - position.z).magnitude;
-            var vertical = Math.Abs(hit.position.y - position.y);
-            if (horizontal <= 1.75f && vertical <= 2.25f)
-            {
-                projected = hit.position;
-                return true;
-            }
-        }
-
-        projected = position;
-        return false;
+        return VanguardTacticalAuthoringNavMeshProjection.TryProjectLocal(position, out projected);
     }
 
     private static bool HasCompleteLocalAuthorPath(Vector3 playerPosition, Vector3 target)
     {
-        if (!TryProjectNavMesh(playerPosition, out var start))
-        {
-            return false;
-        }
-
-        var path = new NavMeshPath();
-        return NavMesh.CalculatePath(start, target, NavMesh.AllAreas, path)
-            && path.status == NavMeshPathStatus.PathComplete;
+        return VanguardTacticalAuthoringNavMeshProjection.HasCompleteLocalAuthorPath(playerPosition, target);
     }
 
     private static bool HasStaticCapsuleClearance(Vector3 projected)
     {
-        var radius = VanguardTacticalAuthoringOptions.ValidationCapsuleRadiusMeters;
-        var height = Math.Max(VanguardTacticalAuthoringOptions.ValidationCapsuleHeightMeters, radius * 2.0f + 0.05f);
-        var bottom = projected + Vector3.up * (radius + 0.06f);
-        var top = projected + Vector3.up * (height - radius);
-        var colliders = Physics.OverlapCapsule(
-            bottom,
-            top,
-            radius,
-            LayerMaskClass.HighPolyWithTerrainMask,
-            QueryTriggerInteraction.Ignore);
-
-        foreach (var collider in colliders)
-        {
-            if (collider == null || collider.isTrigger)
-            {
-                continue;
-            }
-
-            if (collider.GetComponentInParent<Player>() != null)
-            {
-                continue;
-            }
-
-            return false;
-        }
-
-        return true;
+        return VanguardTacticalAuthoringNavMeshProjection.HasStaticCapsuleClearance(projected);
     }
 
     private static void Save()
@@ -1418,13 +1881,26 @@ internal static class VanguardTacticalAuthoringService
 
         try
         {
-            VanguardTacticalAuthoringStore.Save(mapFile);
-            dirty = false;
-            SetStatus($"Saved transactionally: {VanguardTacticalAuthoringStore.GetMapPath(mapFile.MapId)}");
+            var saved = new List<string>();
+            if (dirty)
+            {
+                VanguardTacticalAuthoringStore.Save(mapFile);
+                dirty = false;
+                saved.Add("HOLD");
+            }
+            if (VanguardTacticalCoordinationPortalEditor.HasUnsavedChanges)
+            {
+                _ = VanguardTacticalCoordinationPortalEditor.Save();
+                saved.Add("TC User");
+            }
+
+            SetStatus(saved.Count == 0
+                ? "Nothing to save."
+                : "Saved transactionally: " + string.Join(" + ", saved));
         }
         catch (Exception exception)
         {
-            SetStatus($"Save failed closed; prior file preserved: {exception.GetType().Name}: {exception.Message}", warning: true);
+            SetStatus($"Save failed closed; prior files preserved by their domain transactions: {exception.GetType().Name}: {exception.Message}", warning: true);
         }
     }
 
@@ -1439,12 +1915,14 @@ internal static class VanguardTacticalAuthoringService
         {
             var reloaded = VanguardTacticalAuthoringStore.Reload(activeMapId);
             mapFile = reloaded;
+            _ = VanguardTacticalCoordinationPortalEditor.Reload(out var baseLoaded, out var userLoaded);
+            VanguardTacticalCoordinationPassagePathEditor.ResetDraft();
             var nearestSelected = SelectNearestZoneToPlayer(player.Position, out var nearestDistance, out var nearestInside);
             dirty = false;
             var selectionStatus = nearestSelected
-                ? $" Nearest zone selected automatically: {selectedZoneIndex + 1}/{mapFile.Zones.Count}, center={nearestDistance:0.0}m, inside={nearestInside}."
+                ? $" Nearest zone: {selectedZoneIndex + 1}/{mapFile.Zones.Count}, center={nearestDistance:0.0}m, inside={nearestInside}."
                 : string.Empty;
-            SetStatus("Reloaded authoring file with exact schema/map identity checks; runtime consumption remains disabled." + selectionStatus);
+            SetStatus($"Reloaded HOLD + TC layers; Base={(baseLoaded ? "loaded" : "empty")}, User={(userLoaded ? "loaded" : "new")}." + selectionStatus);
         }
         catch (Exception exception)
         {
@@ -1523,6 +2001,45 @@ internal static class VanguardTacticalAuthoringService
         playerInsideZone = bestContainingIndex >= 0;
         centerDistance = Mathf.Sqrt(playerInsideZone ? bestContainingSqr : bestAnySqr);
         return true;
+    }
+
+    private static string GetCompactNearestHoldSlotSummary(VanguardTacticalAuthoringZone zone)
+    {
+        try
+        {
+            var player = activeWorld?.MainPlayer;
+            if (player is null || zone.Slots.Count == 0)
+            {
+                return "Nearby HOLD: none";
+            }
+
+            var maxDistance = VanguardTacticalAuthoringOptions.NearbyEditRadiusMeters;
+            var nearest = FindNearestSlot(zone, player.Position, maxDistance);
+            if (nearest is null)
+            {
+                return $"Nearby HOLD: none within {maxDistance:0.0}m edit radius";
+            }
+
+            var distance = Vector3.Distance(nearest.Position.ToVector3(), player.Position);
+            var state = !nearest.Enabled ? "DISABLED" : nearest.ValidationState.ToString().ToUpperInvariant();
+            var presentation = VanguardTacticalAuthoringPhysicalPoseCapture.Describe(nearest.PhysicalPoseSnapshot);
+            return $"Nearby HOLD: {distance:0.0}m  |  {state}  |  {presentation}";
+        }
+        catch
+        {
+            return "Nearby HOLD: unavailable";
+        }
+    }
+
+    private static string CompactHudText(string value, int maximumLength)
+    {
+        var normalized = (value ?? string.Empty).Replace('\r', ' ').Replace('\n', ' ').Trim();
+        if (normalized.Length <= maximumLength)
+        {
+            return normalized;
+        }
+
+        return normalized.Substring(0, Math.Max(0, maximumLength - 3)) + "...";
     }
 
     private static string GetNearestSlotSummary(VanguardTacticalAuthoringZone zone)
@@ -1664,6 +2181,11 @@ internal static class VanguardTacticalAuthoringService
         return Vector3.Distance(a, b);
     }
 
+    private static Vector3 NormalizeViewDirection(Vector3 direction)
+    {
+        return direction.sqrMagnitude > 0.0001f ? direction.normalized : Vector3.zero;
+    }
+
     private static Vector3 FlattenAndNormalize(Vector3 direction)
     {
         direction.y = 0f;
@@ -1728,8 +2250,51 @@ internal static class VanguardTacticalAuthoringService
 
     private static void DrawWorldLabels()
     {
+        if (currentMode == AuthoringMode.PassagePath)
+        {
+            if (!CameraClass.Exist)
+            {
+                return;
+            }
+            var passageCamera = CameraClass.Instance.Camera;
+            if (passageCamera != null)
+            {
+                VanguardTacticalCoordinationPassagePathEditor.DrawWorldLabels(passageCamera);
+            }
+            return;
+        }
+
+        if (currentMode == AuthoringMode.TacticalAnchor)
+        {
+            if (!CameraClass.Exist)
+            {
+                return;
+            }
+            var anchorCamera = CameraClass.Instance.Camera;
+            if (anchorCamera != null)
+            {
+                VanguardTacticalCoordinationTacticalAnchorEditor.DrawWorldLabels(anchorCamera);
+            }
+            return;
+        }
+
+        if (currentMode == AuthoringMode.Portal)
+        {
+            if (mapFile is null || !CameraClass.Exist)
+            {
+                return;
+            }
+            var portalCamera = CameraClass.Instance.Camera;
+            if (portalCamera != null)
+            {
+                VanguardTacticalCoordinationPortalEditor.DrawWorldLabels(mapFile, portalCamera);
+            }
+            return;
+        }
+
         var zone = GetSelectedZone();
-        if (zone is null || !CameraClass.Exist)
+        var draft = pendingZoneCreation;
+        if ((zone is null && draft is null) || !CameraClass.Exist)
         {
             return;
         }
@@ -1740,51 +2305,55 @@ internal static class VanguardTacticalAuthoringService
             return;
         }
 
-        var slotLimit = Math.Min(zone.Slots.Count, MaximumWorldLabels);
-        for (var index = 0; index < slotLimit; index++)
+        if (zone is not null)
         {
-            var slot = zone.Slots[index];
-            var world = (slot.NavMeshProjectedPosition ?? slot.Position).ToVector3() + Vector3.up * 0.35f;
-            var screen = camera.WorldToScreenPoint(world);
-            if (screen.z <= 0f || screen.x < 0f || screen.x > Screen.width || screen.y < 0f || screen.y > Screen.height)
+            var slotLimit = Math.Min(zone.Slots.Count, MaximumWorldLabels);
+            for (var index = 0; index < slotLimit; index++)
             {
-                continue;
+                var slot = zone.Slots[index];
+                var world = (slot.NavMeshProjectedPosition ?? slot.Position).ToVector3() + Vector3.up * 0.35f;
+                var screen = camera.WorldToScreenPoint(world);
+                if (screen.z <= 0f || screen.x < 0f || screen.x > Screen.width || screen.y < 0f || screen.y > Screen.height)
+                {
+                    continue;
+                }
+
+                var slotState = !slot.Enabled ? "DISABLED" : slot.ValidationState.ToString().ToUpperInvariant();
+                GUI.Label(
+                    new Rect(screen.x + 7f, Screen.height - screen.y - 12f, 180f, 22f),
+                    $"HOLD  |  {slotState}",
+                    GUI.skin.box);
             }
 
-            var accessText = string.IsNullOrWhiteSpace(slot.AssociatedAccessId) ? "-" : slot.AssociatedAccessId;
-            var navText = slot.NavMeshProjectedPosition is null ? "nav:DEFERRED" : "nav:LOCAL_OK";
-            var pathText = slot.NavMeshProjectedPosition is null
-                || slot.ValidationNotes.Contains("local_author_navmesh_path_incomplete_deferred_to_authoritative_runtime", StringComparison.Ordinal)
-                ? "path:DEFERRED"
-                : "path:LOCAL_OK";
-            var capsuleText = slot.NavMeshProjectedPosition is null
-                || slot.ValidationNotes.Contains("local_static_capsule_check_failed_deferred_to_authoritative_runtime", StringComparison.Ordinal)
-                ? "caps:DEFERRED"
-                : "caps:LOCAL_OK";
-            var headlessText = VanguardTacticalAuthoringLivePreviewClientState.GetSlotSummary(slot.SlotId);
-            GUI.Label(
-                new Rect(screen.x + 7f, Screen.height - screen.y - 12f, 660f, string.IsNullOrWhiteSpace(headlessText) ? 22f : 42f),
-                string.IsNullOrWhiteSpace(headlessText)
-                    ? $"{slot.SlotType} | {slot.ValidationState} | {navText} | {pathText} | {capsuleText} | access={accessText}"
-                    : $"{slot.SlotType} | {slot.ValidationState} | {navText} | {pathText} | {capsuleText} | access={accessText}\n{headlessText}",
-                GUI.skin.box);
+            var accessLimit = Math.Min(zone.Accesses.Count, MaximumWorldLabels);
+            for (var index = 0; index < accessLimit; index++)
+            {
+                var access = zone.Accesses[index];
+                var world = (access.NavMeshProjectedPosition ?? access.Position).ToVector3() + Vector3.up * 0.25f;
+                var screen = camera.WorldToScreenPoint(world);
+                if (screen.z <= 0f || screen.x < 0f || screen.x > Screen.width || screen.y < 0f || screen.y > Screen.height)
+                {
+                    continue;
+                }
+
+                GUI.Label(
+                    new Rect(screen.x + 7f, Screen.height - screen.y + 10f, 210f, 22f),
+                    "LEGACY ACCESS  |  REVIEW",
+                    GUI.skin.box);
+            }
         }
 
-        var accessLimit = Math.Min(zone.Accesses.Count, MaximumWorldLabels);
-        for (var index = 0; index < accessLimit; index++)
+        if (draft is not null)
         {
-            var access = zone.Accesses[index];
-            var world = (access.NavMeshProjectedPosition ?? access.Position).ToVector3() + Vector3.up * 0.25f;
+            var world = draft.Position + Vector3.up * 0.35f;
             var screen = camera.WorldToScreenPoint(world);
-            if (screen.z <= 0f || screen.x < 0f || screen.x > Screen.width || screen.y < 0f || screen.y > Screen.height)
+            if (screen.z > 0f && screen.x >= 0f && screen.x <= Screen.width && screen.y >= 0f && screen.y <= Screen.height)
             {
-                continue;
+                GUI.Label(
+                    new Rect(screen.x + 7f, Screen.height - screen.y - 12f, 240f, 22f),
+                    $"NEW HOLDZONE  |  radius {draft.ZoneRadius:0}m",
+                    GUI.skin.box);
             }
-
-            GUI.Label(
-                new Rect(screen.x + 7f, Screen.height - screen.y + 10f, 260f, 22f),
-                $"ACCESS {access.AccessId} | nav={(access.NavMeshProjectionSucceeded ? "LOCAL_OK" : "DEFERRED")}",
-                GUI.skin.box);
         }
     }
 
@@ -1803,6 +2372,23 @@ internal static class VanguardTacticalAuthoringService
             GL.Vertex(a);
             GL.Vertex(b);
         }
+    }
+
+    private static void DrawPendingZoneRing(PendingZoneCreation draft)
+    {
+        var center = draft.Position + Vector3.up * VisualHeightOffset;
+        GL.Color(new Color(0.25f, 0.85f, 1f, 0.95f));
+        for (var segment = 0; segment < ZoneRingSegments; segment++)
+        {
+            var angleA = (float)(Math.PI * 2.0 * segment / ZoneRingSegments);
+            var angleB = (float)(Math.PI * 2.0 * (segment + 1) / ZoneRingSegments);
+            var a = center + new Vector3(Mathf.Cos(angleA) * draft.ZoneRadius, 0f, Mathf.Sin(angleA) * draft.ZoneRadius);
+            var b = center + new Vector3(Mathf.Cos(angleB) * draft.ZoneRadius, 0f, Mathf.Sin(angleB) * draft.ZoneRadius);
+            GL.Vertex(a);
+            GL.Vertex(b);
+        }
+
+        DrawCross(center, 0.55f);
     }
 
     private static void DrawSlot(VanguardTacticalAuthoringSlot slot)
@@ -1923,6 +2509,14 @@ internal static class VanguardTacticalAuthoringService
         }
 
         return new Color(0.2f, 0.9f, 0.35f, 0.95f);
+    }
+
+    private enum AuthoringMode
+    {
+        Hold = 0,
+        Portal = 1,
+        PassagePath = 2,
+        TacticalAnchor = 3
     }
 
     private enum ZoneNamePromptMode

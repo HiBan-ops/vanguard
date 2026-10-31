@@ -1,4 +1,4 @@
-#if SPT_CLIENT
+﻿#if SPT_CLIENT
 using System;
 using System.Collections.Generic;
 using EFT;
@@ -12,8 +12,8 @@ using Vanguard.Client.Runtime.PostLoot;
 
 // Responsibility: Prevents Vanguard from starting new medical work while the Operator hands/controller are still finishing or recovering from a previous medical action.
 // Flow: After a Vanguard medical lease ends, the watchdog tracks native hand/controller state and item continuity, performs only narrowly proven recovery, then waits for stable non-medical/weapon-ready truth before clearing the gate.
-// Authority boundary: EFT owns native hands and medical controllers; Vanguard may recover only state proven to originate from its own completed lease and merely observes foreign EFT/SAIN medical activity.
-// Invariant: Unproven controller state is never cancelled or claimed, and a new Vanguard medical lease cannot start until terminal truth is positively stable.
+// Authority boundary: EFT owns native hands and medical controllers; Vanguard normally recovers only state proven to originate from its own completed lease. A foreign native MedsController may receive bounded recovery only when native use is idle and stable terminal or exhausted-controller evidence is positive; a finished operation with unready selector is restored through the native weapon callback path after a stable grace window.
+// Invariant: Active/unproven foreign medical work is never cancelled or claimed. Only positively classified terminal-stale controllers may be recovered; native weapon restoration never overrides selector fields or writes health/item resources.
 namespace Vanguard.Client.Runtime.Medical.Execution;
 
 /// <summary>
@@ -21,13 +21,15 @@ namespace Vanguard.Client.Runtime.Medical.Execution;
 ///
 /// The runtime enforces provenance before post-terminal medical recovery can mutate native EFT state.
 ///
-/// Only a state created from a real Vanguard lease terminal owns recovery authority. Native EFT/SAIN medical
-/// activity discovered without that provenance is foreign activity: Vanguard may observe and defer its own
-/// admission, but it never cancels, clears or claims that controller. A real Vanguard post-terminal physical
-/// controller may be recovered only while item continuity is proven and no positive terminal truth has been
-/// observed in between. A parent-only BotMedecine.Using latch remains a separate, narrowly reconciled native state.
-/// Neither mutation proves recovery. Admission remains blocked for Vanguard-owned post-terminal state until
-/// positive terminal truth is stable: parent and children idle, non-medical hands, weapon ready.
+/// A state created from a real Vanguard lease terminal owns the normal recovery authority. Native EFT/SAIN
+/// medical activity discovered without that provenance remains foreign and is observe-only while any medicine
+/// controller is active or terminal state is unproven. One foreign exception is a bounded native fast-forward
+/// after strict proof that a typed MedsController is terminal-stale with the same stable item/resource and no
+/// Vanguard lease; a distinct bounded native weapon restore handles a stable Finished operation when the
+/// native selector is unready. A real Vanguard post-terminal physical controller may be recovered only while item continuity
+/// is proven and no positive terminal truth has been observed in between. A parent-only BotMedecine.Using latch
+/// remains a separate, narrowly reconciled native state. Neither recovery request proves success; positive native
+/// terminal truth remains required.
 /// </summary>
 internal static class VanguardMedicalHandsWatchdogService
 {
@@ -42,9 +44,15 @@ internal static class VanguardMedicalHandsWatchdogService
     private static readonly TimeSpan StableWindow = TimeSpan.FromSeconds(0.50d);
     private static readonly TimeSpan PhysicalRecoveryRetryDelay = TimeSpan.FromSeconds(1.25d);
     private static readonly TimeSpan RecoveryExhaustedLogDelay = TimeSpan.FromSeconds(3.00d);
+    private static readonly TimeSpan ForeignStalePhysicalSettleGrace = TimeSpan.FromSeconds(3.00d);
+    private static readonly TimeSpan ForeignStaleRecoveryRetryDelay = TimeSpan.FromSeconds(1.50d);
     private const int RequiredSnapshots = 3;
     private const int MaximumPhysicalRecoveryRequests = 2;
     private const int MaximumLatchReconciliations = 1;
+    private const int MaximumForeignStaleRecoveryRequests = 2;
+    private static readonly TimeSpan FinishedHandsSettleGrace = TimeSpan.FromSeconds(3d);
+    private static readonly TimeSpan FinishedHandsRestoreRetryDelay = TimeSpan.FromSeconds(5d);
+    private const int MaximumFinishedHandsRestoreRequests = 2;
     private const float ResourceDeltaEpsilon = 0.01f;
     private static readonly Dictionary<string, State> States = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<string, ForeignObservationState> ForeignObservations = new(StringComparer.OrdinalIgnoreCase);
@@ -54,7 +62,21 @@ internal static class VanguardMedicalHandsWatchdogService
         States.Clear();
         ForeignObservations.Clear();
         VanguardClientDiagnosticsLog.Info(StatusTag,
-            $"VANGUARD_MEDICAL_HANDS_WATCHDOG_RESET reason={Safe(reason)}; postTerminalOnly=true; recoveryAuthority=real_vanguard_lease_terminal_only; foreignNativeActivity=observe_only; sameItemContinuityRequired=true; positiveTerminalBreaksRecoveryAuthority=true; parentLatchReconciliation=true; nativeTerminalTruthRequired=true; rawControllerFieldClearForbidden=true; productiveLeaseNeverCancelled=true; tag={StatusTag}; Tag={PostTerminalStatusTag}; Tag={MedicalHandsWatchdogStatusTag}; Tag={MedicalLeaseStatusTag}");
+            $"VANGUARD_MEDICAL_HANDS_WATCHDOG_RESET reason={Safe(reason)}; postTerminalOnly=true; recoveryAuthority=real_vanguard_lease_terminal_only; foreignNativeActivity=observe_active_recover_terminal_stale; sameItemContinuityRequired=true; positiveTerminalBreaksRecoveryAuthority=true; parentLatchReconciliation=true; nativeTerminalTruthRequired=true; rawControllerFieldClearForbidden=true; productiveLeaseNeverCancelled=true; tag={StatusTag}; Tag={PostTerminalStatusTag}; Tag={MedicalHandsWatchdogStatusTag}; Tag={MedicalLeaseStatusTag}");
+    }
+
+    public static int ForgetRuntimePresence(string? botProfileId, string reason)
+    {
+        string key = string.IsNullOrWhiteSpace(botProfileId) ? "none" : botProfileId.Trim();
+        if (string.Equals(key, "none", StringComparison.OrdinalIgnoreCase))
+        {
+            return 0;
+        }
+
+        int removed = 0;
+        if (States.Remove(key)) removed++;
+        if (ForeignObservations.Remove(key)) removed++;
+        return removed;
     }
 
     public static void NotifyLeaseTerminal(VanguardExecutionLeaseState lease, VanguardMedicalActionOutcomeKind outcome, string reason, DateTimeOffset now)
@@ -76,6 +98,10 @@ internal static class VanguardMedicalHandsWatchdogService
             && runtime.BotOwner != null)
         {
             MedicalHandsTruth boundaryTruth = CaptureTruth(runtime.BotOwner);
+            if (!boundaryTruth.PositiveTerminalTruth)
+            {
+                EmitNativeControllerTransitionProbe(runtime.BotOwner, state, "lease_terminal_pending");
+            }
             if (boundaryTruth.PositiveTerminalTruth)
             {
                 state.PositiveTerminalObservedSinceLeaseTerminal = true;
@@ -86,10 +112,10 @@ internal static class VanguardMedicalHandsWatchdogService
     }
 
     /// <summary>
-    /// Observes a native medical controller that is busy while no Vanguard medical lease owns it.
-    /// The runtime deliberately does not create a recovery-authorized watchdog state here: the activity may
-    /// legitimately belong to EFT or SAIN. The caller may defer a Vanguard admission while the native
-    /// owner finishes, but this observation can never authorize CancelCurrent/ClearQueue/med-effect mutation.
+    /// Observes a native medical controller while no Vanguard medical lease owns it.
+    /// Active or unproven foreign work remains observe-only. The separate Tick path may request
+    /// either a bounded terminal-stale fast-forward or a native weapon restore for a stably Finished,
+    /// idle Meds operation. This observation entry point never authorizes cancellation or mutation.
     /// </summary>
     public static bool ObserveForeignMedicalActivityWithoutLease(
         BotOwner botOwner,
@@ -163,6 +189,15 @@ internal static class VanguardMedicalHandsWatchdogService
         }
         if (truth.RecoveryClass == MedicalOrphanRecoveryClass.PhysicalMedicalController)
         {
+            // An already Finished, idle native Meds operation must not be cancelled or have
+            // its health effects removed. Once the lease is released, Tick can safely qualify
+            // the native weapon-restoration path through independent stable observations.
+            if (TryReadFinishedIdleMedsOperation(botOwner, truth, out _, out _))
+            {
+                return "terminalCancellation=finished_idle_meds_deferred_native_weapon_restore"
+                    + ";healthMutation=false;childCancellation=false;postTerminalObservationRequired=true;"
+                    + truth.Summary;
+            }
             if (!HasOwnedPhysicalContinuity(state, truth, out string ownershipReason))
             {
                 ObserveForeignMedicalActivity(
@@ -248,6 +283,15 @@ internal static class VanguardMedicalHandsWatchdogService
                 MedicalHandsTruth foreignTruth = CaptureTruth(botOwner);
                 if (foreignTruth.OrphanMedicalController)
                 {
+                    // A finished native Meds operation can strand hands while the weapon selector is
+                    // unready. Its terminality, not selector readiness, permits a bounded native restore.
+                    if (TryReadFinishedIdleMedsOperation(botOwner, foreignTruth, out _, out _))
+                        TryRestoreFinishedMedicalHands(botOwner, snapshot, foreignTruth, now, "native_terminal_without_vanguard_lease");
+                    else
+                    {
+                        ResetFinishedHandsCandidate(snapshot.BotProfileId);
+                        TryRecoverTerminalStaleForeignMedicalHands(botOwner, snapshot, foreignTruth, now, out _);
+                    }
                     ObserveForeignMedicalActivity(
                         snapshot,
                         foreignTruth,
@@ -256,6 +300,8 @@ internal static class VanguardMedicalHandsWatchdogService
                 }
                 else
                 {
+                    if (foreignTruth.PositiveTerminalTruth)
+                        ConfirmFinishedHandsRestoration(snapshot, foreignTruth, now);
                     ClearForeignObservation(snapshot.BotProfileId);
                 }
                 continue;
@@ -320,9 +366,11 @@ internal static class VanguardMedicalHandsWatchdogService
                 }
                 catch { }
 
+                EmitNativeControllerTransitionProbe(botOwner, state, "positive_terminal_confirmed");
                 VanguardClientDiagnosticsLog.Info(MedicalHandsWatchdogStatusTag,
                     $"VANGUARD_MEDICAL_HANDS_TERMINAL_TRUTH_CONFIRMED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; lease={Safe(state.LeaseId)}; readySnapshots={state.ReadySnapshots}; stableSeconds={(now - state.ReadySinceUtc).TotalSeconds:0.00}; physicalRecoveryRequests={state.PhysicalRecoveryRequestCount}; latchReconciliations={state.LatchReconciliationCount}; resourceDropsOutsideLease={state.ResourceDropsOutsideLease}; refreshAfterTerminal={Bool(refreshed)}; admissionReleased=true; successProof=medicine_idle_and_nonmedical_weapon_hands; {truth.Summary}; tag={MedicalHandsWatchdogStatusTag}; Tag={MedicalLeaseStatusTag}; legacyTag={StatusTag}");
                 States.Remove(snapshot.BotProfileId);
+                ConfirmFinishedHandsRestoration(snapshot, truth, now);
                 ClearForeignObservation(snapshot.BotProfileId);
                 continue;
             }
@@ -366,8 +414,26 @@ internal static class VanguardMedicalHandsWatchdogService
 
             if (truth.RecoveryClass == MedicalOrphanRecoveryClass.PhysicalMedicalController)
             {
+                // Finished is a positive native operation boundary even when a previously queued
+                // weapon change has left IsWeaponReady false. Do not replay health/child cancellation
+                // against a finished operation: restore weapon hands via the native bot selector instead.
+                if (TryReadFinishedIdleMedsOperation(botOwner, truth, out _, out _))
+                {
+                    TryRestoreFinishedMedicalHands(botOwner, snapshot, truth, now, "vanguard_terminal_finished_native_operation");
+                    continue;
+                }
+                ResetFinishedHandsCandidate(snapshot.BotProfileId);
                 if (!HasOwnedPhysicalContinuity(state, truth, out string ownershipReason))
                 {
+                    // A previous Vanguard terminal lease does not give ownership
+                    // of an unrelated native item. However, that unrelated AI-2
+                    // can independently become a proven exhausted orphan. Apply
+                    // only the same bounded native fast-forward used for foreign
+                    // terminal-stale hands, never the previous lease's cleanup.
+                    if (IsExhaustedIdleMedsController(botOwner, truth)
+                        && now - state.TerminalAtUtc >= ForeignStalePhysicalSettleGrace)
+                        TryRecoverTerminalStaleForeignMedicalHands(
+                            botOwner, snapshot, truth, now, out _);
                     ObserveForeignMedicalActivity(
                         snapshot,
                         truth,
@@ -395,6 +461,7 @@ internal static class VanguardMedicalHandsWatchdogService
             }
             else if (truth.RecoveryClass == MedicalOrphanRecoveryClass.ParentUsingLatch)
             {
+                ResetFinishedHandsCandidate(snapshot.BotProfileId);
                 if (state.PositiveTerminalObservedSinceLeaseTerminal)
                 {
                     ObserveForeignMedicalActivity(
@@ -427,6 +494,7 @@ internal static class VanguardMedicalHandsWatchdogService
                 && now - lastMutationAt >= RecoveryExhaustedLogDelay)
             {
                 state.RecoveryExhaustedLogged = true;
+                EmitNativeControllerTransitionProbe(botOwner, state, "recovery_exhausted");
                 VanguardClientDiagnosticsLog.Warning(MedicalHandsWatchdogStatusTag,
                     $"VANGUARD_MEDICAL_HANDS_RECOVERY_UNCONFIRMED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; lease={Safe(state.LeaseId)}; recoveryClass={truth.RecoveryClass}; physicalRecoveryRequests={state.PhysicalRecoveryRequestCount}; latchReconciliations={state.LatchReconciliationCount}; retryBudgetExhausted=true; repeatedMutation=false; rawControllerFieldClear=false; admissionBlocked=true; next=observe_until_positive_terminal_truth; {truth.Summary}; tag={MedicalHandsWatchdogStatusTag}; Tag={MedicalLeaseStatusTag}; legacyTag={StatusTag}");
             }
@@ -479,6 +547,18 @@ internal static class VanguardMedicalHandsWatchdogService
         bool surgeryUsing = botOwner.Medecine?.SurgicalKit?.Using == true;
         bool stimulantUsing = ReadBool(botOwner.Medecine?.Stimulators, "Using");
         VanguardPostLootWeaponReadinessSnapshot readiness = VanguardPostLootWeaponReadinessReader.Capture(botOwner);
+        // Native weapon-selector ability and physical weapon-in-hands truth are distinct.
+        // A MedsController can be idle with a selectable weapon but is never weapon hands.
+        bool nativeSelectorReady = false;
+        try
+        {
+            nativeSelectorReady = botOwner.WeaponManager?.Selector?.IsWeaponReady == true
+                && botOwner.GetPlayer?.InventoryController?.IsChangingWeapon != true;
+        }
+        catch
+        {
+            // Inaccessible native selector state cannot authorize terminal cleanup.
+        }
 
         object? handsController = null;
         try { handsController = botOwner.GetPlayer?.HandsController; }
@@ -530,6 +610,7 @@ internal static class VanguardMedicalHandsWatchdogService
             medicalHands,
             typedMedsController,
             readiness.WeaponReady,
+            nativeSelectorReady,
             handsType,
             activeItemSource,
             itemInstanceId,
@@ -549,12 +630,14 @@ internal static class VanguardMedicalHandsWatchdogService
         bool medEffectRemoved = false;
         bool healthCancel = false;
         bool medsQueueCleared = false;
+        bool fastForwardCurrentState = false;
         bool firstAidCancel = false;
         bool surgeryCancel = false;
         bool stimulantCancel = false;
         bool takePrevWeapon = false;
         string handsType = "none";
 
+        EmitNativeControllerTransitionProbe(botOwner, state, "before_physical_recovery_" + (state.PhysicalRecoveryRequestCount + 1));
         try
         {
             Player? player = botOwner.GetPlayer;
@@ -580,6 +663,18 @@ internal static class VanguardMedicalHandsWatchdogService
 
             if (handsController is Player.MedsController medsController)
             {
+                // Keep parity with the already-audited foreign stale-controller recovery. This
+                // executes only after Vanguard-owned terminal continuity is proven and the watchdog has
+                // observed a stable orphan PhysicalMedicalController. It asks the native controller to
+                // finish its own state machine; no HP, resource or raw controller field is written.
+                // "WeaponReady" now correctly rejects physical MedsController hands. For
+                // owned terminal cleanup we only require the *selector* to be available;
+                // ownership, typed medical hands and all native Using flags are checked above.
+                if (!truth.AnyMedicineUsing && truth.NativeSelectorReady)
+                {
+                    try { medsController.FastForwardCurrentState(); fastForwardCurrentState = true; }
+                    catch { }
+                }
                 try { medsController.ClearQueue(); medsQueueCleared = true; }
                 catch { }
             }
@@ -600,10 +695,14 @@ internal static class VanguardMedicalHandsWatchdogService
             state.FirstPhysicalRecoveryRequestAtUtc = now;
         }
 
+        // Read-only transition evidence: accepted native operations and asynchronous hand-swap
+        // completion are distinct. Never interpret this synchronous readback as proof of success.
+        EmitNativeControllerTransitionProbe(botOwner, state, "after_physical_recovery_" + state.PhysicalRecoveryRequestCount);
         return new PhysicalRecoveryRequest(
             medEffectRemoved,
             healthCancel,
             medsQueueCleared,
+            fastForwardCurrentState,
             firstAidCancel,
             surgeryCancel,
             stimulantCancel,
@@ -611,6 +710,41 @@ internal static class VanguardMedicalHandsWatchdogService
             handsType,
             state.PhysicalRecoveryRequestCount,
             reason);
+    }
+
+    /// <summary>
+    /// Transition-only diagnostic. Read native hands, Meds operation and weapon selector
+    /// without invoking an action or changing admission. This instrument does not decide recovery.
+    /// </summary>
+    private static void EmitNativeControllerTransitionProbe(BotOwner botOwner, State state, string stage)
+    {
+        try
+        {
+            Player? player = botOwner.GetPlayer;
+            object? hands = player?.HandsController;
+            object? operation = VanguardOperatorRuntimeAuditReflection.GetPropertyOrField(
+                hands, "ObservedMedsControllerClass", "CurrentHandsOperation", "CurrentOperation");
+            object? operationState = VanguardOperatorRuntimeAuditReflection.GetPropertyOrField(operation, "State");
+            var selector = botOwner.WeaponManager?.Selector;
+            var readiness = VanguardPostLootWeaponReadinessReader.Capture(botOwner);
+            string handsId = hands == null ? "none" : System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(hands).ToString(System.Globalization.CultureInfo.InvariantCulture);
+            string operationId = operation == null ? "none" : System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(operation).ToString(System.Globalization.CultureInfo.InvariantCulture);
+            string selectorReady = selector == null ? "unknown" : Bool(selector.IsWeaponReady);
+            string selectorErrors = selector == null ? "unknown" : selector.ErrorCounter.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            string nativeTime = UnityEngine.Time.time.ToString("0.000", System.Globalization.CultureInfo.InvariantCulture);
+            string inventoryChanging = player?.InventoryController == null ? "unknown" : Bool(player.InventoryController.IsChangingWeapon);
+            string selectorChanging = selector == null ? "unknown" : Bool(selector.IsChanging);
+            string selectorStarted = selector == null ? "unknown" : selector.StartChangeTime.ToString("0.000", System.Globalization.CultureInfo.InvariantCulture);
+            string selectorNext = selector == null ? "unknown" : selector.NextChangeTime.ToString("0.000", System.Globalization.CultureInfo.InvariantCulture);
+            string selectorLastSlot = selector == null ? "none" : selector.LastEquipmentSlot.ToString();
+            string selectorMainSlot = selector == null ? "none" : selector.MainWeapon.ToString();
+            VanguardClientDiagnosticsLog.Info(MedicalHandsWatchdogStatusTag,
+                $"VANGUARD_MEDICAL_NATIVE_CONTROLLER_TRANSITION_PROBE stage={Safe(stage)}; lease={Safe(state.LeaseId)}; recoveryRequests={state.PhysicalRecoveryRequestCount}; hands={Safe(hands?.GetType().Name)}; handsId={handsId}; handsDestroyed={Bool((hands as Player.AbstractHandsController)?.Destroyed == true)}; typedMeds={Bool(hands is Player.MedsController)}; operation={Safe(operation?.GetType().Name)}; operationId={operationId}; operationState={Safe(VanguardOperatorRuntimeAuditReflection.Text(operationState))}; selectorReady={selectorReady}; selectorErrors={selectorErrors}; selectorNativeTime={nativeTime}; inventoryChanging={inventoryChanging}; selectorChanging={selectorChanging}; selectorStartChange={selectorStarted}; selectorNextChange={selectorNext}; selectorLastSlot={Safe(selectorLastSlot)}; selectorMainSlot={Safe(selectorMainSlot)}; heuristicWeaponReady={Bool(readiness.WeaponReady)}; heuristicHandsSuspicious={Bool(readiness.HandsSuspicious)}; noNativeMutation=true; postRequestNotCompletionProof=true; tag={MedicalHandsWatchdogStatusTag}");
+        }
+        catch
+        {
+            // A diagnostic failure must never affect native medical recovery, admission or gameplay.
+        }
     }
 
     private static ParentLatchReconciliation ReconcileParentUsingLatch(BotOwner botOwner, State state, DateTimeOffset now, string reason)
@@ -710,6 +844,308 @@ internal static class VanguardMedicalHandsWatchdogService
             && string.Equals(state.ItemInstanceId, truth.ItemInstanceId, StringComparison.OrdinalIgnoreCase);
     }
 
+    // A depleted native medical item need not disappear from inventory when its
+    // healing resource reaches zero. EFT's MedsController checks HpResource
+    // before advancing, but its completion can depend on a later native effect
+    // callback. In that orphaned terminal state IsWeaponReady may remain false
+    // *because MedsController still owns the hands*. Do not use selector readiness
+    // as a circular requirement for this one exhausted/idle state. Never remove
+    // the item from inventory or cancel an active medicine procedure.
+    private static bool IsExhaustedIdleMedsController(BotOwner botOwner, MedicalHandsTruth truth)
+    {
+        if (!truth.TypedMedsController || !truth.MedicalHands || truth.AnyMedicineUsing
+            || truth.ItemResource < 0f || truth.ItemResource > ResourceDeltaEpsilon
+            || truth.ItemMaxResource <= 0f
+            || string.Equals(truth.ItemInstanceId, "none", StringComparison.OrdinalIgnoreCase))
+            return false;
+        try
+        {
+            return botOwner.GetPlayer?.InventoryController?.IsChangingWeapon == false
+                && botOwner.GetPlayer?.HandsController is Player.MedsController;
+        }
+        catch { return false; }
+    }
+
+    // Native EFT's MedsController.FastForwardCurrentState does nothing if the operation is
+    // already Finished. BotWeaponSelector.TakePrevWeapon also refuses to work while IsWeaponReady
+    // is false. For this precise terminal deadlock, TakeMainWeapon uses the native SetSlotItem
+    // callback path without the selector's readiness gate. No field is forced to a ready value.
+    // The item/resource and exact native operation must remain unchanged across distinct snapshots.
+    private static bool TryReadFinishedIdleMedsOperation(
+        BotOwner botOwner,
+        MedicalHandsTruth truth,
+        out Player.MedsController? meds,
+        out Player.MedsController.ObservedMedsControllerClass? operation)
+    {
+        meds = null;
+        operation = null;
+        if (botOwner == null || !truth.TypedMedsController || !truth.MedicalHands
+            || truth.AnyMedicineUsing || string.Equals(truth.ItemInstanceId, "none", StringComparison.OrdinalIgnoreCase)
+            || truth.ItemResource < 0f)
+            return false;
+
+        try
+        {
+            meds = botOwner.GetPlayer?.HandsController as Player.MedsController;
+            if (meds is null) return false;
+            operation = ((Player.ItemHandsController)meds).CurrentHandsOperation as Player.MedsController.ObservedMedsControllerClass;
+            return meds != null && operation != null
+                && string.Equals(operation.State.ToString(), "Finished", StringComparison.Ordinal);
+        }
+        catch
+        {
+            meds = null;
+            operation = null;
+            return false;
+        }
+    }
+
+    private static void TryRestoreFinishedMedicalHands(
+        BotOwner botOwner,
+        OperatorDecisionSnapshot snapshot,
+        MedicalHandsTruth truth,
+        DateTimeOffset now,
+        string authorityReason)
+    {
+        if (snapshot == null || string.IsNullOrWhiteSpace(snapshot.BotProfileId)
+            || VanguardExecutionLeaseStore.TryGetActive(snapshot.BotProfileId, out _)
+            || !TryReadFinishedIdleMedsOperation(botOwner, truth, out var meds, out var operation))
+        {
+            ResetFinishedHandsCandidate(snapshot?.BotProfileId);
+            return;
+        }
+
+        if (!ForeignObservations.TryGetValue(snapshot.BotProfileId, out ForeignObservationState? state) || state == null)
+        {
+            state = new ForeignObservationState();
+            ForeignObservations[snapshot.BotProfileId] = state;
+        }
+
+        bool sameTerminalOperation = ReferenceEquals(state.FinishedMedsController, meds)
+            && ReferenceEquals(state.FinishedHandsOperation, operation)
+            && string.Equals(state.FinishedHandsItemInstanceId, truth.ItemInstanceId, StringComparison.OrdinalIgnoreCase)
+            && Math.Abs(state.FinishedHandsItemResource - truth.ItemResource) <= ResourceDeltaEpsilon;
+        if (!sameTerminalOperation)
+        {
+            state.FinishedMedsController = meds;
+            state.FinishedHandsOperation = operation;
+            state.FinishedHandsItemInstanceId = truth.ItemInstanceId;
+            state.FinishedHandsItemResource = truth.ItemResource;
+            state.FinishedHandsCandidateSinceUtc = now;
+            state.FinishedHandsLastSnapshotAtUtc = snapshot.CapturedAtUtc == DateTimeOffset.MinValue ? now : snapshot.CapturedAtUtc;
+            state.FinishedHandsCandidateSnapshots = 1;
+            state.FinishedHandsRestoreRequests = 0;
+            state.FinishedHandsLastRequestAtUtc = DateTimeOffset.MinValue;
+            state.FinishedHandsExhaustionLogged = false;
+            return;
+        }
+
+        DateTimeOffset observationAt = snapshot.CapturedAtUtc == DateTimeOffset.MinValue ? now : snapshot.CapturedAtUtc;
+        if (state.FinishedHandsLastSnapshotAtUtc != observationAt)
+        {
+            state.FinishedHandsLastSnapshotAtUtc = observationAt;
+            state.FinishedHandsCandidateSnapshots++;
+        }
+        if (state.FinishedHandsCandidateSnapshots < RequiredSnapshots
+            || now - state.FinishedHandsCandidateSinceUtc < FinishedHandsSettleGrace)
+            return;
+
+        if (state.FinishedHandsRestoreRequests >= MaximumFinishedHandsRestoreRequests)
+        {
+            if (!state.FinishedHandsExhaustionLogged
+                && now - state.FinishedHandsLastRequestAtUtc >= FinishedHandsRestoreRetryDelay)
+            {
+                state.FinishedHandsExhaustionLogged = true;
+                VanguardClientDiagnosticsLog.Warning(MedicalHandsWatchdogStatusTag,
+                    $"VANGUARD_MEDICAL_FINISHED_HANDS_RESTORE_UNCONFIRMED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; itemInstance={Safe(truth.ItemInstanceId)}; requests={state.FinishedHandsRestoreRequests}; activeLease=false; sameTerminalOperation=true; recoveryExhausted=true; next=observe_native_truth; {truth.Summary}; tag={MedicalHandsWatchdogStatusTag}");
+            }
+            return;
+        }
+        if (state.FinishedHandsLastRequestAtUtc != DateTimeOffset.MinValue
+            && now - state.FinishedHandsLastRequestAtUtc < FinishedHandsRestoreRetryDelay)
+            return;
+
+        // A real native inventory/weapon transition is not a stuck terminal state. Never
+        // interleave our fallback with one, and never restore while the bot is despawning.
+        try
+        {
+            var player = botOwner.GetPlayer;
+            var selector = botOwner.WeaponManager?.Selector;
+            if (botOwner.BotState != EBotState.Active || player?.InventoryController == null
+                || player.InventoryController.IsChangingWeapon
+                || selector == null || selector.IsChanging
+                || (selector.StartChangeTime > 0f && UnityEngine.Time.time - selector.StartChangeTime < 5f)
+                || botOwner.WeaponManager?.Reload?.Reloading == true)
+                return;
+
+            if (!ReferenceEquals(player.HandsController, meds)
+                || !ReferenceEquals(((Player.ItemHandsController)meds).CurrentHandsOperation as Player.MedsController.ObservedMedsControllerClass, operation)
+                || !string.Equals(operation?.State.ToString(), "Finished", StringComparison.Ordinal))
+                return;
+
+            selector.FindItemsInSlots(anyway: true);
+            if (selector.FirstPrimaryWeaponItem == null && selector.SecondPrimaryWeaponItem == null
+                && selector.HolsterItem == null)
+                return;
+
+            state.FinishedHandsRestoreRequests++;
+            state.FinishedHandsLastRequestAtUtc = now;
+            selector.TakeMainWeapon();
+            VanguardClientDiagnosticsLog.Warning(MedicalHandsWatchdogStatusTag,
+                $"VANGUARD_MEDICAL_FINISHED_HANDS_NATIVE_RESTORE_REQUESTED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; source={Safe(authorityReason)}; operationState=Finished; stableSeconds={(now - state.FinishedHandsCandidateSinceUtc).TotalSeconds:0.00}; stableSnapshots={state.FinishedHandsCandidateSnapshots}; itemInstance={Safe(truth.ItemInstanceId)}; itemResource={truth.ItemResource:0.00}; selectorReadyBefore={Bool(truth.NativeSelectorReady)}; requests={state.FinishedHandsRestoreRequests}; nativeAction=BotWeaponSelector.TakeMainWeapon; healthMutation=false; itemResourceMutation=false; childCancellation=false; rawFieldOverride=false; completionProof=pending_weapon_hands_observation; {truth.Summary}; tag={MedicalHandsWatchdogStatusTag}");
+        }
+        catch (Exception ex)
+        {
+            // Failure consumes a bounded attempt; a new action cannot be claimed successful.
+            VanguardClientDiagnosticsLog.Warning(MedicalHandsWatchdogStatusTag,
+                $"VANGUARD_MEDICAL_FINISHED_HANDS_NATIVE_RESTORE_FAILED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; reason={Safe(ex.GetType().Name)}; requests={state.FinishedHandsRestoreRequests}; restored=false; tag={MedicalHandsWatchdogStatusTag}");
+        }
+    }
+
+    private static void ConfirmFinishedHandsRestoration(OperatorDecisionSnapshot snapshot, MedicalHandsTruth truth, DateTimeOffset now)
+    {
+        if (snapshot == null || !truth.PositiveTerminalTruth || !truth.NativeSelectorReady
+            || string.IsNullOrWhiteSpace(snapshot.BotProfileId)
+            || !ForeignObservations.TryGetValue(snapshot.BotProfileId, out ForeignObservationState? state)
+            || state == null || state.FinishedHandsRestoreRequests == 0)
+            return;
+        VanguardClientDiagnosticsLog.Info(MedicalHandsWatchdogStatusTag,
+            $"VANGUARD_MEDICAL_FINISHED_HANDS_RESTORED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; requestCount={state.FinishedHandsRestoreRequests}; nativeWeaponHandsConfirmed=true; stableSince={state.FinishedHandsCandidateSinceUtc:O}; confirmedAt={now:O}; tag={MedicalHandsWatchdogStatusTag}");
+    }
+
+    private static void ResetFinishedHandsCandidate(string? botProfileId)
+    {
+        if (string.IsNullOrWhiteSpace(botProfileId)
+            || !ForeignObservations.TryGetValue(botProfileId, out ForeignObservationState? state)
+            || state == null)
+            return;
+        state.FinishedMedsController = null;
+        state.FinishedHandsOperation = null;
+        state.FinishedHandsItemInstanceId = "none";
+        state.FinishedHandsItemResource = -1f;
+        state.FinishedHandsCandidateSinceUtc = DateTimeOffset.MinValue;
+        state.FinishedHandsLastSnapshotAtUtc = DateTimeOffset.MinValue;
+        state.FinishedHandsCandidateSnapshots = 0;
+        state.FinishedHandsRestoreRequests = 0;
+        state.FinishedHandsLastRequestAtUtc = DateTimeOffset.MinValue;
+        state.FinishedHandsExhaustionLogged = false;
+    }
+
+    private static bool TryRecoverTerminalStaleForeignMedicalHands(
+        BotOwner botOwner,
+        OperatorDecisionSnapshot snapshot,
+        MedicalHandsTruth truth,
+        DateTimeOffset now,
+        out string summary)
+    {
+        summary = "foreignStaleRecovery=not_qualified";
+        if (botOwner == null
+            || snapshot == null
+            || string.IsNullOrWhiteSpace(snapshot.BotProfileId)
+            || VanguardExecutionLeaseStore.TryGetActive(snapshot.BotProfileId, out _)
+            || !truth.TypedMedsController
+            || !truth.MedicalHands
+            || truth.AnyMedicineUsing
+            || (!truth.NativeSelectorReady && !IsExhaustedIdleMedsController(botOwner, truth))
+            || string.Equals(truth.ItemInstanceId, "none", StringComparison.OrdinalIgnoreCase))
+        {
+            ResetForeignStaleCandidate(snapshot?.BotProfileId);
+            return false;
+        }
+
+        if (!ForeignObservations.TryGetValue(snapshot.BotProfileId, out ForeignObservationState? state) || state == null)
+        {
+            state = new ForeignObservationState();
+            ForeignObservations[snapshot.BotProfileId] = state;
+        }
+
+        bool sameItem = string.Equals(state.StaleCandidateItemInstanceId, truth.ItemInstanceId, StringComparison.OrdinalIgnoreCase);
+        bool resourceStable = sameItem
+            && state.StaleCandidateItemResource >= 0f
+            && truth.ItemResource >= 0f
+            && Math.Abs(state.StaleCandidateItemResource - truth.ItemResource) <= ResourceDeltaEpsilon;
+        if (!sameItem || !resourceStable)
+        {
+            state.StaleCandidateSinceUtc = now;
+            state.StaleCandidateSnapshots = 1;
+            state.StaleCandidateItemInstanceId = truth.ItemInstanceId;
+            state.StaleCandidateItemResource = truth.ItemResource;
+            state.LastStaleCandidateSnapshotAtUtc = snapshot.CapturedAtUtc == DateTimeOffset.MinValue ? now : snapshot.CapturedAtUtc;
+            summary = "foreignStaleRecovery=settling;reason=new_or_resource_changed";
+            return false;
+        }
+
+        DateTimeOffset observationAt = snapshot.CapturedAtUtc == DateTimeOffset.MinValue ? now : snapshot.CapturedAtUtc;
+        if (state.LastStaleCandidateSnapshotAtUtc != observationAt)
+        {
+            state.LastStaleCandidateSnapshotAtUtc = observationAt;
+            state.StaleCandidateSnapshots++;
+        }
+        state.StaleCandidateItemResource = truth.ItemResource;
+
+        bool stableTerminalStale = state.StaleCandidateSnapshots >= RequiredSnapshots
+            && state.StaleCandidateSinceUtc != DateTimeOffset.MinValue
+            && now - state.StaleCandidateSinceUtc >= ForeignStalePhysicalSettleGrace;
+        if (!stableTerminalStale)
+        {
+            summary = "foreignStaleRecovery=settling;snapshots=" + state.StaleCandidateSnapshots
+                + ";ageSeconds=" + Math.Max(0d, (now - state.StaleCandidateSinceUtc).TotalSeconds).ToString("0.00", System.Globalization.CultureInfo.InvariantCulture);
+            return false;
+        }
+
+        if (state.ForeignStaleRecoveryRequestCount >= MaximumForeignStaleRecoveryRequests
+            || (state.LastForeignStaleRecoveryRequestAtUtc != DateTimeOffset.MinValue
+                && now - state.LastForeignStaleRecoveryRequestAtUtc < ForeignStaleRecoveryRetryDelay))
+        {
+            summary = "foreignStaleRecovery=bounded_wait;requests=" + state.ForeignStaleRecoveryRequestCount;
+            return false;
+        }
+
+        bool fastForwardRequested = false;
+        bool takePrevWeapon = false;
+        try
+        {
+            if (botOwner.GetPlayer?.HandsController is Player.MedsController medsController)
+            {
+                // CaptureTruth read the item from this exact typed controller in this same tick. The
+                // stable-candidate proof above already binds its instance/resource across snapshots.
+                medsController.FastForwardCurrentState();
+                fastForwardRequested = true;
+            }
+        }
+        catch { }
+        if (fastForwardRequested && state.ForeignStaleRecoveryRequestCount > 0)
+        {
+            // Give the native MedsController one full retry window to finish its own transition. Only
+            // the bounded second request also asks the native selector to restore the previous weapon.
+            takePrevWeapon = InvokeNoArg(VanguardOperatorRuntimeAuditReflection.GetDeep(botOwner, "WeaponManager", "Selector"), "TakePrevWeapon");
+        }
+
+        state.ForeignStaleRecoveryRequestCount++;
+        state.LastForeignStaleRecoveryRequestAtUtc = now;
+        VanguardClientDiagnosticsLog.Warning(MedicalHandsWatchdogStatusTag,
+            $"VANGUARD_MEDICAL_FOREIGN_STALE_CONTROLLER_RECOVERY_REQUESTED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; recoveryAuthority=terminal_stale_native_controller; activeVanguardLease=false; proof=typed_meds_controller+all_using_false+(native_selector_ready_or_exhausted_idle)+same_item_resource_stable; exhaustedIdle={Bool(IsExhaustedIdleMedsController(botOwner, truth))}; stableSeconds={Math.Max(0d, (now - state.StaleCandidateSinceUtc).TotalSeconds):0.00}; stableSnapshots={state.StaleCandidateSnapshots}; requestCount={state.ForeignStaleRecoveryRequestCount}; requestBudget={MaximumForeignStaleRecoveryRequests}; fastForwardCurrentState={Bool(fastForwardRequested)}; takePrevWeapon={Bool(takePrevWeapon)}; healthMutation=false; itemResourceMutation=false; childCancellation=false; rawControllerFieldClear=false; {truth.Summary}; tag={MedicalHandsWatchdogStatusTag}; legacyTag={StatusTag}");
+        summary = "foreignStaleRecovery=requested;fastForward=" + Bool(fastForwardRequested) + ";takePrevWeapon=" + Bool(takePrevWeapon);
+        return fastForwardRequested || takePrevWeapon;
+    }
+
+    private static void ResetForeignStaleCandidate(string? botProfileId)
+    {
+        if (string.IsNullOrWhiteSpace(botProfileId)
+            || !ForeignObservations.TryGetValue(botProfileId, out ForeignObservationState? state)
+            || state == null)
+        {
+            return;
+        }
+        state.StaleCandidateSinceUtc = DateTimeOffset.MinValue;
+        state.StaleCandidateSnapshots = 0;
+        state.StaleCandidateItemInstanceId = "none";
+        state.StaleCandidateItemResource = -1f;
+        state.LastStaleCandidateSnapshotAtUtc = DateTimeOffset.MinValue;
+        state.ForeignStaleRecoveryRequestCount = 0;
+        state.LastForeignStaleRecoveryRequestAtUtc = DateTimeOffset.MinValue;
+    }
+
     private static void ObserveForeignMedicalActivity(
         OperatorDecisionSnapshot snapshot,
         MedicalHandsTruth truth,
@@ -739,8 +1175,35 @@ internal static class VanguardMedicalHandsWatchdogService
         if (signatureChanged || resourceDropped || periodic)
         {
             float delta = resourceDropped ? state.LastItemResource - truth.ItemResource : 0f;
+            // Capture read-only native-operation evidence only when the existing throttled observation emits.
+            // This is diagnostic: it does not qualify a recovery request or affect native medicine.
+            // Resolve the existing runtime only when this already-throttled diagnostic is emitted.
+            // A missing or unreadable owner is unknown evidence, never terminality proof.
+            string foreignOperationProbe = "foreignTerminalSnapshotGate=unknown"
+                + ";foreignHandsType=unknown"
+                + ";foreignHandsIdentity=unknown"
+                + ";foreignOperationType=unknown"
+                + ";foreignOperationIdentity=unknown"
+                + ";foreignOperationState=unknown"
+                + ";foreignSelectorChanging=unknown"
+                + ";foreignInventoryChanging=unknown"
+                + ";foreignSelectorErrors=unknown"
+                + ";foreignProbeReadOnly=true";
+            try
+            {
+                if (VanguardRaidOperatorRuntimeRegistry.TryGetRuntimeByBotProfileId(
+                        snapshot.BotProfileId, out VanguardRaidOperatorRuntimeRecord runtime)
+                    && runtime.BotOwner != null)
+                {
+                    foreignOperationProbe = DescribeForeignMedicalOperation(runtime.BotOwner, truth);
+                }
+            }
+            catch
+            {
+                // Read-only diagnostic failure must never alter native medicine or recovery gates.
+            }
             VanguardClientDiagnosticsLog.Info(StatusTag,
-                $"{ForeignActivityTag} operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; reason={Safe(reason)}; recoveryAuthority=None; activeVanguardLease=false; watchdogAdmissionStateCreated=false; nativeMutation=false; cancellationRequested=false; ownershipViolation=false; resourceActivityObserved={Bool(resourceDropped)}; resourceDelta={delta:0.00}; {truth.Summary}; tag={StatusTag}");
+                $"{ForeignActivityTag} operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; reason={Safe(reason)}; recoveryAuthority=None; activeVanguardLease=false; watchdogAdmissionStateCreated=false; nativeMutation=false; cancellationRequested=false; ownershipViolation=false; resourceActivityObserved={Bool(resourceDropped)}; resourceDelta={delta:0.00}; {truth.Summary}; {foreignOperationProbe}; tag={StatusTag}");
             state.LastLogAtUtc = now;
         }
 
@@ -749,6 +1212,84 @@ internal static class VanguardMedicalHandsWatchdogService
         state.LastItemResource = truth.ItemResource;
         state.LastHandsType = truth.HandsType;
         state.LastObservedAtUtc = now;
+    }
+
+    // Exposes why a foreign typed MedsController cannot enter the terminal-stale observation
+    // candidate path. No recovery action, native state write or new log emission is performed.
+    // Read failures are reported as unknown rather than treated as terminal evidence.
+    private static string DescribeForeignMedicalOperation(BotOwner botOwner, MedicalHandsTruth truth)
+    {
+        string snapshotGate = !truth.TypedMedsController || !truth.MedicalHands
+            ? "typed_controller_unavailable"
+            : truth.AnyMedicineUsing
+                ? "native_medicine_still_using"
+                : string.Equals(truth.ItemInstanceId, "none", StringComparison.OrdinalIgnoreCase)
+                    ? "item_identity_unavailable"
+                    : !truth.NativeSelectorReady && !IsExhaustedIdleMedsController(botOwner, truth)
+                        ? "native_selector_unready_nonexhausted"
+                        : "snapshot_eligible_stability_unproven";
+        string handsType = "unknown";
+        string handsIdentity = "unknown";
+        string operationType = "unknown";
+        string operationIdentity = "unknown";
+        string operationState = "unknown";
+        string selectorChanging = "unknown";
+        string inventoryChanging = "unknown";
+        string selectorErrorCount = "unknown";
+        try
+        {
+            Player? player = botOwner.GetPlayer;
+            object? hands = player?.HandsController;
+            if (hands != null)
+            {
+                handsType = Safe(hands.GetType().Name);
+                handsIdentity = System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(hands)
+                    .ToString(System.Globalization.CultureInfo.InvariantCulture);
+                object? operation = VanguardOperatorRuntimeAuditReflection.GetPropertyOrField(
+                    hands, "ObservedMedsControllerClass", "CurrentHandsOperation", "CurrentOperation");
+                if (operation != null)
+                {
+                    operationType = Safe(operation.GetType().Name);
+                    operationIdentity = System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(operation)
+                        .ToString(System.Globalization.CultureInfo.InvariantCulture);
+                    object? nativeState = VanguardOperatorRuntimeAuditReflection.GetPropertyOrField(operation, "State");
+                    operationState = nativeState == null
+                        ? "unknown"
+                        : Safe(VanguardOperatorRuntimeAuditReflection.Text(nativeState));
+                }
+            }
+        }
+        catch
+        {
+            // Diagnostic-only: unreadable EFT controller never supplies terminality proof.
+        }
+        try
+        {
+            var selector = botOwner.WeaponManager?.Selector;
+            if (selector != null)
+            {
+                selectorChanging = Bool(selector.IsChanging);
+                selectorErrorCount = selector.ErrorCounter.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            }
+        }
+        catch { }
+        try
+        {
+            var inventory = botOwner.GetPlayer?.InventoryController;
+            if (inventory != null)
+                inventoryChanging = Bool(inventory.IsChangingWeapon);
+        }
+        catch { }
+        return "foreignTerminalSnapshotGate=" + snapshotGate
+            + ";foreignHandsType=" + handsType
+            + ";foreignHandsIdentity=" + handsIdentity
+            + ";foreignOperationType=" + operationType
+            + ";foreignOperationIdentity=" + operationIdentity
+            + ";foreignOperationState=" + operationState
+            + ";foreignSelectorChanging=" + selectorChanging
+            + ";foreignInventoryChanging=" + inventoryChanging
+            + ";foreignSelectorErrors=" + selectorErrorCount
+            + ";foreignProbeReadOnly=true";
     }
 
     private static void ClearForeignObservation(string botProfileId)
@@ -860,6 +1401,23 @@ internal static class VanguardMedicalHandsWatchdogService
         public string LastHandsType = "none";
         public DateTimeOffset LastObservedAtUtc = DateTimeOffset.MinValue;
         public DateTimeOffset LastLogAtUtc = DateTimeOffset.MinValue;
+        public DateTimeOffset StaleCandidateSinceUtc = DateTimeOffset.MinValue;
+        public int StaleCandidateSnapshots;
+        public string StaleCandidateItemInstanceId = "none";
+        public float StaleCandidateItemResource = -1f;
+        public DateTimeOffset LastStaleCandidateSnapshotAtUtc = DateTimeOffset.MinValue;
+        public int ForeignStaleRecoveryRequestCount;
+        public DateTimeOffset LastForeignStaleRecoveryRequestAtUtc = DateTimeOffset.MinValue;
+        public Player.MedsController? FinishedMedsController;
+        public Player.MedsController.ObservedMedsControllerClass? FinishedHandsOperation;
+        public string FinishedHandsItemInstanceId = "none";
+        public float FinishedHandsItemResource = -1f;
+        public DateTimeOffset FinishedHandsCandidateSinceUtc = DateTimeOffset.MinValue;
+        public DateTimeOffset FinishedHandsLastSnapshotAtUtc = DateTimeOffset.MinValue;
+        public int FinishedHandsCandidateSnapshots;
+        public int FinishedHandsRestoreRequests;
+        public DateTimeOffset FinishedHandsLastRequestAtUtc = DateTimeOffset.MinValue;
+        public bool FinishedHandsExhaustionLogged;
     }
 
     private readonly struct MedicalHandsTruth
@@ -872,6 +1430,7 @@ internal static class VanguardMedicalHandsWatchdogService
             bool medicalHands,
             bool typedMedsController,
             bool weaponReady,
+            bool nativeSelectorReady,
             string handsType,
             string itemSource,
             string itemInstanceId,
@@ -887,6 +1446,7 @@ internal static class VanguardMedicalHandsWatchdogService
             MedicalHands = medicalHands;
             TypedMedsController = typedMedsController;
             WeaponReady = weaponReady;
+            NativeSelectorReady = nativeSelectorReady;
             HandsType = handsType;
             ItemSource = itemSource;
             ItemInstanceId = itemInstanceId;
@@ -903,6 +1463,7 @@ internal static class VanguardMedicalHandsWatchdogService
         public bool MedicalHands { get; }
         public bool TypedMedsController { get; }
         public bool WeaponReady { get; }
+        public bool NativeSelectorReady { get; }
         public string HandsType { get; }
         public string ItemSource { get; }
         public string ItemInstanceId { get; }
@@ -931,6 +1492,7 @@ internal static class VanguardMedicalHandsWatchdogService
             + ";medicalHands=" + Bool(MedicalHands)
             + ";typedMedsController=" + Bool(TypedMedsController)
             + ";weaponReady=" + Bool(WeaponReady)
+            + ";nativeSelectorReady=" + Bool(NativeSelectorReady)
             + ";hands=" + Safe(HandsType)
             + ";itemSource=" + Safe(ItemSource)
             + ";itemInstance=" + Safe(ItemInstanceId)
@@ -960,6 +1522,7 @@ internal static class VanguardMedicalHandsWatchdogService
             bool medEffectRemoved,
             bool healthCancel,
             bool medsQueueCleared,
+            bool fastForwardCurrentState,
             bool firstAidCancel,
             bool surgeryCancel,
             bool stimulantCancel,
@@ -971,6 +1534,7 @@ internal static class VanguardMedicalHandsWatchdogService
             MedEffectRemoved = medEffectRemoved;
             HealthCancel = healthCancel;
             MedsQueueCleared = medsQueueCleared;
+            FastForwardCurrentState = fastForwardCurrentState;
             FirstAidCancel = firstAidCancel;
             SurgeryCancel = surgeryCancel;
             StimulantCancel = stimulantCancel;
@@ -983,6 +1547,7 @@ internal static class VanguardMedicalHandsWatchdogService
         public bool MedEffectRemoved { get; }
         public bool HealthCancel { get; }
         public bool MedsQueueCleared { get; }
+        public bool FastForwardCurrentState { get; }
         public bool FirstAidCancel { get; }
         public bool SurgeryCancel { get; }
         public bool StimulantCancel { get; }
@@ -994,6 +1559,7 @@ internal static class VanguardMedicalHandsWatchdogService
             + ";activeMedEffectRemoved=" + Bool(MedEffectRemoved)
             + ";healthControllerCancelApplyingItem=" + Bool(HealthCancel)
             + ";typedMedsQueueClear=" + Bool(MedsQueueCleared)
+            + ";fastForwardCurrentState=" + Bool(FastForwardCurrentState)
             + ";typedMedsRemoveRequested=false"
             + ";firstAidCancel=" + Bool(FirstAidCancel)
             + ";surgeryCancel=" + Bool(SurgeryCancel)

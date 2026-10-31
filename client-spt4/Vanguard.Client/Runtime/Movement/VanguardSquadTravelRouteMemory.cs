@@ -117,6 +117,19 @@ internal static class VanguardSquadTravelRouteMemory
             $"VANGUARD_TRAVEL_ROUTE_RESET reason={Safe(reason)}; owners=cleared; cursors=cleared; doctrine=append_only_owner_breadcrumbs_monotonic_operator_progress_no_transform_forward_anchor; tag={StatusTag}");
     }
 
+    public static bool ForgetRuntimePresence(string? botProfileId)
+    {
+        if (string.IsNullOrWhiteSpace(botProfileId))
+        {
+            return false;
+        }
+
+        lock (Sync)
+        {
+            return CursorByBotProfileId.Remove(botProfileId.Trim());
+        }
+    }
+
     public static void Update(IReadOnlyList<OperatorDecisionSnapshot> snapshots, DateTimeOffset now)
     {
         if (snapshots == null || snapshots.Count == 0)
@@ -266,7 +279,7 @@ internal static class VanguardSquadTravelRouteMemory
                 cursor = InitializeCursor(route, snapshot, snapshot.Position, now);
             }
 
-            string mode = ResolveMode(ref cursor, snapshot.SquadCohesion.OperatorDistanceToOwner, now, out var modeReason);
+            string mode = ResolveMode(ref cursor, snapshot.SquadCohesion.OperatorDistanceToOwner, VanguardMovementAuthorityDoctrine.ForOwner(snapshot.OwnerProfileId), now, out var modeReason);
             cursor = AdvanceCursor(route, cursor, snapshot.Position, mode, now);
             CursorByBotProfileId[snapshot.BotProfileId] = cursor;
             LogModeTransition(snapshot, cursor, modeReason, now);
@@ -368,6 +381,7 @@ internal static class VanguardSquadTravelRouteMemory
                 return false;
             }
 
+            var ownerPolicy = VanguardMovementAuthorityDoctrine.ForOwner(snapshot.OwnerProfileId);
             float ownerDistance = snapshot.SquadCohesion.OperatorDistanceToOwner;
             if (ownerDistance > VanguardMovementAuthorityDoctrine.TravelPostInterruptionReconcileMaximumOwnerDistanceMeters)
             {
@@ -377,11 +391,11 @@ internal static class VanguardSquadTravelRouteMemory
             }
 
             string mode = cursor.TravelMode;
-            if (ownerDistance >= VanguardMovementAuthorityDoctrine.HardCorrectionMeters)
+            if (ownerDistance >= ownerPolicy.HardCorrectionMeters)
             {
                 mode = VanguardTravelRouteModes.EmergencyCatchUp;
             }
-            else if (ownerDistance >= VanguardMovementAuthorityDoctrine.TravelCatchUpEnterMeters
+            else if (ownerDistance >= ownerPolicy.TravelCatchUpEnterMeters
                 && string.Equals(mode, VanguardTravelRouteModes.FormationTravel, StringComparison.OrdinalIgnoreCase))
             {
                 mode = VanguardTravelRouteModes.CatchUp;
@@ -584,12 +598,13 @@ internal static class VanguardSquadTravelRouteMemory
 
             // Candidate probing remains side-effect free. Resolve only the urgency escalation implied
             // by current distance; do not mutate the stored mode or cursor before command confirmation.
+            var ownerPolicy = VanguardMovementAuthorityDoctrine.ForOwner(snapshot.OwnerProfileId);
             string mode = cursor.TravelMode;
-            if (snapshot.SquadCohesion.OperatorDistanceToOwner >= VanguardMovementAuthorityDoctrine.HardCorrectionMeters)
+            if (snapshot.SquadCohesion.OperatorDistanceToOwner >= ownerPolicy.HardCorrectionMeters)
             {
                 mode = VanguardTravelRouteModes.EmergencyCatchUp;
             }
-            else if (snapshot.SquadCohesion.OperatorDistanceToOwner >= VanguardMovementAuthorityDoctrine.TravelCatchUpEnterMeters
+            else if (snapshot.SquadCohesion.OperatorDistanceToOwner >= ownerPolicy.TravelCatchUpEnterMeters
                 && string.Equals(mode, VanguardTravelRouteModes.FormationTravel, StringComparison.OrdinalIgnoreCase))
             {
                 mode = VanguardTravelRouteModes.CatchUp;
@@ -789,7 +804,7 @@ internal static class VanguardSquadTravelRouteMemory
             // Normal target resolution owns the physical monotonic cursor update. This must remain
             // active during a running Travel lease: otherwise the cursor freezes at an old breadcrumb,
             // creates artificial route debt and repeatedly reopens CatchUp windows.
-            string mode = ResolveMode(ref cursor, snapshot.SquadCohesion.OperatorDistanceToOwner, now, out var modeReason);
+            string mode = ResolveMode(ref cursor, snapshot.SquadCohesion.OperatorDistanceToOwner, VanguardMovementAuthorityDoctrine.ForOwner(snapshot.OwnerProfileId), now, out var modeReason);
             cursor = AdvanceCursor(route, cursor, botPosition, mode, now);
             CursorByBotProfileId[snapshot.BotProfileId] = cursor;
             LogModeTransition(snapshot, cursor, modeReason, now);
@@ -955,7 +970,7 @@ internal static class VanguardSquadTravelRouteMemory
     private static OperatorRouteCursor InitializeCursor(OwnerRouteState route, OperatorDecisionSnapshot snapshot, Vector3 botPosition, DateTimeOffset now)
     {
         float projected = ProjectNearestProgress(route, botPosition, route.Nodes[0].ProgressMeters, route.OwnerProgressMeters, out _);
-        string initialMode = ResolveInitialMode(snapshot.SquadCohesion.OperatorDistanceToOwner);
+        string initialMode = ResolveInitialMode(snapshot.SquadCohesion.OperatorDistanceToOwner, VanguardMovementAuthorityDoctrine.ForOwner(snapshot.OwnerProfileId));
         return new OperatorRouteCursor
         {
             OwnerProfileId = route.OwnerProfileId,
@@ -1227,25 +1242,25 @@ internal static class VanguardSquadTravelRouteMemory
         return false;
     }
 
-    private static string ResolveInitialMode(float ownerDistance)
+    private static string ResolveInitialMode(float ownerDistance, VanguardMovementAuthorityDoctrine.OwnerMovementPolicy ownerPolicy)
     {
-        if (ownerDistance >= VanguardMovementAuthorityDoctrine.HardCorrectionMeters)
+        if (ownerDistance >= ownerPolicy.HardCorrectionMeters)
         {
             return VanguardTravelRouteModes.EmergencyCatchUp;
         }
 
-        return ownerDistance >= VanguardMovementAuthorityDoctrine.TravelCatchUpEnterMeters
+        return ownerDistance >= ownerPolicy.TravelCatchUpEnterMeters
             ? VanguardTravelRouteModes.CatchUp
             : VanguardTravelRouteModes.FormationTravel;
     }
 
-    private static string ResolveMode(ref OperatorRouteCursor cursor, float ownerDistance, DateTimeOffset now, out string reason)
+    private static string ResolveMode(ref OperatorRouteCursor cursor, float ownerDistance, VanguardMovementAuthorityDoctrine.OwnerMovementPolicy ownerPolicy, DateTimeOffset now, out string reason)
     {
         string current = string.IsNullOrWhiteSpace(cursor.TravelMode)
-            ? ResolveInitialMode(ownerDistance)
+            ? ResolveInitialMode(ownerDistance, ownerPolicy)
             : cursor.TravelMode;
 
-        if (ownerDistance >= VanguardMovementAuthorityDoctrine.HardCorrectionMeters)
+        if (ownerDistance >= ownerPolicy.HardCorrectionMeters)
         {
             bool changed = !string.Equals(current, VanguardTravelRouteModes.EmergencyCatchUp, StringComparison.OrdinalIgnoreCase);
             cursor.TravelMode = VanguardTravelRouteModes.EmergencyCatchUp;
@@ -1258,17 +1273,17 @@ internal static class VanguardSquadTravelRouteMemory
 
         string candidate = string.Empty;
         if (string.Equals(current, VanguardTravelRouteModes.EmergencyCatchUp, StringComparison.OrdinalIgnoreCase)
-            && ownerDistance <= VanguardMovementAuthorityDoctrine.SoftCorrectionMeters)
+            && ownerDistance <= ownerPolicy.SoftCorrectionMeters)
         {
             candidate = VanguardTravelRouteModes.CatchUp;
         }
         else if (string.Equals(current, VanguardTravelRouteModes.FormationTravel, StringComparison.OrdinalIgnoreCase)
-            && ownerDistance >= VanguardMovementAuthorityDoctrine.TravelCatchUpEnterMeters)
+            && ownerDistance >= ownerPolicy.TravelCatchUpEnterMeters)
         {
             candidate = VanguardTravelRouteModes.CatchUp;
         }
         else if (string.Equals(current, VanguardTravelRouteModes.CatchUp, StringComparison.OrdinalIgnoreCase)
-            && ownerDistance <= VanguardMovementAuthorityDoctrine.TravelCatchUpExitMeters)
+            && ownerDistance <= ownerPolicy.TravelCatchUpExitMeters)
         {
             candidate = VanguardTravelRouteModes.FormationTravel;
         }
@@ -1292,7 +1307,7 @@ internal static class VanguardSquadTravelRouteMemory
         }
 
         double dwell = Math.Max(0d, (now - cursor.PendingTravelModeSinceUtc).TotalSeconds);
-        if (dwell < VanguardMovementAuthorityDoctrine.TravelModeDwellSeconds)
+        if (dwell < ownerPolicy.TravelModeDwellSeconds)
         {
             cursor.TravelMode = current;
             reason = "transition_dwelling:" + candidate + ":" + dwell.ToString("0.00", CultureInfo.InvariantCulture);
@@ -1309,6 +1324,7 @@ internal static class VanguardSquadTravelRouteMemory
 
     private static void LogModeTransition(OperatorDecisionSnapshot snapshot, OperatorRouteCursor cursor, string reason, DateTimeOffset now)
     {
+        var ownerPolicy = VanguardMovementAuthorityDoctrine.ForOwner(snapshot.OwnerProfileId);
         string normalizedReason = reason ?? string.Empty;
         bool meaningful = normalizedReason.StartsWith("transition_pending", StringComparison.OrdinalIgnoreCase)
             || normalizedReason.StartsWith("transition_committed", StringComparison.OrdinalIgnoreCase)
@@ -1324,7 +1340,7 @@ internal static class VanguardSquadTravelRouteMemory
                 ? "transition_committed"
                 : normalizedReason;
         LogThrottled("Mode|" + snapshot.BotProfileId + "|" + reasonKey + "|" + cursor.TravelMode + "|" + cursor.PendingTravelMode, now,
-            $"VANGUARD_TRAVEL_MODE_HYSTERESIS operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; mode={Safe(cursor.TravelMode)}; pending={Safe(cursor.PendingTravelMode)}; ownerDistance={snapshot.SquadCohesion.OperatorDistanceToOwner:0.00}; enter={VanguardMovementAuthorityDoctrine.TravelCatchUpEnterMeters:0.00}; exit={VanguardMovementAuthorityDoctrine.TravelCatchUpExitMeters:0.00}; dwell={VanguardMovementAuthorityDoctrine.TravelModeDwellSeconds:0.00}; reason={Safe(normalizedReason)}; emergencyEnterImmediate=true; emergencyExit={VanguardMovementAuthorityDoctrine.SoftCorrectionMeters:0.00}; emergencyExitUsesDwell=true; tag={StatusTag}");
+            $"VANGUARD_TRAVEL_MODE_HYSTERESIS operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; mode={Safe(cursor.TravelMode)}; pending={Safe(cursor.PendingTravelMode)}; ownerDistance={snapshot.SquadCohesion.OperatorDistanceToOwner:0.00}; enter={ownerPolicy.TravelCatchUpEnterMeters:0.00}; exit={ownerPolicy.TravelCatchUpExitMeters:0.00}; dwell={ownerPolicy.TravelModeDwellSeconds:0.00}; reason={Safe(normalizedReason)}; emergencyEnterImmediate=true; emergencyExit={ownerPolicy.SoftCorrectionMeters:0.00}; emergencyExitUsesDwell=true; tag={StatusTag}");
     }
 
     private static float ResolveLongitudinalOffset(OperatorRouteCursor cursor, string mode)

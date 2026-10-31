@@ -33,6 +33,18 @@ internal static class VanguardCombatNoFireWatchdogService
         VanguardClientDiagnosticsLog.Info(StatusTag, $"VANGUARD_COMBAT_NO_FIRE_WATCHDOG_RESET reason={Safe(reason)}; state=cleared; tag={StatusTag}");
     }
 
+    public static string ForgetRuntimePresence(string? botProfileId, string reason)
+    {
+        string key = string.IsNullOrWhiteSpace(botProfileId) ? string.Empty : botProfileId.Trim();
+        if (key.Length == 0)
+        {
+            return "ignored=missing_bot_profile";
+        }
+
+        bool removed = StateByBotProfileId.Remove(key);
+        return $"stateRemoved={(removed ? "true" : "false")}; reason={Safe(reason)}";
+    }
+
     public static void Tick()
     {
         var now = DateTimeOffset.UtcNow;

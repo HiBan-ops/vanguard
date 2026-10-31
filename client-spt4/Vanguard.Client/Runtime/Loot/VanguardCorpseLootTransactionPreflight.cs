@@ -25,7 +25,7 @@ namespace Vanguard.Client.Runtime.Loot;
 /// </summary>
 internal static class VanguardCorpseLootTransactionPreflight
 {
-    private const int MaximumCandidates = 8;
+    internal const int MaximumCandidates = 8;
 
     private delegate bool LiveItemResolver(string itemId, out Item item, out string sourcePath, out string sourceAddress);
 
@@ -310,7 +310,15 @@ internal static class VanguardCorpseLootTransactionPreflight
                 return false;
             }
 
-            if (prepared.Preflight.SecondarySwap)
+            if (prepared.Preflight.MagazineReplacementSwap)
+            {
+                if (!VanguardMagazineReplacementSwapPreflight.Revalidate(prepared, botOwner, out string magazineSwapReason))
+                {
+                    reason = magazineSwapReason;
+                    return false;
+                }
+            }
+            else if (prepared.Preflight.SecondarySwap)
             {
                 if (!VanguardOperatorRaidLoadoutRegistry.TryGet(botProfileId, out VanguardOperatorRaidLoadoutSnapshot loadout)
                     || !prepared.LongWeaponDestinationSlot.HasValue
@@ -416,6 +424,8 @@ internal static class VanguardCorpseLootTransactionPreflight
         ItemAddress? displacedAddress = null;
         EquipmentSlot? longWeaponDestinationSlot = null;
         bool secondarySwap = false;
+        bool magazineReplacementSwap = false;
+        string magazineReplacementWeaponId = "none";
         string destination;
 
         if (string.Equals(assignment.Category, "long_weapon", StringComparison.OrdinalIgnoreCase))
@@ -490,6 +500,62 @@ internal static class VanguardCorpseLootTransactionPreflight
             operation = move.Value;
             destination = VanguardCorpseLootLiveItemResolver.Fingerprint(targetAddress);
         }
+        else if (string.Equals(assignment.Category, "magazine", StringComparison.OrdinalIgnoreCase)
+            && item is MagazineItemClass replacementMagazine)
+        {
+            bool swapReady = VanguardMagazineReplacementSwapPreflight.TryPrepare(
+                assignment.TargetKind,
+                assignment.TargetId,
+                botOwner,
+                inventory,
+                assignment,
+                replacementMagazine,
+                out VanguardMagazineReplacementSwapPlan swapPlan,
+                out bool swapApplicable,
+                out string magazineSwapReason);
+            if (swapApplicable)
+            {
+                if (!swapReady)
+                {
+                    result = VanguardCorpseLootTransactionPreflightResult.Rejected("magazine_atomic_replacement_not_ready:" + magazineSwapReason);
+                    return false;
+                }
+
+                operation = swapPlan.Operation;
+                displaced = swapPlan.DiscardMagazine;
+                displacedAddress = swapPlan.DiscardSourceAddress;
+                magazineReplacementSwap = true;
+                magazineReplacementWeaponId = swapPlan.WeaponItemId;
+                destination = "magazine_atomic_swap:" + swapPlan.DiscardStorageSlot;
+            }
+            else
+            {
+                var targets = new List<CompoundItem>(3);
+                foreach (EquipmentSlot slotKind in new[] { EquipmentSlot.Pockets, EquipmentSlot.TacticalVest, EquipmentSlot.Backpack })
+                {
+                    if (equipment.GetSlot(slotKind)?.ContainedItem is CompoundItem container) targets.Add(container);
+                }
+                if (targets.Count == 0)
+                {
+                    result = VanguardCorpseLootTransactionPreflightResult.Rejected("no_target_container");
+                    return false;
+                }
+                GStruct154<GInterface424> place = InteractionsHandlerClass.QuickFindAppropriatePlace(
+                    item, inventory, targets, InteractionsHandlerClass.EMoveItemOrder.PickUp, simulate: true);
+                if (!place.Succeeded || place.Value == null)
+                {
+                    result = VanguardCorpseLootTransactionPreflightResult.Rejected("quick_find_no_destination");
+                    return false;
+                }
+                operation = place.Value;
+                destination = ReadAddressFingerprint(operation, "To", "Destination", "Address", "ItemAddress", "TargetAddress");
+                if (destination.StartsWith("operation_destination_unexposed:", StringComparison.OrdinalIgnoreCase))
+                {
+                    result = VanguardCorpseLootTransactionPreflightResult.Rejected(destination);
+                    return false;
+                }
+            }
+        }
         else
         {
             var targets = new List<CompoundItem>(3);
@@ -523,7 +589,7 @@ internal static class VanguardCorpseLootTransactionPreflight
             result = VanguardCorpseLootTransactionPreflightResult.Rejected("operation_not_executable_or_destroy_required");
             return false;
         }
-        if (!secondarySwap && operation is not GInterface427)
+        if (!secondarySwap && !magazineReplacementSwap && operation is not GInterface427)
         {
             result = VanguardCorpseLootTransactionPreflightResult.Rejected("non_swap_operation_not_atomic_move:" + operation.GetType().Name);
             return false;
@@ -538,7 +604,7 @@ internal static class VanguardCorpseLootTransactionPreflight
         result = new VanguardCorpseLootTransactionPreflightResult
         {
             Ready = true,
-            Reason = secondarySwap ? "atomic_secondary_swap_ready" : "utility_claim_move_ready",
+            Reason = secondarySwap ? "atomic_secondary_swap_ready" : magazineReplacementSwap ? "atomic_magazine_replacement_swap_ready" : "utility_claim_move_ready",
             ItemId = assignment.ItemId,
             TemplateId = assignment.TemplateId,
             Category = assignment.Category,
@@ -553,6 +619,8 @@ internal static class VanguardCorpseLootTransactionPreflight
             AssignmentTier = assignment.Tier.ToString(),
             AssignmentScore = assignment.UtilityScore,
             SecondarySwap = secondarySwap,
+            MagazineReplacementSwap = magazineReplacementSwap,
+            MagazineReplacementWeaponId = magazineReplacementWeaponId,
             DisplacedItemId = displaced?.Id ?? "none",
             CanExecute = true,
             ItemsDestroyRequired = false,
@@ -610,7 +678,7 @@ internal static class VanguardCorpseLootTransactionPreflight
         return true;
     }
 
-    private static bool IsAssignmentExecutable(VanguardSquadLootItemAssignment assignment, VanguardOperatorLootPermissionSnapshot permissions)
+    internal static bool IsAssignmentExecutable(VanguardSquadLootItemAssignment assignment, VanguardOperatorLootPermissionSnapshot permissions)
         => VanguardUtilityLootActivationPolicy.IsExecutable(ToUtility(assignment), permissions, assignment.TargetKind);
 
     private static VanguardLootItemUtility ToUtility(VanguardSquadLootItemAssignment assignment) => new()

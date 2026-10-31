@@ -27,6 +27,22 @@ internal static class VanguardWorldLootContainerSessionExecutor
     private static readonly object Sync = new();
     private static readonly Dictionary<string, Session> ActiveByBot = new(StringComparer.OrdinalIgnoreCase);
 
+    // A scheduler window can finish before EFT/Fika has reconciled an already submitted
+    // inventory transaction. The original session owns that terminal; this lookup
+    // only reports its current in-flight state for the exact Operator.
+    public static bool HasInFlightNativeTransaction(string botProfileId)
+    {
+        if (string.IsNullOrWhiteSpace(botProfileId))
+        {
+            return false;
+        }
+
+        lock (Sync)
+        {
+            return ActiveByBot.TryGetValue(botProfileId, out var session) && session.Submitted;
+        }
+    }
+
     public static bool HasInFlightNativeTransaction(out string summary)
     {
         lock (Sync)
@@ -49,6 +65,29 @@ internal static class VanguardWorldLootContainerSessionExecutor
         Session[] active;
         lock (Sync) { active = ActiveByBot.Values.ToArray(); ActiveByBot.Clear(); }
         foreach (Session session in active) Complete(session, DateTimeOffset.UtcNow, "Interrupted", "raid_reset:" + reason, true, null);
+    }
+
+    public static string ForgetRuntimePresence(string? botProfileId, string reason)
+    {
+        string key = Norm(botProfileId);
+        if (string.Equals(key, "none", StringComparison.OrdinalIgnoreCase))
+        {
+            return "containerSession=ignored_missing_profile";
+        }
+
+        Session? session = null;
+        lock (Sync)
+        {
+            if (ActiveByBot.TryGetValue(key, out Session? active))
+            {
+                session = active;
+                ActiveByBot.Remove(key);
+            }
+        }
+
+        return "containerSession=" + (session == null ? "none" : "forgotten")
+            + ";submitted=" + Bool(session?.Submitted == true)
+            + ";lateCallbackLookupDisabled=true;normalTerminal=false;terminalCooldownMutation=false;reason=" + Safe(reason);
     }
 
     public static bool TryBegin(
@@ -298,6 +337,11 @@ internal static class VanguardWorldLootContainerSessionExecutor
         VanguardMainIntentScheduler.ReportPrimaryProgress(session.BotProfileId, now, "world_container_transaction_submitted", prepared.Preflight.Summary, session.WindowId);
         VanguardClientDiagnosticsLog.Operational(VanguardWorldLootContainerApproachDoctrine.TransactionStatusTag, () =>
             $"VANGUARD_CONTAINER_TRANSACTION_SUBMIT_ATTEMPTED {session.Summary}; {prepared.Preflight.Summary}; itemClaim={Safe(prepared.ItemClaim.ClaimId)}; submissionGeneration={submissionGeneration}; nativeInventoryController=true; fikaPacketDirect=false; callbackPending=true");
+        if (prepared.Preflight.MagazineReplacementSwap)
+        {
+            VanguardClientDiagnosticsLog.Diagnostic(VanguardMagazineReplacementSwapPreflight.StatusTag, () =>
+                $"VANGUARD_MAGAZINE_DISCARD_MUTATION_SUBMIT source=world_container; bot={Safe(session.BotProfileId)}; item={Safe(prepared.Item.Id)}; displaced={Safe(prepared.DisplacedItem?.Id)}; preparedNativeSwap=true; networkTransactionSubmitted=true; callbackPending=true; noThrowItemFirst=true; parallelWriter=false");
+        }
         try
         {
             prepared.Inventory.RunNetworkTransaction(prepared.Operation, new Callback(result => OnCallback(session.BotProfileId, session.LeaseId, submissionGeneration, result)));
@@ -314,6 +358,7 @@ internal static class VanguardWorldLootContainerSessionExecutor
 
     private static void OnCallback(string botProfileId, string leaseId, int submissionGeneration, IResult? result)
     {
+        Session? observed = null;
         lock (Sync)
         {
             if (!ActiveByBot.TryGetValue(botProfileId, out Session? session)
@@ -327,6 +372,13 @@ internal static class VanguardWorldLootContainerSessionExecutor
             session.CallbackSucceeded = result?.Succeed == true;
             session.CallbackReason = result == null ? "callback_result_null" : session.CallbackSucceeded ? "callback_success" : "callback_failed:" + Safe(result.ToString());
             session.CallbackAtUtc = DateTimeOffset.UtcNow;
+            observed = session;
+        }
+
+        if (observed?.Prepared?.Preflight.MagazineReplacementSwap == true)
+        {
+            VanguardClientDiagnosticsLog.Diagnostic(VanguardMagazineReplacementSwapPreflight.StatusTag, () =>
+                $"VANGUARD_MAGAZINE_DISCARD_MUTATION_CALLBACK source=world_container; bot={Safe(botProfileId)}; callbackReceived=true; callbackSucceeded={Bool(observed.CallbackSucceeded)}; callbackReason={Safe(observed.CallbackReason)}; readbackPending=true");
         }
     }
 
@@ -355,6 +407,11 @@ internal static class VanguardWorldLootContainerSessionExecutor
         if (confirmed)
         {
             VanguardCorpseLootPostCommitReadBackResult readBack = VanguardCorpseLootPostCommitReadBack.RefreshAndVerify(prepared, session.BotOwner);
+            if (prepared.Preflight.MagazineReplacementSwap)
+            {
+                VanguardClientDiagnosticsLog.Diagnostic(VanguardMagazineReplacementSwapPreflight.StatusTag, () =>
+                    $"VANGUARD_MAGAZINE_DISCARD_MUTATION_READBACK source=world_container; bot={Safe(session.BotProfileId)}; success={Bool(readBack.Success)}; replacementInOperatorInventory={Bool(readBack.ItemInOperatorInventory)}; oldAtCandidateSource={Bool(readBack.MagazineReplacementSourceRestored)}; displacedObserved={Bool(readBack.MagazineReplacementDisplacedItemObserved)}; uncertainFailClosed={Bool(!readBack.Success)}");
+            }
             if (!readBack.Success) { Finish(session, now, "Failed", "post_commit_runtime_readback_failed:" + readBack.Reason, !session.SchedulerYielded, prepared.Preflight); return; }
             session.Progress.Record(prepared.Preflight);
             if (string.Equals(prepared.Preflight.Category, "long_weapon", StringComparison.OrdinalIgnoreCase))

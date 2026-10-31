@@ -6,10 +6,10 @@ using Vanguard.Client.Runtime.Decision;
 using Vanguard.Client.Runtime.Execution;
 using Vanguard.Client.Runtime.Medical;
 
-// Responsibility: Provides Medical Native Attempt Memory support for the medical runtime.
-// Flow: The file encapsulates one bounded piece of the subsystem and exchanges explicit inputs/results with neighboring services instead of relying on hidden cross-system state.
-// Authority boundary: Authority remains with the owning subsystem and any external EFT/SPT/Fika/SAIN component explicitly referenced by its call path.
-// Invariant: Behavior stays scoped to the current profile/raid/process contract and preserves existing safety and compatibility boundaries.
+// Responsibility: Track native medical start stalls separately from committed treatments with no effect.
+// Flow: Record pre-commit stalls for the specific Operator need, target and item instance; clear or re-evaluate as state changes.
+// Authority boundary: This memory influences candidate eligibility; it neither executes treatment nor declares native effects.
+// Invariant: Repeated start stalls block only the matching item instance and episode, not all treatment for a need.
 namespace Vanguard.Client.Runtime.Medical.Execution;
 
 /// <summary>
@@ -31,6 +31,35 @@ internal static class VanguardMedicalNativeAttemptMemory
         lock (Sync) Records.Clear();
         VanguardClientDiagnosticsLog.Info(StatusTag,
             $"VANGUARD_MEDICAL_NATIVE_ATTEMPT_MEMORY_RESET reason={Safe(reason)}; threshold={BlockThreshold}; exactItem=true; stateBound=true; surgeryDebtSeparate=true; threatInterruptionsIgnored=true; tag={StatusTag}");
+    }
+
+    public static int ForgetRuntimePresence(string? botProfileId, string reason)
+    {
+        string key = Normalize(botProfileId);
+        if (string.Equals(key, "none", StringComparison.OrdinalIgnoreCase))
+        {
+            return 0;
+        }
+
+        int removed = 0;
+        lock (Sync)
+        {
+            var remove = new List<string>();
+            foreach (KeyValuePair<string, AttemptRecord> pair in Records)
+            {
+                if (string.Equals(pair.Value.BotProfileId, key, StringComparison.OrdinalIgnoreCase))
+                {
+                    remove.Add(pair.Key);
+                }
+            }
+
+            foreach (string recordKey in remove)
+            {
+                if (Records.Remove(recordKey)) removed++;
+            }
+        }
+
+        return removed;
     }
 
     public static void ObserveSnapshots(IReadOnlyList<OperatorDecisionSnapshot> snapshots, DateTimeOffset now)

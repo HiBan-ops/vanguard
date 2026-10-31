@@ -1,4 +1,4 @@
-#if SPT_CLIENT
+﻿#if SPT_CLIENT
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -17,6 +17,7 @@ using Vanguard.Client.Runtime.Grenades;
 using Vanguard.Client.Runtime.Intents;
 using Vanguard.Client.Runtime.Medical;
 using Vanguard.Client.Runtime.Movement;
+using Vanguard.Client.Runtime.TacticalAuthoring;
 
 // Responsibility: finds and reaches a safe cover anchor before a surgery procedure receives execution authority.
 // Flow: A due-and-actionable surgery request selects a nearby cover candidate, validates NavMesh/path/occupancy, moves the Operator there under a temporary lease, then reports a prepared hold so the surgery executor can take over.
@@ -67,6 +68,7 @@ internal static class VanguardSurgeryCoverPrepareExecutor
     public const string StrictIncrementalCoverStatusTag = "VANGUARD_STRICT_INCREMENTAL_SURGERY_COVER_STATUS";
     public const string SurgeryPreparationConvergenceStatusTag = "VANGUARD_SURGERY_PREPARATION_CONVERGENCE_STATUS";
     public const string SurgeryCoverAdmissionConvergenceStatusTag = "VANGUARD_SURGERY_COVER_ADMISSION_CONVERGENCE_STATUS";
+    public const string TacticalCoordinationPlacementStatusTag = VanguardStationaryMedicalTacticalPlacementResolver.StatusTag;
 
     private static readonly TimeSpan MinDuration = TimeSpan.FromSeconds(1.00d);
     private static readonly TimeSpan MaxDuration = TimeSpan.FromSeconds(45.00d);
@@ -158,7 +160,64 @@ internal static class VanguardSurgeryCoverPrepareExecutor
         }
         IncrementalCoverSearchByBotProfile.Clear();
         VanguardSurgeryAdmissionSettleGate.Reset(reason);
-        VanguardClientDiagnosticsLog.Info(StatusTag, $"VANGUARD_MEDICAL_PREPARE_SURGERY_COVER_RESET reason={Safe(reason)}; patientOnly=true; bounded=true; cancelsLoot=patient_only; mutatesMovement=vanguard_cover_slot_patient_only_after_external_preempt; mutatesSain=cover_update_only; fallback=none_go_cover_required; previousTag={SurgeryCoverMoveBridgeStatusTag}; isolationTag={MedicalIsolationStatusTag}; externalAdapterTag={ExternalAuthorityAdapterStatusTag}; externalMovementTag={ExternalMovementPreemptStatusTag}; combatGateTag={CombatAwareGateStatusTag}; typedFailureTag={TypedCoverFailureStatusTag}; orbitLayerTag={OrbitLayerQuiesceStatusTag}; coverArrivalTag={CoverArrivalGrantStatusTag}; commitUnificationTag={MedicalCoverCommitUnificationStatusTag}; movementStabilizationTag={MedicalCoverMovementStabilizationStatusTag}; hardProcedureTag={MedicalHardProcedureAuthorityStatusTag}; completionGateTag={MedicalProcedureCompletionGateStatusTag}; directChainTag={MedicalSurgeryDirectChainStatusTag}; sameProcedureStartTag={MedicalSurgerySameProcedureStartStatusTag}; validTargetTag={ValidSurgeryTargetsStatusTag}; criticalFastTag={CriticalFastSurgeryStatusTag}; vanguardSlotTag={VanguardCoverSlotStatusTag}; sainLikeTag={SainLikeCoverSeekStatusTag}; residualTag={ResidualPrepareStatusTag}; tag={StatusTag}; hardOrbitExitTag={HardOrbitExitStatusTag}; pathGateTag={PathGateStatusTag}; preflightTag={CoverPreflightStatusTag}; multiCandidateTag={CoverMultiCandidateStatusTag}; anchorTag={CoverAnchorStatusTag}; anchorPreflightTag={CoverAnchorPreflightStatusTag}; previousCleanupTag={MedicalRuntimeCleanupStatusTag}; convergenceTag={SurgeryPreparationConvergenceStatusTag}");
+        VanguardTacticalCoordinationSainPoseBridge.Reset(reason);
+        VanguardClientDiagnosticsLog.Info(StatusTag, $"VANGUARD_MEDICAL_PREPARE_SURGERY_COVER_RESET reason={Safe(reason)}; patientOnly=true; bounded=true; cancelsLoot=patient_only; mutatesMovement=vanguard_cover_slot_patient_only_after_external_preempt; mutatesSain=cover_update_only; fallback=none_go_cover_required; previousTag={SurgeryCoverMoveBridgeStatusTag}; isolationTag={MedicalIsolationStatusTag}; externalAdapterTag={ExternalAuthorityAdapterStatusTag}; externalMovementTag={ExternalMovementPreemptStatusTag}; combatGateTag={CombatAwareGateStatusTag}; typedFailureTag={TypedCoverFailureStatusTag}; orbitLayerTag={OrbitLayerQuiesceStatusTag}; coverArrivalTag={CoverArrivalGrantStatusTag}; commitUnificationTag={MedicalCoverCommitUnificationStatusTag}; movementStabilizationTag={MedicalCoverMovementStabilizationStatusTag}; hardProcedureTag={MedicalHardProcedureAuthorityStatusTag}; completionGateTag={MedicalProcedureCompletionGateStatusTag}; directChainTag={MedicalSurgeryDirectChainStatusTag}; sameProcedureStartTag={MedicalSurgerySameProcedureStartStatusTag}; validTargetTag={ValidSurgeryTargetsStatusTag}; criticalFastTag={CriticalFastSurgeryStatusTag}; vanguardSlotTag={VanguardCoverSlotStatusTag}; sainLikeTag={SainLikeCoverSeekStatusTag}; residualTag={ResidualPrepareStatusTag}; tag={StatusTag}; hardOrbitExitTag={HardOrbitExitStatusTag}; pathGateTag={PathGateStatusTag}; preflightTag={CoverPreflightStatusTag}; multiCandidateTag={CoverMultiCandidateStatusTag}; anchorTag={CoverAnchorStatusTag}; anchorPreflightTag={CoverAnchorPreflightStatusTag}; previousCleanupTag={MedicalRuntimeCleanupStatusTag}; convergenceTag={SurgeryPreparationConvergenceStatusTag}; tcPlacementTag={TacticalCoordinationPlacementStatusTag}");
+    }
+
+    public static int ForgetRuntimePresence(string? botProfileId, string reason)
+    {
+        string key = string.IsNullOrWhiteSpace(botProfileId) ? "none" : botProfileId.Trim();
+        if (string.Equals(key, "none", StringComparison.OrdinalIgnoreCase))
+        {
+            return 0;
+        }
+
+        int removed = 0;
+        if (RetryAllowedAtByBotProfile.Remove(key)) removed++;
+        if (LastPrepareMutationAtByBotProfile.Remove(key)) removed++;
+        if (CoverSlotReselectCountByBotProfile.Remove(key)) removed++;
+        if (CoverSlotsByBotProfile.Remove(key)) removed++;
+        if (ActionabilityGraceUntilByBotProfile.Remove(key)) removed++;
+        if (LastCoverFailureReasonByBotProfile.Remove(key)) removed++;
+        if (CoverProbeFailureByBotProfile.Remove(key)) removed++;
+        if (LastDeferredTransitionLogAtByBotProfile.Remove(key)) removed++;
+        if (LastDeferredTransitionReasonByBotProfile.Remove(key)) removed++;
+        if (SuppressedDeferredTransitionCountByBotProfile.Remove(key)) removed++;
+
+        if (IncrementalCoverSearchByBotProfile.TryGetValue(key, out IncrementalCoverSearchState? search))
+        {
+            DisposeIncrementalSearchState(search);
+            IncrementalCoverSearchByBotProfile.Remove(key);
+            removed++;
+        }
+
+        foreach (string rejectedKey in RejectedCoverSlotUntilByKey.Keys.ToArray())
+        {
+            if (rejectedKey.StartsWith(Safe(key) + "|", StringComparison.OrdinalIgnoreCase))
+            {
+                RejectedCoverSlotUntilByKey.Remove(rejectedKey);
+                removed++;
+            }
+        }
+
+        removed += RemoveDiagnosticKeysForProfile(LastBlockedLogAtByKey, key);
+        removed += RemoveDiagnosticKeysForProfile(LastAnchorProbeLogAtByKey, key);
+        return removed;
+    }
+
+    private static int RemoveDiagnosticKeysForProfile(Dictionary<string, DateTimeOffset> dictionary, string botProfileId)
+    {
+        int removed = 0;
+        foreach (string diagnosticKey in dictionary.Keys.ToArray())
+        {
+            if (diagnosticKey.IndexOf(botProfileId, StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                dictionary.Remove(diagnosticKey);
+                removed++;
+            }
+        }
+
+        return removed;
     }
 
     public static bool IsPrepareLease(VanguardExecutionLeaseState lease)
@@ -202,6 +261,12 @@ internal static class VanguardSurgeryCoverPrepareExecutor
         {
             LogSkip(snapshot, board, "hard_threat_interrupt:" + startThreatReason, now);
             LogStationaryMedicalDeferred(snapshot, "hard_threat_interrupt:" + startThreatReason, "try_start", now);
+            return false;
+        }
+
+        if (VanguardSurgeryDebtService.ShouldDeferPrepareForNativeApplicability(snapshot, now, out var nativeApplicabilityReason))
+        {
+            LogSkip(snapshot, board, "prepared_native_applicability_state_bound:" + nativeApplicabilityReason, now);
             return false;
         }
 
@@ -590,9 +655,10 @@ internal static class VanguardSurgeryCoverPrepareExecutor
             string source;
             string diagnostic;
             string preflightResult;
+            VanguardStationaryMedicalTacticalPlacementCandidate? authoredPlacement;
             try
             {
-                coverFound = TryFindVanguardSurgeryCoverSlot(botOwner, snapshot, mover, key, now, out target, out source, out diagnostic, out preflightResult);
+                coverFound = TryFindVanguardSurgeryCoverSlot(botOwner, snapshot, mover, key, now, out target, out source, out diagnostic, out preflightResult, out authoredPlacement);
             }
             finally
             {
@@ -635,7 +701,11 @@ internal static class VanguardSurgeryCoverPrepareExecutor
                 LastWorldSampleAtUtc = now,
                 CommandCount = 0,
                 StagnantCommandCount = 0,
-                EftCommandPreferred = true
+                EftCommandPreferred = true,
+                AuthoredPoseSlotId = authoredPlacement?.PoseSlotId ?? string.Empty,
+                AuthoredAnchorId = authoredPlacement?.AnchorId ?? string.Empty,
+                AuthoredViewDirection = authoredPlacement?.ViewDirection,
+                AuthoredPhysicalPose = authoredPlacement?.PhysicalPose
             };
             CoverSlotsByBotProfile[key] = slot;
             VanguardClientDiagnosticsLog.Info(CoverPreflightStatusTag, $"VANGUARD_SURGERY_COVER_PREFLIGHT_ACCEPTED operator={Safe(snapshot.OperatorId)}; botProfile={key}; source={Safe(source)}; diagnostic={Safe(diagnostic)}; preflight={Safe(preflightResult)}; from={FormatVector(snapshot.Position)}; target={FormatVector(target)}; distance={slot.LastDistance:0.00}; moverValid=true; noOpenField=true; patientOnly=true; tag={CoverPreflightStatusTag}");
@@ -712,6 +782,7 @@ internal static class VanguardSurgeryCoverPrepareExecutor
         if (retainedCommit)
         {
             LastCoverFailureReasonByBotProfile.Remove(key);
+            _ = TryApplyAuthoredTacticalPose(botOwner, snapshot, slot, now, out var retainedPoseApplied, out var retainedOrientationApplied, out var retainedPoseResult);
             return new SainLikeCoverSeekResult(
                 "vanguard_slot_arrived",
                 false,
@@ -726,7 +797,7 @@ internal static class VanguardSurgeryCoverPrepareExecutor
                 slot.Source,
                 slot.Diagnostic,
                 true,
-                $"vanguardSlot=arrived;vanguardCoverGrant=true;coverCommit=true;commitIdempotent=true;vanguardSlotDist={distance:0.00};admissionDistance={VanguardCoverAdmissionDistance:0.00};retentionDistance={VanguardCoverCommitRetentionDistance:0.00};retentionPending={Bool(retentionPending)};retentionReason={Safe(retentionReason)};speed={currentSpeed:0.00};externalIdle={Bool(externalIdle)};noHardThreat={Bool(noHardThreatForCommit)};movementMutation=false;poseMutation=false;noOpenField=true");
+                $"vanguardSlot=arrived;vanguardCoverGrant=true;coverCommit=true;commitIdempotent=true;vanguardSlotDist={distance:0.00};admissionDistance={VanguardCoverAdmissionDistance:0.00};retentionDistance={VanguardCoverCommitRetentionDistance:0.00};retentionPending={Bool(retentionPending)};retentionReason={Safe(retentionReason)};speed={currentSpeed:0.00};externalIdle={Bool(externalIdle)};noHardThreat={Bool(noHardThreatForCommit)};movementMutation=false;authoredPoseApplied={Bool(retainedPoseApplied)};authoredOrientationApplied={Bool(retainedOrientationApplied)};poseBridge={Safe(retainedPoseResult)};noOpenField=true");
         }
 
         bool persistentCommitExit = slot.CoverCommitUntilUtc > now
@@ -781,7 +852,9 @@ internal static class VanguardSurgeryCoverPrepareExecutor
             bool cancelPath = TryInvoke(activePath, "Cancel", 0.1f);
             bool speedZero = TryInvoke(mover, "SetTargetMoveSpeed", 0f) || TryInvoke(botOwner, "SetTargetMoveSpeed", 0f);
             bool pause = TryInvoke(mover, "PauseMovement", 1.5f) || TryInvoke(mover, "MovementPause", 1.5f, true);
-            bool pose = TryInvoke(mover, "SetPose", 0.55f) || TrySetPropertyOrField(mover, "TargetPose", 0.55f);
+            _ = TryApplyAuthoredTacticalPose(botOwner, snapshot, slot, now, out var authoredPoseApplied, out var authoredOrientationApplied, out var authoredPoseResult);
+            bool fallbackPose = authoredPoseApplied ? false : (TryInvoke(mover, "SetPose", 0.55f) || TrySetPropertyOrField(mover, "TargetPose", 0.55f));
+            bool pose = authoredPoseApplied || fallbackPose;
             slot.GrantUntilUtc = now + VanguardCoverGrantTtl;
             slot.CoverCommitUntilUtc = now + VanguardCoverGrantTtl;
             ResetCommitRetentionTracking(slot);
@@ -800,7 +873,7 @@ internal static class VanguardSurgeryCoverPrepareExecutor
                 slot.Source,
                 slot.Diagnostic,
                 true,
-                $"vanguardSlot=arrived;vanguardCoverGrant=true;coverCommit=true;commitIdempotent=false;vanguardSlotDist={distance:0.00};admissionDistance={VanguardCoverAdmissionDistance:0.00};safeForAdmission={Bool(safeForAdmission)};externalIdle={Bool(externalIdle)};noHardThreat={Bool(noHardThreatForCommit)};speedZero={Bool(speedZero)};pause={Bool(pause)};cancelPath={Bool(cancelPath)};noOpenField=true");
+                $"vanguardSlot=arrived;vanguardCoverGrant=true;coverCommit=true;commitIdempotent=false;vanguardSlotDist={distance:0.00};admissionDistance={VanguardCoverAdmissionDistance:0.00};safeForAdmission={Bool(safeForAdmission)};externalIdle={Bool(externalIdle)};noHardThreat={Bool(noHardThreatForCommit)};speedZero={Bool(speedZero)};pause={Bool(pause)};cancelPath={Bool(cancelPath)};authoredPoseApplied={Bool(authoredPoseApplied)};authoredOrientationApplied={Bool(authoredOrientationApplied)};fallbackPose={Bool(fallbackPose)};poseBridge={Safe(authoredPoseResult)};noOpenField=true");
         }
 
         // Stall/reselection is deliberately evaluated only after admission. A physically stopped bot
@@ -1058,7 +1131,9 @@ internal static class VanguardSurgeryCoverPrepareExecutor
         bool cancelPath = TryInvoke(activePath, "Cancel", 0.1f);
         bool speedZero = TryInvoke(mover, "SetTargetMoveSpeed", 0f) || TryInvoke(botOwner, "SetTargetMoveSpeed", 0f);
         bool pause = TryInvoke(mover, "PauseMovement", 1.75f) || TryInvoke(mover, "MovementPause", 1.75f, true);
-        bool pose = TryInvoke(mover, "SetPose", 0.55f) || TrySetPropertyOrField(mover, "TargetPose", 0.55f);
+        _ = TryApplyAuthoredTacticalPose(botOwner, snapshot, slot, now, out var authoredPoseApplied, out var authoredOrientationApplied, out var authoredPoseResult);
+        bool fallbackPose = authoredPoseApplied ? false : (TryInvoke(mover, "SetPose", 0.55f) || TrySetPropertyOrField(mover, "TargetPose", 0.55f));
+        bool pose = authoredPoseApplied || fallbackPose;
 
         slot.GrantUntilUtc = now + VanguardCoverGrantTtl;
         slot.CoverCommitUntilUtc = now + VanguardCoverGrantTtl;
@@ -1070,7 +1145,7 @@ internal static class VanguardSurgeryCoverPrepareExecutor
             + ":distance=" + distance.ToString("0.00", CultureInfo.InvariantCulture)
             + ":best=" + slot.BestDistance.ToString("0.00", CultureInfo.InvariantCulture)
             + ":speed=" + speed.ToString("0.00", CultureInfo.InvariantCulture);
-        VanguardClientDiagnosticsLog.Info(MedicalCoverCommitUnificationStatusTag, $"VANGUARD_MEDICAL_COVER_COMMITTED_FROM_READY operator={Safe(snapshot.OperatorId)}; botProfile={key}; lease={Safe(lease.LeaseId)}; reason={Safe(reason)}; source={Safe(slot.Source)}; target={FormatVector(slot.Target)}; distance={distance:0.00}; admissionDistance={VanguardCoverAdmissionDistance:0.00}; best={slot.BestDistance:0.00}; speed={speed:0.00}; safeEnough={Bool(safeEnough)}; closeEnough={Bool(closeEnough)}; controlledEnough={Bool(controlledEnough)}; cancelPath={Bool(cancelPath)}; speedZero={Bool(speedZero)}; pause={Bool(pause)}; pose={Bool(pose)}; grantSeconds={VanguardCoverGrantTtl.TotalSeconds:0.00}; patientOnly=true; noOpenField=true; noLocalHold=true; noStationaryFallback=true; next=StationaryMedicalSurgery; tag={MedicalCoverCommitUnificationStatusTag}; movementStabilizationTag={MedicalCoverMovementStabilizationStatusTag}; coverCommitTag={MedicalCoverCommitStatusTag}");
+        VanguardClientDiagnosticsLog.Info(MedicalCoverCommitUnificationStatusTag, $"VANGUARD_MEDICAL_COVER_COMMITTED_FROM_READY operator={Safe(snapshot.OperatorId)}; botProfile={key}; lease={Safe(lease.LeaseId)}; reason={Safe(reason)}; source={Safe(slot.Source)}; target={FormatVector(slot.Target)}; distance={distance:0.00}; admissionDistance={VanguardCoverAdmissionDistance:0.00}; best={slot.BestDistance:0.00}; speed={speed:0.00}; safeEnough={Bool(safeEnough)}; closeEnough={Bool(closeEnough)}; controlledEnough={Bool(controlledEnough)}; cancelPath={Bool(cancelPath)}; speedZero={Bool(speedZero)}; pause={Bool(pause)}; pose={Bool(pose)}; authoredPoseApplied={Bool(authoredPoseApplied)}; authoredOrientationApplied={Bool(authoredOrientationApplied)}; fallbackPose={Bool(fallbackPose)}; poseBridge={Safe(authoredPoseResult)}; grantSeconds={VanguardCoverGrantTtl.TotalSeconds:0.00}; patientOnly=true; noOpenField=true; noLocalHold=true; noStationaryFallback=true; next=StationaryMedicalSurgery; tag={MedicalCoverCommitUnificationStatusTag}; movementStabilizationTag={MedicalCoverMovementStabilizationStatusTag}; coverCommitTag={MedicalCoverCommitStatusTag}");
         return true;
     }
 
@@ -1280,6 +1355,10 @@ internal static class VanguardSurgeryCoverPrepareExecutor
             return false;
         }
 
+        if (string.Equals(family, "live_item_not_applicable", StringComparison.OrdinalIgnoreCase))
+        {
+            VanguardSurgeryDebtService.RecordPreparedNativeApplicabilityFailure(lease, snapshot, now);
+        }
         Complete(lease, now, "Interrupted", "prepared_launch_blocked_bounded:" + family, true);
         VanguardClientDiagnosticsLog.Info(SurgeryPreparationConvergenceStatusTag,
             $"VANGUARD_SURGERY_PREPARE_POSTURE_RELEASED {lease.Summary}; reason={Safe(family)}; raw={Safe(chainSummary)}; blockedFor={blockedFor.TotalSeconds:0.00}; max={PreparedLaunchBlockedMaxDuration.TotalSeconds:0.00}; currentThreat=false; nativeApply=false; coverCommitPhysicalPositionRetained=true; debtRetained=true; retryCooldown=true; retryAfter={PreparedLaunchRetryCooldown.TotalSeconds:0.00}; next=medical_recheck; tag={SurgeryPreparationConvergenceStatusTag}");
@@ -2081,8 +2160,136 @@ internal static class VanguardSurgeryCoverPrepareExecutor
         ResetCommitRetentionTracking(slot);
     }
 
-    private static bool TryFindVanguardSurgeryCoverSlot(BotOwner botOwner, OperatorDecisionSnapshot snapshot, object? mover, string botProfileKey, DateTimeOffset now, out Vector3 target, out string source, out string diagnostic, out string preflightResult)
+    private static bool TryApplyAuthoredTacticalPose(
+        BotOwner botOwner,
+        OperatorDecisionSnapshot snapshot,
+        VanguardSurgeryCoverSlotState slot,
+        DateTimeOffset now,
+        out bool poseApplied,
+        out bool orientationApplied,
+        out string result)
     {
+        poseApplied = false;
+        orientationApplied = false;
+        result = "not_authored_tc_pose_slot";
+        if (slot.AuthoredPhysicalPose == null && !slot.AuthoredViewDirection.HasValue)
+        {
+            return false;
+        }
+
+        Vector3 viewDirection = slot.AuthoredViewDirection ?? Vector3.zero;
+        bool anyApplied = VanguardTacticalCoordinationSainPoseBridge.TryApply(
+            snapshot.BotProfileId,
+            botOwner,
+            slot.AuthoredPhysicalPose,
+            viewDirection,
+            slot.Source,
+            now,
+            out poseApplied,
+            out orientationApplied,
+            out result);
+
+        if ((poseApplied || orientationApplied) && !string.IsNullOrWhiteSpace(slot.AuthoredPoseSlotId))
+        {
+            VanguardClientDiagnosticsLog.Info(
+                TacticalCoordinationPlacementStatusTag,
+                $"VANGUARD_STATIONARY_MEDICAL_TC_POSE_APPLY operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; anchor={Safe(slot.AuthoredAnchorId)}; poseSlot={Safe(slot.AuthoredPoseSlotId)}; poseApplied={Bool(poseApplied)}; orientationApplied={Bool(orientationApplied)}; physicalPoseUsable={Bool(slot.AuthoredPhysicalPose?.RuntimeUsable == true)}; result={Safe(result)}; movementAuthority=existing_medical_prepare_only; destinationAuthority=false; tag={TacticalCoordinationPlacementStatusTag}; poseBridgeTag={VanguardTacticalCoordinationSainPoseBridge.StatusTag}");
+        }
+        return anyApplied;
+    }
+
+    private static bool TryFindVanguardSurgeryCoverSlot(BotOwner botOwner, OperatorDecisionSnapshot snapshot, object? mover, string botProfileKey, DateTimeOffset now, out Vector3 target, out string source, out string diagnostic, out string preflightResult, out VanguardStationaryMedicalTacticalPlacementCandidate? authoredPlacement)
+    {
+        authoredPlacement = null;
+        // Authored Tactical Coordination placement is a preferred local hint, not a replacement for medical safety.
+        // The same medical executor still owns path preflight, movement, arrival and cover commit.
+        // If the authored slot is missing, invalid, recently rejected or not path-complete, the existing
+        // dynamic cover finder continues unchanged. Pose/view metadata is applied only after stationary medical authority commits the selected authored slot.
+        if (VanguardStationaryMedicalTacticalPlacementResolver.TryResolvePreferredPoseSlot(
+                snapshot,
+                VanguardCoverSlotPreferredMaxDistance,
+                out var tcPlacement,
+                out var tcPlacementReason))
+        {
+            if (IsRejectedCoverTarget(botProfileKey, tcPlacement.Target, now, out var authoredRejectedReason))
+            {
+                string skipLogKey = "tcPlacementSkip|" + Safe(botProfileKey) + "|" + Safe(tcPlacement.AnchorId) + "|" + Safe(tcPlacement.PoseSlotId);
+                if (!LastAnchorProbeLogAtByKey.TryGetValue(skipLogKey, out var lastTcSkipLog)
+                    || now - lastTcSkipLog >= TimeSpan.FromSeconds(2.00d))
+                {
+                    LastAnchorProbeLogAtByKey[skipLogKey] = now;
+                    VanguardClientDiagnosticsLog.Info(
+                        TacticalCoordinationPlacementStatusTag,
+                        $"VANGUARD_STATIONARY_MEDICAL_TC_POSE_SLOT_SKIPPED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(botProfileKey)}; anchor={Safe(tcPlacement.AnchorId)}; poseSlot={Safe(tcPlacement.PoseSlotId)}; origin={Safe(tcPlacement.Origin)}; target={FormatVector(tcPlacement.Target)}; reason=recently_rejected:{Safe(authoredRejectedReason)}; fallback=dynamic_cover_search; mutationAuthoring=false; poseApplied=false; movementAuthority=medical_prepare_only; tag={TacticalCoordinationPlacementStatusTag}");
+                }
+            }
+            else
+            {
+                if (!VanguardRuntimeFrameBudgetGuard.TryConsumeHeavyWorkForOwner(
+                        "MedicalCoverMoveProbe",
+                        snapshot.OwnerProfileId,
+                        1,
+                        GlobalCoverMoveProbesPerFrame,
+                        out var tcProbeBudgetReason))
+                {
+                    target = default;
+                    source = "none";
+                    diagnostic = "cover_search_pending:tc_pose_slot_probe_budget:" + Safe(tcProbeBudgetReason);
+                    preflightResult = "tc_pose_slot_probe_budget_pending";
+                    return false;
+                }
+
+                long tcProbeStarted = VanguardRuntimePerformanceGuard.Begin();
+                bool authoredPreflightValid;
+                try
+                {
+                    authoredPreflightValid = TryPreflightVanguardCoverCandidate(snapshot.Position, tcPlacement.Target, out preflightResult);
+                }
+                finally
+                {
+                    VanguardRuntimePerformanceGuard.End("MedicalTcPoseSlotPathProbe", tcProbeStarted);
+                }
+
+                if (authoredPreflightValid)
+                {
+                    if (IncrementalCoverSearchByBotProfile.TryGetValue(botProfileKey, out var existingSearch))
+                    {
+                        DisposeIncrementalSearchState(existingSearch);
+                        IncrementalCoverSearchByBotProfile.Remove(botProfileKey);
+                    }
+
+                    CoverProbeFailureByBotProfile.Remove(botProfileKey);
+                    target = tcPlacement.Target;
+                    source = tcPlacement.Source;
+                    diagnostic = "tc_pose_slot_preferred"
+                        + ":anchor=" + Safe(tcPlacement.AnchorId)
+                        + ":anchorName=" + Safe(tcPlacement.AnchorName)
+                        + ":poseSlot=" + Safe(tcPlacement.PoseSlotId)
+                        + ":origin=" + Safe(tcPlacement.Origin)
+                        + ":readOnly=" + Bool(tcPlacement.ReadOnly)
+                        + ":containingAnchor=" + Bool(tcPlacement.ContainingAnchor)
+                        + ":distance=" + tcPlacement.DistanceMeters.ToString("0.00", CultureInfo.InvariantCulture)
+                        + ":anchorValidation=" + tcPlacement.AnchorValidationState
+                        + ":poseValidation=" + tcPlacement.PoseSlotValidationState
+                        + ":view=" + FormatVector(tcPlacement.ViewDirection)
+                        + ":topologyRevision=" + tcPlacement.TopologyRevision.ToString(CultureInfo.InvariantCulture)
+                        + ":selection=" + Safe(tcPlacementReason)
+                        + ":poseApplied=false"
+                        + ":runtimePreflight=true";
+                    authoredPlacement = tcPlacement;
+                    VanguardClientDiagnosticsLog.Info(
+                        TacticalCoordinationPlacementStatusTag,
+                        $"VANGUARD_STATIONARY_MEDICAL_TC_POSE_SLOT_ACCEPTED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(botProfileKey)}; source={Safe(source)}; target={FormatVector(target)}; distance={tcPlacement.DistanceMeters:0.00}; containingAnchor={Bool(tcPlacement.ContainingAnchor)}; anchorValidation={tcPlacement.AnchorValidationState}; poseValidation={tcPlacement.PoseSlotValidationState}; physicalPoseUsable={Bool(tcPlacement.PhysicalPose?.RuntimeUsable == true)}; preflight={Safe(preflightResult)}; topologyRevision={tcPlacement.TopologyRevision}; mutationAuthoring=false; poseApplied=false; movementAuthority=medical_prepare_only; fallbackUsed=false; tag={TacticalCoordinationPlacementStatusTag}");
+                    return true;
+                }
+
+                RejectCoverTarget(botProfileKey, tcPlacement.Target, now, "tc_pose_slot_preflight_rejected:" + Safe(preflightResult));
+                VanguardClientDiagnosticsLog.Info(
+                    TacticalCoordinationPlacementStatusTag,
+                    $"VANGUARD_STATIONARY_MEDICAL_TC_POSE_SLOT_REJECTED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(botProfileKey)}; anchor={Safe(tcPlacement.AnchorId)}; poseSlot={Safe(tcPlacement.PoseSlotId)}; origin={Safe(tcPlacement.Origin)}; target={FormatVector(tcPlacement.Target)}; preflight={Safe(preflightResult)}; selection={Safe(tcPlacementReason)}; fallback=dynamic_cover_search; mutationAuthoring=false; poseApplied=false; movementAuthority=medical_prepare_only; tag={TacticalCoordinationPlacementStatusTag}");
+            }
+        }
+
         if (CoverProbeFailureByBotProfile.TryGetValue(botProfileKey, out var rememberedFailure))
         {
             if (rememberedFailure.RetryAfterUtc > now)
@@ -2483,6 +2690,13 @@ internal static class VanguardSurgeryCoverPrepareExecutor
             return VanguardCoverMovementFailureKind.CombatOwnerCannotDriveMovement;
         }
 
+        // An accepted fallback is not a typed navigation failure merely because
+        // its diagnostic history includes an earlier PathInvalid attempt.
+        if ((commandResult ?? string.Empty).StartsWith("movement_commanded:", StringComparison.OrdinalIgnoreCase))
+        {
+            return VanguardCoverMovementFailureKind.None;
+        }
+
         if (merged.Contains("probe_budget_exhausted") || merged.Contains("reselect_budget_exhausted"))
         {
             return VanguardCoverMovementFailureKind.ProbeBudgetExhausted;
@@ -2741,17 +2955,10 @@ internal static class VanguardSurgeryCoverPrepareExecutor
             }
         }
 
-        Vector3? nullableTarget = target;
-        if (TryInvokeMoveCommand(mover, "GoToPointNoWay", out var noWay, nullableTarget))
-        {
-            sawCommandApi = true;
-            diagnostics.Add(label + ":" + type + ":GoToPointNoWay=" + noWay);
-            if (IsPositiveMoveResult(noWay))
-            {
-                return true;
-            }
-        }
-
+        // Never call GoToPointNoWay as a surgery-cover fallback. It supplies no
+        // successful-path evidence for a safe cover destination and its
+        // void return cannot establish acceptance. Let the existing SAIN mover
+        // fallback attempt a normal path instead.
         diagnostics.Add(label + ":" + type + ":no_eft_go_command");
         return false;
     }
@@ -2844,17 +3051,11 @@ internal static class VanguardSurgeryCoverPrepareExecutor
 
     private static bool IsPositiveMoveResult(string result)
     {
-        if (result.Contains("bool:false", StringComparison.OrdinalIgnoreCase)
-            || result.Contains("PathInvalid", StringComparison.OrdinalIgnoreCase)
-            || result.Contains("NoWay", StringComparison.OrdinalIgnoreCase)
-            || result.Contains("GoToPointNoWay", StringComparison.OrdinalIgnoreCase)
-            || result.Contains("invoke_failed", StringComparison.OrdinalIgnoreCase)
-            || result.Contains("method_not_found", StringComparison.OrdinalIgnoreCase))
-        {
-            return false;
-        }
-
-        return true;
+        // Invocation alone is not acceptance: reflection reports null as void:true,
+        // including when a non-void method returns null. SAIN WalkToPoint returns
+        // bool; EFT GoToPoint returns a path result. Both must be explicit.
+        return string.Equals(result, "bool:true", StringComparison.OrdinalIgnoreCase)
+            || result.EndsWith(":PathComplete", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool TryScheduleCoverReselection(string botProfileKey, VanguardSurgeryCoverSlotState slot, DateTimeOffset now, string reason, out int reselectCount)
@@ -2899,14 +3100,17 @@ internal static class VanguardSurgeryCoverPrepareExecutor
 
     private static bool IsCommandNoMotionRejection(bool commanded, string commandResult, VanguardSurgeryCoverSlotState slot, float distance, float speed, bool improved)
     {
-        if (!commanded)
-        {
-            return false;
-        }
-
+        // A definite path rejection warrants immediate reselection even if no
+        // command was accepted. A successful later SAIN fallback overrides only
+        // the earlier failed attempts, not the physical-progress checks below.
         if (IsNegativeMoveCommandResult(commandResult))
         {
             return true;
+        }
+
+        if (!commanded)
+        {
+            return false;
         }
 
         // Runtime invariant: a successful EFT PathComplete on the command tick is not proof of failure.
@@ -2926,7 +3130,16 @@ internal static class VanguardSurgeryCoverPrepareExecutor
 
     private static bool IsNegativeMoveCommandResult(string commandResult)
     {
+        // The result prefix identifies the final accepted attempt. Earlier EFT
+        // PathInvalid results remain diagnostics but must not cancel an actually
+        // accepted SAIN bool:true or EFT PathComplete fallback.
+        if (commandResult.StartsWith("movement_commanded:", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
         return commandResult.Contains("PathInvalid", StringComparison.OrdinalIgnoreCase)
+            || commandResult.Contains("PathPartial", StringComparison.OrdinalIgnoreCase)
             || commandResult.Contains("NoWay", StringComparison.OrdinalIgnoreCase)
             || commandResult.Contains("GoToPointNoWay", StringComparison.OrdinalIgnoreCase)
             || commandResult.Contains("bool:false", StringComparison.OrdinalIgnoreCase);
@@ -3240,6 +3453,10 @@ internal static class VanguardSurgeryCoverPrepareExecutor
         public string LastCommandResult { get; set; } = "none";
         public bool EftCommandPreferred { get; set; }
         public bool ArrivedLogged { get; set; }
+        public string AuthoredPoseSlotId { get; init; } = string.Empty;
+        public string AuthoredAnchorId { get; init; } = string.Empty;
+        public Vector3? AuthoredViewDirection { get; init; }
+        public VanguardTacticalCoordinationReadPhysicalPose? AuthoredPhysicalPose { get; init; }
     }
 
     private static string TypeName(object? value)

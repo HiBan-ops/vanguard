@@ -1,7 +1,7 @@
-// Responsibility: Provides I Request Dispatcher support for the client API transport.
-// Flow: The file encapsulates one bounded piece of the subsystem and exchanges explicit inputs/results with neighboring services instead of relying on hidden cross-system state.
-// Authority boundary: Authority remains with the owning subsystem and any external EFT/SPT/Fika/SAIN component explicitly referenced by its call path.
-// Invariant: Behavior stays scoped to the current profile/raid/process contract and preserves existing safety and compatibility boundaries.
+// Responsibility: Define GET/POST JSON transport adapters used by the Vanguard client API.
+// Flow: Callers use IRequestDispatcher; NoopRequestDispatcher returns empty JSON and the SPT_CLIENT adapter forwards to SPT RequestHandler.
+// Authority boundary: SPT RequestHandler owns network requests; the no-op adapter performs no transport operation.
+// Invariant: Both adapters implement the same GetJson and PostJson signatures without changing route or body inputs.
 namespace Vanguard.Client.Api;
 
 internal interface IRequestDispatcher

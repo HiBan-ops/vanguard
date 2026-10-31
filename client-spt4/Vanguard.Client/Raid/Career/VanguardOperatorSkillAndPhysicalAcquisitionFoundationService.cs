@@ -260,8 +260,44 @@ internal static class VanguardOperatorSkillAndPhysicalAcquisitionFoundationServi
         }
     }
 
+    public static string ForgetRuntimePresence(
+        VanguardRaidOperatorRuntimeRecord runtime,
+        Player? exactPlayer,
+        string reason)
+    {
+        if (runtime == null || string.IsNullOrWhiteSpace(runtime.BotProfileId))
+        {
+            return "ignored=runtime_or_bot_profile_missing";
+        }
+
+        string botProfileId = Clean(runtime.BotProfileId);
+        lock (Sync)
+        {
+            if (!Subscriptions.TryGetValue(botProfileId, out OperatorSubscription? subscription))
+            {
+                return "subscriptionRemoved=false;exactPlayerRequired=true;callbacksDisabled=true;reason=" + Safe(reason);
+            }
+
+            if (exactPlayer == null || !ReferenceEquals(subscription.Player, exactPlayer))
+            {
+                throw new InvalidOperationException(
+                    "career acquisition subscription exact Player mismatch during runtime presence seal; botProfile=" + Safe(botProfileId));
+            }
+
+            subscription.Active = false;
+            DetachSubscription(subscription, "runtime_presence_lost:" + reason);
+            Subscriptions.Remove(botProfileId);
+            return "subscriptionRemoved=true;exactPlayerRequired=true;callbacksDisabled=true;reason=" + Safe(reason);
+        }
+    }
+
     private static void SampleShadowPedometer(OperatorSubscription subscription)
     {
+        if (!subscription.Active)
+        {
+            return;
+        }
+
         float now = Time.time;
         if (now < subscription.NextDistanceSampleTime)
         {
@@ -313,6 +349,11 @@ internal static class VanguardOperatorSkillAndPhysicalAcquisitionFoundationServi
 
     private static void ObserveMovementStateChanged(OperatorSubscription subscription, EPlayerState previousState, EPlayerState nextState)
     {
+        if (!subscription.Active)
+        {
+            return;
+        }
+
         try
         {
             // Mirror the EFT Pedometer ownership rule without restarting Fika's stopped coroutine:
@@ -387,6 +428,11 @@ internal static class VanguardOperatorSkillAndPhysicalAcquisitionFoundationServi
 
     private static void ObserveDamageTaken(OperatorSubscription subscription, EBodyPart bodyPart, float damage, DamageInfoStruct info)
     {
+        if (!subscription.Active)
+        {
+            return;
+        }
+
         try
         {
             if (GClass3051.IsSelfInflicted(info.DamageType))
@@ -411,6 +457,11 @@ internal static class VanguardOperatorSkillAndPhysicalAcquisitionFoundationServi
 
     private static void CompleteItemFound(OperatorSubscription subscription, Item item)
     {
+        if (!subscription.Active)
+        {
+            return;
+        }
+
         if (item == null || item is StackableItemItemClass)
         {
             return;
@@ -431,6 +482,11 @@ internal static class VanguardOperatorSkillAndPhysicalAcquisitionFoundationServi
 
     private static void CompleteNoArgAction(OperatorSubscription subscription, string actionName, Action completion)
     {
+        if (!subscription.Active)
+        {
+            return;
+        }
+
         try
         {
             completion();
@@ -444,6 +500,11 @@ internal static class VanguardOperatorSkillAndPhysicalAcquisitionFoundationServi
 
     private static void CompleteCountAction(OperatorSubscription subscription, string actionName, int count, Action completion)
     {
+        if (!subscription.Active)
+        {
+            return;
+        }
+
         try
         {
             completion();
@@ -457,6 +518,11 @@ internal static class VanguardOperatorSkillAndPhysicalAcquisitionFoundationServi
 
     private static void CompleteScalarAction(OperatorSubscription subscription, string actionName, float value, Action completion)
     {
+        if (!subscription.Active)
+        {
+            return;
+        }
+
         try
         {
             completion();
@@ -511,6 +577,11 @@ internal static class VanguardOperatorSkillAndPhysicalAcquisitionFoundationServi
 
     private static void ObserveSkillEvent(OperatorSubscription subscription, string eventKind, AbstractSkillClass skill)
     {
+        if (!subscription.Active)
+        {
+            return;
+        }
+
         if (skill == null)
         {
             return;
@@ -529,12 +600,17 @@ internal static class VanguardOperatorSkillAndPhysicalAcquisitionFoundationServi
             TelemetryStatusTag,
             () => string.Format(
                 CultureInfo.InvariantCulture,
-                "VANGUARD_SKILL_EVENT operator={0}; botProfile={1}; raid={2}; kind={3}; skill={4}; ordinal={5}; current={6:0.####}; level={7}; pointsEarned={8:0.####}; effectiveness={9:0.####}; observerOnly=true; persistenceOwner=Vanguard_0_6_1_existing_skill_persistence",
+                "VANGUARD_SKILL_EVENT operator={0}; botProfile={1}; raid={2}; kind={3}; skill={4}; ordinal={5}; current={6:0.####}; level={7}; pointsEarned={8:0.####}; effectiveness={9:0.####}; observerOnly=true; persistenceOwner=canonical_skill_persistence",
                 Safe(subscription.Runtime.OperatorId), Safe(subscription.Runtime.BotProfileId), Safe(subscription.Runtime.RaidSessionId), eventKind, skill.Id, ordinal, skill.Current, skill.Level, skill.PointsEarned, skill.Effectiveness));
     }
 
     private static void ObserveMasteringEvent(OperatorSubscription subscription, string eventKind, MasterSkillClass mastery)
     {
+        if (!subscription.Active)
+        {
+            return;
+        }
+
         if (mastery == null)
         {
             return;
@@ -553,12 +629,17 @@ internal static class VanguardOperatorSkillAndPhysicalAcquisitionFoundationServi
             TelemetryStatusTag,
             () => string.Format(
                 CultureInfo.InvariantCulture,
-                "VANGUARD_MASTERING_EVENT operator={0}; botProfile={1}; raid={2}; kind={3}; mastery={4}; ordinal={5}; current={6:0.####}; level={7}; levelProgress={8:0.####}; observerOnly=true; persistenceOwner=Vanguard_0_6_1_existing_skill_persistence",
+                "VANGUARD_MASTERING_EVENT operator={0}; botProfile={1}; raid={2}; kind={3}; mastery={4}; ordinal={5}; current={6:0.####}; level={7}; levelProgress={8:0.####}; observerOnly=true; persistenceOwner=canonical_skill_persistence",
                 Safe(subscription.Runtime.OperatorId), Safe(subscription.Runtime.BotProfileId), Safe(subscription.Runtime.RaidSessionId), eventKind, mastery.Id, ordinal, mastery.Current, mastery.Level, mastery.LevelProgress));
     }
 
     private static void ObservePhysicalSnapshot(OperatorSubscription subscription, DateTimeOffset now)
     {
+        if (!subscription.Active)
+        {
+            return;
+        }
+
         Player player = subscription.Player;
         BasePhysicalClass? physical = player.Physical;
         if (physical == null)
@@ -631,6 +712,7 @@ internal static class VanguardOperatorSkillAndPhysicalAcquisitionFoundationServi
 
     private static void DetachSubscription(OperatorSubscription subscription, string reason)
     {
+        subscription.Active = false;
         try
         {
             SkillManager skills = subscription.Skills;
@@ -700,6 +782,7 @@ internal static class VanguardOperatorSkillAndPhysicalAcquisitionFoundationServi
         public VanguardRaidOperatorRuntimeRecord Runtime { get; }
         public Player Player { get; }
         public SkillManager Skills { get; }
+        public volatile bool Active = true;
         public bool AcquisitionParityAllowed { get; }
         public string CompatibilityReason { get; }
         public MovementContext.GDelegate72? MovementStateHandler { get; set; }

@@ -510,7 +510,7 @@ internal static class VanguardFikaHudTelemetryService
         }
 
         reset.Invoke(writer, null);
-        // Fika 2.3.9 NetworkUtils.EPacketType.Serializable == 0. Server packets do not carry
+        // Fika NetworkUtils.EPacketType.Serializable == 0. Server packets do not carry
         // the client-side broadcast byte; FikaClient.OnNetworkReceive reads this enum first.
         putByte.Invoke(writer, new object[] { (byte)0 });
         write.MakeGenericMethod(typeof(TPacket)).Invoke(packetProcessor, new object[] { writer, packet });

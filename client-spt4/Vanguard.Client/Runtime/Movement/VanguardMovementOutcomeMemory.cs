@@ -5,10 +5,10 @@ using System.Globalization;
 using UnityEngine;
 using Vanguard.Client.Diagnostics;
 
-// Responsibility: Provides Movement Outcome Memory support for the movement/cohesion runtime.
-// Flow: The file encapsulates one bounded piece of the subsystem and exchanges explicit inputs/results with neighboring services instead of relying on hidden cross-system state.
-// Authority boundary: Authority remains with the owning subsystem and any external EFT/SPT/Fika/SAIN component explicitly referenced by its call path.
-// Invariant: Behavior stays scoped to the current profile/raid/process contract and preserves existing safety and compatibility boundaries.
+// Responsibility: Remember recent Operator movement outcomes to discourage repeat failures at the same rally anchor.
+// Flow: Record outcomes by Operator and rounded horizontal anchor, then consult bounded failure memory when scoring.
+// Authority boundary: This is advisory anchor-selection history; it does not alter pathfinding, command ownership or movement directly.
+// Invariant: Only matching recent failure records incur penalties, and the memory resets on raid lifecycle changes.
 namespace Vanguard.Client.Runtime.Movement;
 
 /// <summary>

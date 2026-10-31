@@ -2,6 +2,7 @@
 using System;
 using Vanguard.Client.Runtime.Decision;
 using Vanguard.Client.Runtime.Medical;
+using Vanguard.Client.Runtime.Medical.Support;
 using Vanguard.Client.Runtime.Intents;
 
 // Responsibility: Encodes the deterministic rules for Effective Medical Execution Policy within the execution arbitration runtime.
@@ -86,6 +87,112 @@ internal static class VanguardEffectiveMedicalExecutionPolicy
         // cohesion movement domain. They are effective executions, but never movement sovereignty.
         reason = "active_mobile_medical_sidecar_not_exclusive:" + executionReason;
         return false;
+    }
+
+    public static bool HasActionableSelfCareOpportunity(OperatorDecisionSnapshot? snapshot, DateTimeOffset now, out string reason)
+    {
+        reason = "none";
+        if (snapshot == null || !snapshot.Alive || string.IsNullOrWhiteSpace(snapshot.BotProfileId))
+        {
+            reason = "operator_dead_or_missing";
+            return false;
+        }
+
+        if (snapshot.Threat.DirectThreat
+            || snapshot.Threat.EnemyCanShoot == true
+            || snapshot.Medical.Safety.EnemyCanShoot
+            || snapshot.Medical.Safety.IncomingFireRecent
+            || snapshot.Medical.Safety.ImmediateCombatBlock)
+        {
+            reason = "self_care_blocked_by_direct_combat";
+            return false;
+        }
+
+        bool fracture = snapshot.Medical.Need.DominantNeed == VanguardMedicalNeed.Fracture;
+        bool mobile = snapshot.Medical.Need.DominantNeed == VanguardMedicalNeed.HeavyBleed
+            || snapshot.Medical.Need.DominantNeed == VanguardMedicalNeed.LightBleed
+            || snapshot.Medical.Need.DominantNeed == VanguardMedicalNeed.HpHeal
+            || snapshot.Medical.Need.DominantNeed == VanguardMedicalNeed.PainMobility;
+        if (!fracture && !mobile)
+        {
+            reason = "self_care_need_not_actionable:" + snapshot.Medical.Need.DominantNeed;
+            return false;
+        }
+
+        if (fracture && !snapshot.Medical.Safety.SafeForStationaryAid)
+        {
+            reason = "fracture_waiting_for_stationary_safe_window";
+            return false;
+        }
+        if (mobile && !snapshot.Medical.Safety.SafeForMobileAid && !snapshot.Medical.Safety.CoveredSuppressionOpportunity)
+        {
+            reason = "mobile_self_care_waiting_for_safe_window";
+            return false;
+        }
+
+        bool exactPlanReady = snapshot.Medical.Plan.Readable
+            && snapshot.Medical.Plan.WouldExecuteIfActive
+            && ((fracture && string.Equals(snapshot.Medical.Plan.NextStep, "StationaryFractureCareReadOnly", StringComparison.OrdinalIgnoreCase))
+                || (mobile && string.Equals(snapshot.Medical.Plan.NextStep, "MobileMedicalStabilizeReadOnly", StringComparison.OrdinalIgnoreCase)));
+        bool itemActionable = snapshot.Medical.Actionability.RequiredItemAvailable
+            && snapshot.Medical.Actionability.CanApplyItem != false;
+
+        if (exactPlanReady && itemActionable)
+        {
+            reason = "actionable_self_care_ready:" + snapshot.Medical.Need.DominantNeed + ":" + Safe(snapshot.Medical.Need.TargetPart);
+            return true;
+        }
+
+        bool postHandoffSettlement = VanguardMedicSupplyDropExecutor.HasPostHandoffSelfCareSettlementPriority(
+            snapshot.BotProfileId,
+            snapshot.Medical.Need.DominantNeed,
+            snapshot.Medical.Need.TargetPart,
+            now,
+            out string postHandoffReason);
+        if (postHandoffSettlement)
+        {
+            reason = postHandoffReason + ":waiting_for_post_pickup_medical_refresh_or_commit";
+            return true;
+        }
+
+        reason = !itemActionable
+            ? "self_care_item_not_actionable"
+            : "self_care_plan_not_ready:" + Safe(snapshot.Medical.Plan.NextStep);
+        return false;
+    }
+
+    public static bool IsActionableSelfCareCandidate(OperatorDecisionSnapshot? snapshot, VanguardIntentCandidate? candidate, DateTimeOffset now, out string reason)
+    {
+        reason = "none";
+        if (candidate == null || !candidate.Valid || !string.Equals(candidate.Domain, "Medical", StringComparison.OrdinalIgnoreCase))
+        {
+            reason = "candidate_not_medical";
+            return false;
+        }
+
+        bool supportedIntent = string.Equals(candidate.IntentKey, "MobileMedicalStabilize", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(candidate.IntentKey, "StationaryMedicalStabilize", StringComparison.OrdinalIgnoreCase);
+        if (!supportedIntent)
+        {
+            reason = "candidate_not_supported_self_care_intent:" + Safe(candidate.IntentKey);
+            return false;
+        }
+
+        if (!HasActionableSelfCareOpportunity(snapshot, now, out reason))
+        {
+            return false;
+        }
+
+        if (snapshot != null && snapshot.Medical.Need.DominantNeed == VanguardMedicalNeed.Fracture)
+        {
+            bool matches = string.Equals(candidate.IntentKey, "StationaryMedicalStabilize", StringComparison.OrdinalIgnoreCase);
+            reason = matches ? "actionable_stationary_fracture_candidate" : "fracture_candidate_mismatch";
+            return matches;
+        }
+
+        bool mobileMatches = string.Equals(candidate.IntentKey, "MobileMedicalStabilize", StringComparison.OrdinalIgnoreCase);
+        reason = mobileMatches ? "actionable_mobile_self_care_candidate" : "mobile_candidate_mismatch";
+        return mobileMatches;
     }
 
     public static bool IsUrgentMobileSidecarCandidate(OperatorDecisionSnapshot? snapshot, VanguardIntentCandidate? candidate)

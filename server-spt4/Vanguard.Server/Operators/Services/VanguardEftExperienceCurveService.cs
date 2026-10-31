@@ -10,7 +10,7 @@ using Vanguard.Server.Diagnostics;
 namespace Vanguard.Server.Operators.Services;
 
 /// <summary>
-/// Resolves the cumulative EFT level experience table from the typed SPT 4.0 server model.
+/// Resolves the cumulative EFT level experience table from the typed SPT server model.
 /// This server-side resolver intentionally uses the server DTO path instead of mirroring EFT client member names.
 /// A loud fallback keeps boot safe but is never authoritative for UI coherence or promotion.
 /// </summary>

@@ -30,7 +30,7 @@ internal static class VanguardGrenadeRuntimeResolver
     private static readonly ConditionalWeakTable<object, GrenadeCacheEntry> GrenadeCache = new();
     private static readonly FieldInfo? ThrowableRigidbodyField = AccessTools.Field(typeof(Throwable), "Rigidbody");
     // EFT Grenade keeps elapsed lifetime and pre-throw cooking time in private floats. The names are
-    // verified against the canonical 4.0.13 client source; reflection is fail-soft so a future EFT
+    // verified against the supported EFT client source; reflection is fail-soft so a future EFT
     // change degrades timing confidence rather than breaking grenade admission.
     private static readonly FieldInfo? GrenadeElapsedField = AccessTools.Field(typeof(Grenade), "float_3");
     private static readonly FieldInfo? GrenadeCookedField = AccessTools.Field(typeof(Grenade), "float_4");

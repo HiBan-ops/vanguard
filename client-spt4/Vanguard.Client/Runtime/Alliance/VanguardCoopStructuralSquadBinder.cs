@@ -372,7 +372,7 @@ internal static class VanguardCoopStructuralSquadBinder
 
     private static bool ApplyInfo(object? info, EPlayerSide side, string groupId, string teamId)
     {
-        // SPT 4 exposes different concrete profile-info classes depending on the
+        // SPT exposes different concrete profile-info classes depending on the
         // access path (Profile.Info vs Player.Profile.Info). Both expose Side,
         // GroupId and TeamId, but they are not assignable to ProfileInfoClass at
         // compile time. Keep the structural affiliation layer type-agnostic here

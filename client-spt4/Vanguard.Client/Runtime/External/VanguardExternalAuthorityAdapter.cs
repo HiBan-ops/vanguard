@@ -8,12 +8,14 @@ using EFT;
 using UnityEngine;
 using Vanguard.Client.Diagnostics;
 using Vanguard.Client.Runtime.Audit;
+using Vanguard.Client.Runtime.Authority;
 using Vanguard.Client.Runtime.Decision;
 using Vanguard.Client.Runtime.Execution;
 using Vanguard.Client.Runtime.Grenades;
 using Vanguard.Client.Runtime.Integrations.Orbit;
 using Vanguard.Client.Runtime.Movement;
 using Vanguard.Client.Runtime.Movement.Brain;
+using Vanguard.Client.Runtime.SquadCohesion;
 
 // Responsibility: mediates Vanguard movement/medical ownership against external executors such as SAIN, Looting Bots and Orbit without replacing their unrelated behavior.
 // Flow: When Vanguard needs temporary movement or medical control, this adapter pauses only the conflicting external behavior, records what was changed, and restores it as soon as the Vanguard lease ends.
@@ -59,6 +61,9 @@ internal static class VanguardExternalAuthorityAdapter
     private static readonly TimeSpan MedicalPreemptSnapshotFastPathInterval = TimeSpan.FromMilliseconds(350.00d);
     private static readonly Dictionary<string, DateTimeOffset> LastLogAtByKey = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<string, ExternalSuppressionState> SuppressedByBotProfileId = new(StringComparer.OrdinalIgnoreCase);
+    // A suppression receipt identifies its exact admitted movement window, not the bot profile alone.
+    private static long NextSuppressionSerial;
+
 
     public static void Reset(string reason)
     {
@@ -66,6 +71,22 @@ internal static class VanguardExternalAuthorityAdapter
         SuppressedByBotProfileId.Clear();
         VanguardOrbitAuthorityBoundaryService.ResetForRaidLifecycle(reason);
         VanguardClientDiagnosticsLog.Info(StatusTag, $"VANGUARD_EXTERNAL_AUTHORITY_RESET reason={Safe(reason)}; patientOnly=true; owns=Orbit_LootingBots_EFTPath; doesNotOwn=SAINCombat;vetoes=SAINAutonomousExtract; usesLootingBotsExternal=true; orbitAgentPreempt=reflection_guarded; release=explicit; combatAwareGate=true; orbitLayerIdleQuiesce=true; coverArrivalGrant=true; medicalAuthorityHold=true; coverCommit=true; hardProcedureAuthority=true; completionGate=true; directSurgeryChain=true; sameProcedureStart=true; validSurgeryTargets=true; criticalFastSurgery=true; surgeryHardHold=true; orbitLootFreezeDuringSurgery=true; releaseOnlyOnHealedOrLongTimeout=true; returnContinuation=true; cleanAuth=true; orbitNonDriveHardReturnClear=true; residualCombatMedicalOverride=removed_general_sain_stale_exit; generalSainStaleExit=true; PathAlertRecovery=true; tag={StatusTag}; Tag={CombatHoldMedicalCatchupStatusTag}; continuationTag={ReturnContinuationStatusTag}; cleanAuthTag={CleanAuthStatusTag}; movementTag={MovementPreemptStatusTag}; combatGateTag={CombatAwareGateStatusTag}; typedFailureTag={TypedCoverFailureStatusTag}; orbitLayerTag={OrbitLayerQuiesceStatusTag}; coverArrivalTag={CoverArrivalGrantStatusTag}; authorityHoldTag={MedicalAuthorityHoldStatusTag}; coverCommitTag={MedicalCoverCommitStatusTag}; commitUnificationTag={MedicalCoverCommitUnificationStatusTag}; movementStabilizationTag={MedicalCoverMovementStabilizationStatusTag}; hardProcedureTag={MedicalHardProcedureAuthorityStatusTag}; completionGateTag={MedicalProcedureCompletionGateStatusTag}; directChainTag={MedicalSurgeryDirectChainStatusTag}; sameProcedureStartTag={MedicalSurgerySameLeaseStartStatusTag}; validSurgeryTargetTag={MedicalValidSurgeryTargetsStatusTag}; criticalFastSurgeryTag={MedicalCriticalTriageFastSurgeryStatusTag}; surgeryHardHoldTag={MedicalSurgeryHardHoldStatusTag}; orbitLootFreezeTag={MedicalOrbitLootFreezeDuringSurgeryStatusTag}");
+    }
+
+    public static string ForgetRuntimePresence(string? botProfileId, string reason)
+    {
+        string key = Normalize(botProfileId);
+        bool suppressionRemoved = SuppressedByBotProfileId.Remove(key);
+        bool orbitCacheRemoved = VanguardOrbitAuthorityBoundaryService.ForgetRuntimePresence(key);
+
+        // This is terminal runtime-instance cleanup, not an authority release. Never resume patrol,
+        // ORBIT, LootingBots or any path driver for an object that is leaving the raid runtime.
+        string summary = "suppressionRemoved=" + Bool(suppressionRemoved)
+            + ";orbitCacheRemoved=" + Bool(orbitCacheRemoved)
+            + ";externalResume=false";
+        VanguardClientDiagnosticsLog.Info(StatusTag,
+            $"VANGUARD_EXTERNAL_RUNTIME_PRESENCE_FORGOTTEN botProfile={Safe(key)}; reason={Safe(reason)}; {summary}; mutation=cache_only; tag={StatusTag}");
+        return summary;
     }
 
     public static VanguardExternalActivitySnapshot ReadActivity(BotOwner? botOwner, OperatorDecisionSnapshot snapshot, DateTimeOffset now, bool log = false, string reason = "snapshot")
@@ -255,9 +276,28 @@ internal static class VanguardExternalAuthorityAdapter
         return false;
     }
 
-    public static VanguardExternalPreemptResult RequestMedicalPreempt(BotOwner? botOwner, OperatorDecisionSnapshot snapshot, string reason, TimeSpan ttl, DateTimeOffset now)
+    public static VanguardExternalPreemptResult RequestMedicalPreempt(BotOwner? botOwner, OperatorDecisionSnapshot snapshot, string reason, TimeSpan ttl, DateTimeOffset now, string? ownerLeaseId = null)
     {
         snapshot ??= OperatorDecisionSnapshot.Empty;
+        // Every Medical physical mutation must be tied to the admitted medical lease.
+        // Legacy hard-procedure refresh callers can omit the ID, so resolve it from
+        // the active authority controller. Without a live exact lease, fail closed:
+        // never create an unowned suppression or overwrite another domain's receipt.
+        if (string.IsNullOrWhiteSpace(ownerLeaseId))
+        {
+            if (!VanguardOperatorAuthorityLeaseController.TryGetActiveMedicalLeaseIdentity(
+                    snapshot.BotProfileId, now, out var resolvedLeaseId))
+            {
+                var empty = VanguardExternalActivitySnapshot.Empty;
+                var rejected = new VanguardExternalPreemptResult(
+                    VanguardExternalPreemptOutcome.FailedNoAuthority, empty, empty,
+                    "mutations=none", "active_exact_medical_lease_missing");
+                LogPreempt(snapshot, now, reason, rejected);
+                return rejected;
+            }
+
+            ownerLeaseId = resolvedLeaseId;
+        }
         if (botOwner == null)
         {
             var empty = VanguardExternalActivitySnapshot.Empty;
@@ -274,8 +314,46 @@ internal static class VanguardExternalAuthorityAdapter
             return rejected;
         }
 
+        // Combat admission must be complete before TC is drained. The snapshot-only read reuses the
+        // common external-authority classifier without live reflection, so the short medical fast path
+        // cannot bypass SAIN combat signals that are broader than the direct-threat residue predicate.
+        var snapshotCombatGate = ReadActivity(null, snapshot, now, log: false, reason: reason + "_snapshot_combat_gate");
+        if (snapshotCombatGate.IsCombatOwned)
+        {
+            var rejected = new VanguardExternalPreemptResult(VanguardExternalPreemptOutcome.RejectedCombatOwner, snapshotCombatGate, snapshotCombatGate, "mutations=none", snapshotCombatGate.BlockingReason);
+            LogPreempt(snapshot, now, reason, rejected);
+            return rejected;
+        }
+
         string key = Normalize(snapshot.BotProfileId);
-        if (!SuppressedByBotProfileId.TryGetValue(key, out var state))
+        SuppressedByBotProfileId.TryGetValue(key, out var state);
+        bool snapshotFastPath = state != null
+            && string.Equals(state.OwnerDomain, "Medical", StringComparison.Ordinal)
+            && (string.IsNullOrWhiteSpace(ownerLeaseId) || string.Equals(state.OwnerLeaseId, ownerLeaseId, StringComparison.OrdinalIgnoreCase))
+            && state.LastMedicalPreemptResult.HasValue
+            && state.LastMedicalPreemptResult.Value.CanDriveMovement
+            && now - state.LastMedicalMutationAtUtc < MedicalPreemptSnapshotFastPathInterval
+            && !HasSnapshotMedicalAuthorityResidue(snapshot);
+
+        VanguardExternalActivitySnapshot before;
+        if (snapshotFastPath)
+        {
+            before = state!.LastMedicalPreemptResult.GetValueOrDefault().After;
+        }
+        else
+        {
+            long beforeReadStarted = VanguardRuntimePerformanceGuard.Begin();
+            before = ReadActivity(botOwner, snapshot, now, log: false, reason: reason + "_before");
+            VanguardRuntimePerformanceGuard.End("MedicalExternalActivityReadBefore", beforeReadStarted);
+            if (before.IsCombatOwned)
+            {
+                var rejected = new VanguardExternalPreemptResult(VanguardExternalPreemptOutcome.RejectedCombatOwner, before, before, "mutations=none", before.BlockingReason);
+                LogPreempt(snapshot, now, reason, rejected);
+                return rejected;
+            }
+        }
+
+        if (state == null)
         {
             state = new ExternalSuppressionState
             {
@@ -287,35 +365,52 @@ internal static class VanguardExternalAuthorityAdapter
         }
         var requestedUntil = now + ttl;
         state.ExpiresAtUtc = state.ExpiresAtUtc > requestedUntil ? state.ExpiresAtUtc : requestedUntil;
+        if (!string.Equals(state.OwnerDomain, "Medical", StringComparison.Ordinal)
+            || (!string.IsNullOrWhiteSpace(ownerLeaseId)
+                && !string.Equals(state.OwnerLeaseId, ownerLeaseId, StringComparison.OrdinalIgnoreCase)))
+        {
+            state.OwnerSerial = ++NextSuppressionSerial;
+            state.LastMedicalPreemptResult = null;
+            state.LastMedicalMutationAtUtc = DateTimeOffset.MinValue;
+        }
+        if (!string.Equals(state.OwnerDomain, "Medical", StringComparison.Ordinal))
+        {
+            state.OwnerLeaseId = string.Empty;
+            state.OwnerWindowId = string.Empty;
+        }
+        state.OwnerDomain = "Medical";
+        if (!string.IsNullOrWhiteSpace(ownerLeaseId))
+        {
+            state.OwnerLeaseId = ownerLeaseId;
+            state.OwnerWindowId = string.Empty;
+        }
+        else if (state.OwnerSerial == 0)
+        {
+            state.OwnerSerial = ++NextSuppressionSerial;
+        }
         state.LastReason = reason;
 
+        // Medical authority ordering: Medical is allowed to become the stronger local locomotion owner,
+        // but only after every Combat admission gate has accepted the request. Cross the shared TC
+        // barrier before either the short fast-path grant or any generic path/mover mutation. In particular,
+        // pending TC handoffs that have not yet appeared in the movement snapshot are drained as well.
+        TacticalCoordinationPhysicalDrainResult tcDrain = TacticalCoordinationPhysicalAuthorityBarrier.DrainForHigherAuthority(
+            snapshot.BotProfileId,
+            now,
+            "medical_preempt:" + Safe(reason));
+
         // The runtime fast path: a clean authority grant is a lease-local fact for a very short cadence.
-        // Reuse it before entering reflection-heavy integration reads when the immutable decision
-        // snapshot contains no renewed loot, ORBIT, EFT path, locomotion or combat signal. This keeps
-        // stationary medical safe while preventing a single synchronous adapter pass from stalling the
-        // headless thread. Any material snapshot change immediately falls through to a full read/preempt.
-        if (state.LastMedicalPreemptResult.HasValue
-            && state.LastMedicalPreemptResult.Value.CanDriveMovement
-            && now - state.LastMedicalMutationAtUtc < MedicalPreemptSnapshotFastPathInterval
-            && !HasSnapshotMedicalAuthorityResidue(snapshot))
+        // Snapshot Combat admission above is intentionally broader than HasSnapshotMedicalAuthorityResidue;
+        // the latter remains a cheap residue/stability gate, not an authority classifier.
+        if (snapshotFastPath)
         {
-            var clean = state.LastMedicalPreemptResult.Value.After;
+            var clean = before;
             return new VanguardExternalPreemptResult(
                 VanguardExternalPreemptOutcome.Granted,
                 clean,
                 clean,
-                "mutations=none;snapshotFastPath=true;fastPathCadenceMs=" + MedicalPreemptSnapshotFastPathInterval.TotalMilliseconds.ToString("0", CultureInfo.InvariantCulture),
+                "tcDrain=" + Safe(tcDrain.Summary) + ";snapshotFastPath=true;fastPathCadenceMs=" + MedicalPreemptSnapshotFastPathInterval.TotalMilliseconds.ToString("0", CultureInfo.InvariantCulture),
                 "existing_medical_authority_clean_snapshot_stable");
-        }
-
-        long beforeReadStarted = VanguardRuntimePerformanceGuard.Begin();
-        var before = ReadActivity(botOwner, snapshot, now, log: false, reason: reason + "_before");
-        VanguardRuntimePerformanceGuard.End("MedicalExternalActivityReadBefore", beforeReadStarted);
-        if (before.IsCombatOwned)
-        {
-            var rejected = new VanguardExternalPreemptResult(VanguardExternalPreemptOutcome.RejectedCombatOwner, before, before, "mutations=none", before.BlockingReason);
-            LogPreempt(snapshot, now, reason, rejected);
-            return rejected;
         }
 
         // The runtime idempotence: when the previous preempt already established a clean patient-only
@@ -333,11 +428,15 @@ internal static class VanguardExternalAuthorityAdapter
                 VanguardExternalPreemptOutcome.Granted,
                 before,
                 before,
-                "mutations=none;idempotentHold=true;mutationCadenceMs=" + MedicalPreemptMutationInterval.TotalMilliseconds.ToString("0", CultureInfo.InvariantCulture),
+                "tcDrain=" + Safe(tcDrain.Summary) + ";idempotentHold=true;mutationCadenceMs=" + MedicalPreemptMutationInterval.TotalMilliseconds.ToString("0", CultureInfo.InvariantCulture),
                 "existing_medical_authority_clean");
         }
 
-        var mutations = new List<string>(24);
+        var mutations = new List<string>(24)
+        {
+            "tcDrain=" + Safe(tcDrain.Summary),
+            "tcCleanBeforeMedicalPathPreempt=true"
+        };
         long mutationStarted = VanguardRuntimePerformanceGuard.Begin();
         bool lootingActive = before.LootingBotsActive || before.LootingBotsTaskRunning || before.LootingBotsHasActiveLootable;
         ApplyLootingBotsPreempt(botOwner, ttl, mutations, cleanupActiveState: lootingActive);
@@ -391,7 +490,7 @@ internal static class VanguardExternalAuthorityAdapter
 
 
 
-    public static VanguardExternalPreemptResult RequestGrenadeEmergencyPreempt(BotOwner? botOwner, OperatorDecisionSnapshot snapshot, string reason, TimeSpan ttl, DateTimeOffset now)
+    public static VanguardExternalPreemptResult RequestGrenadeEmergencyPreempt(BotOwner? botOwner, OperatorDecisionSnapshot snapshot, string reason, TimeSpan ttl, DateTimeOffset now, string ownerWindowId)
     {
         snapshot ??= OperatorDecisionSnapshot.Empty;
         var before = ReadActivity(botOwner, snapshot, now, log: true, reason: "grenade_emergency_" + Safe(reason) + "_before");
@@ -401,6 +500,11 @@ internal static class VanguardExternalAuthorityAdapter
             VanguardClientDiagnosticsLog.Warning(VanguardGrenadeEmergencyPolicy.StatusTag,
                 $"VANGUARD_EXTERNAL_PREEMPT_FAILED botProfile={Safe(snapshot.BotProfileId)}; reason=botowner_missing; mutation=false; tag={VanguardGrenadeEmergencyPolicy.StatusTag}");
             return failed;
+        }
+
+        if (!VanguardMainIntentScheduler.IsExactExternalMovementWindowCurrent(snapshot.BotProfileId, ownerWindowId, now, grenade: true))
+        {
+            return new VanguardExternalPreemptResult(VanguardExternalPreemptOutcome.FailedBotOwnerMissing, before, before, "mutations=none", "owner_window_missing");
         }
 
         string key = Normalize(snapshot.BotProfileId);
@@ -418,6 +522,9 @@ internal static class VanguardExternalAuthorityAdapter
         DateTimeOffset requestedUntil = now + ttl;
         state.ExpiresAtUtc = state.ExpiresAtUtc > requestedUntil ? state.ExpiresAtUtc : requestedUntil;
         state.LastReason = "grenade_emergency:" + reason;
+        state.OwnerDomain = "Grenade";
+        state.OwnerLeaseId = ownerWindowId;
+        state.OwnerWindowId = ownerWindowId;
 
         var mutations = new List<string>(24);
         ApplyLootingBotsPreempt(botOwner, ttl, mutations);
@@ -494,7 +601,115 @@ internal static class VanguardExternalAuthorityAdapter
     }
 
 
-    public static VanguardExternalPreemptResult RequestOrbitAuthorityQuiesce(BotOwner? botOwner, OperatorDecisionSnapshot snapshot, string reason, TimeSpan ttl, DateTimeOffset now)
+    public static string RequestLootingBotsAutonomySuppression(BotOwner? botOwner, string reason, TimeSpan ttl, bool cleanupActiveState)
+    {
+        if (botOwner == null)
+        {
+            return "lootingbots_suppression=skipped_no_botowner;reason=" + Safe(reason);
+        }
+
+        var mutations = new List<string>(8)
+        {
+            "reason=" + Safe(reason),
+            "cleanupActiveState=" + Bool(cleanupActiveState),
+            "movementPathMutation=false"
+        };
+        ApplyLootingBotsPreempt(botOwner, ttl, mutations, cleanupActiveState);
+        return "lootingbots_suppression=applied;" + string.Join(",", mutations);
+    }
+
+    public static string RequestLootingBotsExactLootReservation(BotOwner? claimant, string itemInstanceId, TimeSpan ttl)
+    {
+        if (claimant == null || string.IsNullOrWhiteSpace(itemInstanceId))
+        {
+            return "lootingbots_exact_reservation=skipped_invalid_claimant_or_item";
+        }
+
+        Type? cacheType = VanguardOperatorRuntimeAuditReflection.FindType("LootingBots.Utilities.ActiveLootCache");
+        object? activeLootValue = VanguardOperatorRuntimeAuditReflection.GetStaticMember(cacheType, "ActiveLoot");
+        IDictionary? activeLoot = activeLootValue as IDictionary;
+        if (cacheType == null || activeLoot == null)
+        {
+            return "lootingbots_exact_reservation=unavailable";
+        }
+
+        string key = itemInstanceId.Trim();
+        var mutations = new List<string>(12);
+        try
+        {
+            object? existing = activeLoot.Contains(key) ? activeLoot[key] : null;
+            if (existing is BotOwner conflictingOwner && !ReferenceEquals(conflictingOwner, claimant))
+            {
+                ApplyLootingBotsPreempt(conflictingOwner, ttl, mutations, cleanupActiveState: true);
+                if (activeLoot.Contains(key))
+                {
+                    activeLoot.Remove(key);
+                }
+                mutations.Add("conflictingExactLootClaimPreempted=true");
+            }
+            else if (existing != null && !ReferenceEquals(existing, claimant))
+            {
+                activeLoot.Remove(key);
+                mutations.Add("staleExactLootClaimRemoved=true");
+            }
+
+            if (!activeLoot.Contains(key))
+            {
+                activeLoot.Add(key, claimant);
+            }
+            else if (!ReferenceEquals(activeLoot[key], claimant))
+            {
+                activeLoot[key] = claimant;
+            }
+
+            bool reserved = activeLoot.Contains(key) && ReferenceEquals(activeLoot[key], claimant);
+            return "lootingbots_exact_reservation=" + (reserved ? "held" : "failed")
+                + ";item=" + Safe(key)
+                + ";claimant=" + Safe(claimant.ProfileId)
+                + (mutations.Count == 0 ? string.Empty : ";mutations=" + string.Join(",", mutations));
+        }
+        catch (Exception exception)
+        {
+            return "lootingbots_exact_reservation=exception:" + exception.GetType().Name;
+        }
+    }
+
+    public static string ReleaseLootingBotsExactLootReservation(BotOwner? claimant, string itemInstanceId, string reason)
+    {
+        if (claimant == null || string.IsNullOrWhiteSpace(itemInstanceId))
+        {
+            return "lootingbots_exact_reservation_release=skipped_invalid_claimant_or_item";
+        }
+
+        Type? cacheType = VanguardOperatorRuntimeAuditReflection.FindType("LootingBots.Utilities.ActiveLootCache");
+        object? activeLootValue = VanguardOperatorRuntimeAuditReflection.GetStaticMember(cacheType, "ActiveLoot");
+        IDictionary? activeLoot = activeLootValue as IDictionary;
+        if (cacheType == null || activeLoot == null)
+        {
+            return "lootingbots_exact_reservation_release=unavailable";
+        }
+
+        string key = itemInstanceId.Trim();
+        try
+        {
+            bool released = false;
+            if (activeLoot.Contains(key) && ReferenceEquals(activeLoot[key], claimant))
+            {
+                activeLoot.Remove(key);
+                released = true;
+            }
+            return "lootingbots_exact_reservation_release=" + (released ? "released" : "not_owned")
+                + ";item=" + Safe(key)
+                + ";reason=" + Safe(reason);
+        }
+        catch (Exception exception)
+        {
+            return "lootingbots_exact_reservation_release=exception:" + exception.GetType().Name;
+        }
+    }
+
+
+    public static VanguardExternalPreemptResult RequestOrbitAuthorityQuiesce(BotOwner? botOwner, OperatorDecisionSnapshot snapshot, string reason, TimeSpan ttl, DateTimeOffset now, bool preserveVanguardMovementPath = false, string? ownerLeaseId = null, string? ownerWindowId = null)
     {
         snapshot ??= OperatorDecisionSnapshot.Empty;
         string safeReason = "orbit_authority_quiesce:" + Safe(reason);
@@ -541,12 +756,42 @@ internal static class VanguardExternalAuthorityAdapter
 
         var requestedUntil = now + ttl;
         state.ExpiresAtUtc = state.ExpiresAtUtc > requestedUntil ? state.ExpiresAtUtc : requestedUntil;
+        // Refreshes of the same exact movement window retain their receipt. A later acquisition,
+        // including a legacy/unbound orbit caller, must invalidate any older Travel receipt.
+        string requestedLeaseId = ownerLeaseId ?? string.Empty;
+        string requestedWindowId = ownerWindowId ?? string.Empty;
+        bool hasExactReceipt = !string.IsNullOrWhiteSpace(requestedLeaseId)
+            && !string.IsNullOrWhiteSpace(requestedWindowId);
+        string requestedDomain = hasExactReceipt && IsTravelOrbitQuiesceReason(safeReason) ? "Travel"
+            : hasExactReceipt && safeReason.StartsWith("orbit_authority_quiesce:corpse_loot_claim_and_approach", StringComparison.OrdinalIgnoreCase) ? "CorpseLootApproach"
+            : hasExactReceipt && safeReason.StartsWith("orbit_authority_quiesce:world_container_loot_claim_and_approach", StringComparison.OrdinalIgnoreCase) ? "WorldContainerLootApproach"
+            : hasExactReceipt && safeReason.StartsWith("orbit_authority_quiesce:close_cohesion_micro_adjust", StringComparison.OrdinalIgnoreCase) ? "CloseCohesion"
+            : hasExactReceipt && (safeReason.StartsWith("orbit_authority_quiesce:claimed_cohesion:", StringComparison.OrdinalIgnoreCase)
+                || safeReason.StartsWith("orbit_authority_quiesce:active_claim_refresh:", StringComparison.OrdinalIgnoreCase)) ? "CohesionClaim"
+            : "UnboundOrbit";
+        bool boundReceipt = !string.Equals(requestedDomain, "UnboundOrbit", StringComparison.Ordinal);
+        if (!boundReceipt || !string.Equals(state.OwnerLeaseId, requestedLeaseId, StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(state.OwnerWindowId, requestedWindowId, StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(state.OwnerDomain, requestedDomain, StringComparison.Ordinal))
+        {
+            state.OwnerSerial = ++NextSuppressionSerial;
+        }
+        state.OwnerDomain = requestedDomain;
+        state.OwnerLeaseId = boundReceipt ? requestedLeaseId : string.Empty;
+        state.OwnerWindowId = boundReceipt ? requestedWindowId : string.Empty;
         state.LastReason = safeReason;
 
         var mutations = new List<string>(32);
         ApplyLootingBotsPreempt(botOwner, ttl, mutations);
         ApplyOrbitPreempt(botOwner, snapshot, state, mutations);
-        ApplyPathPreempt(botOwner, mutations);
+        if (preserveVanguardMovementPath)
+        {
+            ApplyVanguardOwnedPathPreservingQuiesce(botOwner, mutations);
+        }
+        else
+        {
+            ApplyPathPreempt(botOwner, mutations);
+        }
 
         var after = ReadActivity(botOwner, snapshot, now, log: true, reason: safeReason + "_after");
         var outcome = ClassifyOrbitAuthorityQuiesceOutcome(snapshot, after);
@@ -557,7 +802,7 @@ internal static class VanguardExternalAuthorityAdapter
 
 
 
-    public static VanguardExternalPreemptResult RequestCombatWindowNoProductionCleanup(BotOwner? botOwner, OperatorDecisionSnapshot snapshot, string reason, TimeSpan ttl, DateTimeOffset now)
+    public static VanguardExternalPreemptResult RequestCombatWindowNoProductionCleanup(BotOwner? botOwner, OperatorDecisionSnapshot snapshot, string reason, TimeSpan ttl, DateTimeOffset now, string ownerWindowId)
     {
         snapshot ??= OperatorDecisionSnapshot.Empty;
         var before = ReadActivity(botOwner, snapshot, now, log: true, reason: "combat_no_production_cleanup_" + Safe(reason) + "_before");
@@ -567,6 +812,20 @@ internal static class VanguardExternalAuthorityAdapter
             LogThrottled("CombatCleanupMissing|" + Normalize(snapshot.BotProfileId), now, PreemptLogInterval,
                 $"VANGUARD_COMBAT_WINDOW_CLEANUP_SKIPPED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; reason={Safe(reason)}; outcome={failed.Outcome}; tag={VanguardMovementAuthorityDoctrine.CombatWindowClosureStatusTag}; adapterTag={StatusTag}");
             return failed;
+        }
+
+        // The scheduler has closed the old Combat window before invoking cleanup. It must
+        // only clean the matching physical receipt, never a replacement primary/SAIN window.
+        string cleanupKey = Normalize(snapshot.BotProfileId);
+        if (string.IsNullOrWhiteSpace(ownerWindowId)
+            || !SuppressedByBotProfileId.TryGetValue(cleanupKey, out var cleanupOwner)
+            || !string.Equals(cleanupOwner.OwnerDomain, "Combat", StringComparison.Ordinal)
+            || !string.Equals(cleanupOwner.OwnerWindowId, ownerWindowId, StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(cleanupOwner.OwnerLeaseId, ownerWindowId, StringComparison.OrdinalIgnoreCase)
+            || VanguardMainIntentScheduler.TryGetActivePrimaryWindowIdentity(cleanupKey, now, out _, out _, out _))
+        {
+            return new VanguardExternalPreemptResult(VanguardExternalPreemptOutcome.RejectedCombatOwner,
+                before, before, "mutations=none", "combat_cleanup_stale_or_successor_protected:" + Safe(ownerWindowId));
         }
 
         if (VanguardMovementAuthorityDoctrine.IsCombatProductive(snapshot, out var productiveReason)
@@ -594,7 +853,7 @@ internal static class VanguardExternalAuthorityAdapter
         return result;
     }
 
-    public static VanguardExternalPreemptResult RequestOrchestratorCombatAuthorityRelease(BotOwner? botOwner, OperatorDecisionSnapshot snapshot, string reason, TimeSpan ttl, DateTimeOffset now)
+    public static VanguardExternalPreemptResult RequestOrchestratorCombatAuthorityRelease(BotOwner? botOwner, OperatorDecisionSnapshot snapshot, string reason, TimeSpan ttl, DateTimeOffset now, string ownerWindowId)
     {
         snapshot ??= OperatorDecisionSnapshot.Empty;
         var before = ReadActivity(botOwner, snapshot, now, log: true, reason: "combat_authority_" + Safe(reason) + "_before");
@@ -614,9 +873,43 @@ internal static class VanguardExternalAuthorityAdapter
             return rejected;
         }
 
-        var mutations = new List<string>(40);
+        // The primary scheduler is the only Combat owner. A stale caller has no right to
+        // drain TC, clear a successor movement command, or pause native Patrol.
+        if (!VanguardMainIntentScheduler.IsExactCombatWindowCurrent(snapshot.BotProfileId, ownerWindowId, now))
+        {
+            return new VanguardExternalPreemptResult(VanguardExternalPreemptOutcome.RejectedCombatOwner,
+                before, before, "mutations=none", "combat_window_not_current:" + Safe(ownerWindowId));
+        }
+
+        // RF-06 physical-authority ordering: once Combat is proven authoritative, retire every exact
+        // Tactical Coordination physical contribution before the generic Vanguard command clear and
+        // before the SAIN locomotion handoff. The shared barrier releases only TC-owned path identity;
+        // SearchTranslationGateBridge preserves a newer SAIN ActivePath when combat has already
+        // replaced the old TC path, so this cleanup never stops SAIN's live survival/combat response.
+        TacticalCoordinationPhysicalDrainResult tcDrain = TacticalCoordinationPhysicalAuthorityBarrier.DrainForHigherAuthority(
+            snapshot.BotProfileId,
+            now,
+            "sain_combat_authority:" + Safe(reason) + ":" + Safe(authorityReason));
+        if (tcDrain.AnyTcStateDrained)
+        {
+            VanguardClientDiagnosticsLog.Info(
+                TacticalCoordinationPhysicalAuthorityBarrier.StatusTag,
+                $"VANGUARD_SAIN_COMBAT_TC_AUTHORITY_DRAIN operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; authorityReason={Safe(authorityReason)}; {tcDrain.Summary}; tcCleanBeforeGenericCommandClear=true; tcCleanBeforeSainCombatHandoff=true; newerSainPathPreservedByExactBindingGuard=true; staleTcResume=false; tag={TacticalCoordinationPhysicalAuthorityBarrier.StatusTag}; combatTag={VanguardOrchestratorAuthorityPolicy.StatusTag}");
+        }
+
+        var mutations = new List<string>(44)
+        {
+            "tcDrain=" + Safe(tcDrain.Summary),
+            "tcCleanBeforeSainCombatHandoff=true",
+            "newerSainPathPreservedByExactBindingGuard=true"
+        };
+        // Bind the exact Combat receipt before the first physical suppression mutation.
+        var combatSuppression = GetOrCreateSuppressionState(snapshot, now, "combat_authority:" + reason, ttl);
+        combatSuppression.OwnerDomain = "Combat";
+        combatSuppression.OwnerLeaseId = ownerWindowId;
+        combatSuppression.OwnerWindowId = ownerWindowId;
         ApplyLootingBotsPreempt(botOwner, ttl, mutations);
-        ApplyOrbitPreempt(botOwner, snapshot, GetOrCreateSuppressionState(snapshot, now, "combat_authority:" + reason, ttl), mutations);
+        ApplyOrbitPreempt(botOwner, snapshot, combatSuppression, mutations);
         VanguardReturnMovementCommandStore.Clear(snapshot.BotProfileId, "combat_authority_release");
         mutations.Add("vanguardCommandClear=true");
         bool alreadySainCombatOwned = before.IsCombatOwned || snapshot.Sain.IsInCombat == true || Contains(snapshot.Sain.ActiveLayer, "combat") || Contains(snapshot.Brain.ActiveLayer, "combat");
@@ -673,11 +966,33 @@ internal static class VanguardExternalAuthorityAdapter
             return rejected;
         }
 
-        var mutations = new List<string>(20);
+        // BreakContact is a one-shot handoff, not a scheduler-owned movement lease.
+        // Never cancel an admitted primary window or an exact Vanguard movement command
+        // from this advisory medical recheck path.
+        bool primaryWindowOwned = VanguardMainIntentScheduler.TryGetActivePrimaryWindowIdentity(
+            snapshot.BotProfileId, now, out _, out _, out _);
+        bool vanguardCommandOwned = VanguardReturnMovementCommandStore.TryGetActive(snapshot.BotProfileId, now, out _);
+        if (string.IsNullOrWhiteSpace(snapshot.BotProfileId) || primaryWindowOwned || vanguardCommandOwned)
+        {
+            return new VanguardExternalPreemptResult(VanguardExternalPreemptOutcome.FailedNoAuthority,
+                before, before, "mutations=none", "medical_break_contact_existing_movement_owner");
+        }
+
+        var mutations = new List<string>(24);
         ApplyLootingBotsPreempt(botOwner, ttl, mutations);
-        VanguardReturnMovementCommandStore.Clear(snapshot.BotProfileId, "medical_break_contact");
-        mutations.Add("vanguardCommandClear=true");
+        // No Vanguard command belongs to this caller; no profile-wide command clear.
+        mutations.Add("vanguardCommandClearSkipped=not_owned");
         ApplyPathPreempt(botOwner, mutations);
+        // Path reset is transient. Without an owned release receipt, leaving native Patrol
+        // paused here would strand the Operator after medical admission is deferred.
+        object? mover = VanguardOperatorRuntimeAuditReflection.GetPropertyOrField(botOwner, "Mover");
+        mutations.Add("breakContactMoverResume=" + Bool(TryInvoke(mover, "MovementResume")
+            || TrySetPropertyOrField(mover, "Pause", false)
+            || TrySetPropertyOrField(mover, "Paused", false)));
+        object? patrolling = VanguardOperatorRuntimeAuditReflection.GetPropertyOrField(botOwner, "PatrollingData");
+        mutations.Add("breakContactPatrolUnpause=" + Bool(TryInvoke(patrolling, "Unpause")
+            || TrySetPropertyOrField(patrolling, "Paused", false)
+            || TrySetPropertyOrField(patrolling, "Pause", false)));
 
         var after = ReadActivity(botOwner, snapshot, now, log: true, reason: "medical_break_contact_" + Safe(reason) + "_after");
         var result = new VanguardExternalPreemptResult(VanguardExternalPreemptOutcome.Granted, before, after, "mutations=" + string.Join(",", mutations), reason);
@@ -748,17 +1063,17 @@ internal static class VanguardExternalAuthorityAdapter
     }
 
 
-    public static VanguardExternalPreemptResult RequestScheduledMovementHardReturnPreempt(BotOwner? botOwner, OperatorDecisionSnapshot snapshot, string reason, TimeSpan ttl, DateTimeOffset now)
+    public static VanguardExternalPreemptResult RequestScheduledMovementHardReturnPreempt(BotOwner? botOwner, OperatorDecisionSnapshot snapshot, string reason, TimeSpan ttl, DateTimeOffset now, string ownerWindowId)
     {
-        return RequestScheduledHardReturnStartPreempt(botOwner, snapshot, reason, ttl, now, includeSainBoundarySuppression: false);
+        return RequestScheduledHardReturnStartPreempt(botOwner, snapshot, reason, ttl, now, includeSainBoundarySuppression: false, ownerWindowId: ownerWindowId);
     }
 
-    public static VanguardExternalPreemptResult RequestScheduledSainBoundaryReturnPreempt(BotOwner? botOwner, OperatorDecisionSnapshot snapshot, string reason, TimeSpan ttl, DateTimeOffset now)
+    public static VanguardExternalPreemptResult RequestScheduledSainBoundaryReturnPreempt(BotOwner? botOwner, OperatorDecisionSnapshot snapshot, string reason, TimeSpan ttl, DateTimeOffset now, string ownerWindowId)
     {
-        return RequestScheduledHardReturnStartPreempt(botOwner, snapshot, reason, ttl, now, includeSainBoundarySuppression: true);
+        return RequestScheduledHardReturnStartPreempt(botOwner, snapshot, reason, ttl, now, includeSainBoundarySuppression: true, ownerWindowId: ownerWindowId);
     }
 
-    private static VanguardExternalPreemptResult RequestScheduledHardReturnStartPreempt(BotOwner? botOwner, OperatorDecisionSnapshot snapshot, string reason, TimeSpan ttl, DateTimeOffset now, bool includeSainBoundarySuppression)
+    private static VanguardExternalPreemptResult RequestScheduledHardReturnStartPreempt(BotOwner? botOwner, OperatorDecisionSnapshot snapshot, string reason, TimeSpan ttl, DateTimeOffset now, bool includeSainBoundarySuppression, string ownerWindowId)
     {
         snapshot ??= OperatorDecisionSnapshot.Empty;
         string scope = includeSainBoundarySuppression ? "scheduled_sain_boundary_return" : "scheduled_movement_hard_return";
@@ -792,6 +1107,11 @@ internal static class VanguardExternalAuthorityAdapter
             return rejected;
         }
 
+        if (!VanguardMainIntentScheduler.IsExactExternalMovementWindowCurrent(snapshot.BotProfileId, ownerWindowId, now, grenade: false))
+        {
+            return new VanguardExternalPreemptResult(VanguardExternalPreemptOutcome.FailedBotOwnerMissing, before, before, "mutations=none", "owner_window_missing");
+        }
+
         string key = Normalize(snapshot.BotProfileId);
         if (!SuppressedByBotProfileId.TryGetValue(key, out var state))
         {
@@ -807,6 +1127,9 @@ internal static class VanguardExternalAuthorityAdapter
         var requestedUntil = now + ttl;
         state.ExpiresAtUtc = state.ExpiresAtUtc > requestedUntil ? state.ExpiresAtUtc : requestedUntil;
         state.LastReason = scope + ":" + reason;
+        state.OwnerDomain = "HardReturn";
+        state.OwnerLeaseId = ownerWindowId;
+        state.OwnerWindowId = ownerWindowId;
 
         var mutations = new List<string>(36);
         if (includeSainBoundarySuppression || isolatedCombatRelease)
@@ -857,17 +1180,17 @@ internal static class VanguardExternalAuthorityAdapter
     }
 
 
-    public static VanguardExternalPreemptResult RequestMovementHardReturnContinuationPreempt(BotOwner? botOwner, OperatorDecisionSnapshot snapshot, string reason, TimeSpan ttl, DateTimeOffset now, bool allowActiveVanguardPathResidue)
+    public static VanguardExternalPreemptResult RequestMovementHardReturnContinuationPreempt(BotOwner? botOwner, OperatorDecisionSnapshot snapshot, string reason, TimeSpan ttl, DateTimeOffset now, bool allowActiveVanguardPathResidue, string ownerWindowId)
     {
-        return RequestHardReturnContinuationPreempt(botOwner, snapshot, reason, ttl, now, includeSainBoundarySuppression: false, allowActiveVanguardPathResidue: allowActiveVanguardPathResidue);
+        return RequestHardReturnContinuationPreempt(botOwner, snapshot, reason, ttl, now, includeSainBoundarySuppression: false, allowActiveVanguardPathResidue: allowActiveVanguardPathResidue, ownerWindowId: ownerWindowId);
     }
 
-    public static VanguardExternalPreemptResult RequestSainBoundaryReturnContinuationPreempt(BotOwner? botOwner, OperatorDecisionSnapshot snapshot, string reason, TimeSpan ttl, DateTimeOffset now, bool allowActiveVanguardPathResidue)
+    public static VanguardExternalPreemptResult RequestSainBoundaryReturnContinuationPreempt(BotOwner? botOwner, OperatorDecisionSnapshot snapshot, string reason, TimeSpan ttl, DateTimeOffset now, bool allowActiveVanguardPathResidue, string ownerWindowId)
     {
-        return RequestHardReturnContinuationPreempt(botOwner, snapshot, reason, ttl, now, includeSainBoundarySuppression: true, allowActiveVanguardPathResidue: allowActiveVanguardPathResidue);
+        return RequestHardReturnContinuationPreempt(botOwner, snapshot, reason, ttl, now, includeSainBoundarySuppression: true, allowActiveVanguardPathResidue: allowActiveVanguardPathResidue, ownerWindowId: ownerWindowId);
     }
 
-    private static VanguardExternalPreemptResult RequestHardReturnContinuationPreempt(BotOwner? botOwner, OperatorDecisionSnapshot snapshot, string reason, TimeSpan ttl, DateTimeOffset now, bool includeSainBoundarySuppression, bool allowActiveVanguardPathResidue)
+    private static VanguardExternalPreemptResult RequestHardReturnContinuationPreempt(BotOwner? botOwner, OperatorDecisionSnapshot snapshot, string reason, TimeSpan ttl, DateTimeOffset now, bool includeSainBoundarySuppression, bool allowActiveVanguardPathResidue, string ownerWindowId)
     {
         snapshot ??= OperatorDecisionSnapshot.Empty;
         string scope = includeSainBoundarySuppression ? "sain_boundary_return_continuation" : "movement_hard_return_continuation";
@@ -897,6 +1220,11 @@ internal static class VanguardExternalAuthorityAdapter
             return rejected;
         }
 
+        if (!VanguardMainIntentScheduler.IsExactExternalMovementWindowCurrent(snapshot.BotProfileId, ownerWindowId, now, grenade: false))
+        {
+            return new VanguardExternalPreemptResult(VanguardExternalPreemptOutcome.FailedBotOwnerMissing, before, before, "mutations=none", "owner_window_missing");
+        }
+
         string key = Normalize(snapshot.BotProfileId);
         if (!SuppressedByBotProfileId.TryGetValue(key, out var state))
         {
@@ -912,6 +1240,9 @@ internal static class VanguardExternalAuthorityAdapter
         var requestedUntil = now + ttl;
         state.ExpiresAtUtc = state.ExpiresAtUtc > requestedUntil ? state.ExpiresAtUtc : requestedUntil;
         state.LastReason = scope + ":" + reason;
+        state.OwnerDomain = "HardReturn";
+        state.OwnerLeaseId = ownerWindowId;
+        state.OwnerWindowId = ownerWindowId;
 
         var mutations = new List<string>(32);
         if (includeSainBoundarySuppression || isolatedCombatRelease)
@@ -942,30 +1273,321 @@ internal static class VanguardExternalAuthorityAdapter
         return result;
     }
 
-    public static string ReleaseMovementHardReturnPreempt(BotOwner? botOwner, string? botProfileId, DateTimeOffset now, string reason)
+    public static string ReleaseTravelOrbitAuthorityQuiesce(BotOwner? botOwner, string? botProfileId, DateTimeOffset now, string reason, string ownerLeaseId, string ownerWindowId)
     {
-        string summary = ReleaseMedicalPreempt(botOwner, botProfileId, now, "movement_hard_return:" + Safe(reason));
+        string key = Normalize(botProfileId);
+        if (!SuppressedByBotProfileId.TryGetValue(key, out var state) || state == null)
+        {
+            return "travelOrbitRelease=no_state";
+        }
+
+        // The shared suppression store is used by combat/medical as well. Travel may
+        // release only a suppression whose latest owner is the Travel orbit-quiesce boundary; a
+        // newer medical/combat authority must remain untouched.
+        if (!IsTravelOrbitQuiesceReason(state.LastReason)
+            || !string.Equals(state.OwnerDomain, "Travel", StringComparison.Ordinal)
+            || string.IsNullOrWhiteSpace(ownerLeaseId) || string.IsNullOrWhiteSpace(ownerWindowId)
+            || !string.Equals(state.OwnerLeaseId, ownerLeaseId, StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(state.OwnerWindowId, ownerWindowId, StringComparison.OrdinalIgnoreCase))
+        {
+            return "travelOrbitRelease=stale_owner_preserved;expectedLease=" + Safe(ownerLeaseId)
+                + ";expectedWindow=" + Safe(ownerWindowId)
+                + ";activeDomain=" + Safe(state.OwnerDomain)
+                + ";activeLease=" + Safe(state.OwnerLeaseId)
+                + ";activeWindow=" + Safe(state.OwnerWindowId)
+                + ";lastReason=" + Safe(state.LastReason);
+        }
+
+        // A newer SAIN combat window must not be unpaused by a late Travel terminal.
+        if (VanguardMainIntentScheduler.IsSainCombatExecutionProtected(key, now, out var combatReason))
+        {
+            SuppressedByBotProfileId.Remove(key);
+            return "travelOrbitRelease=state_retired_combat_protected;combatReason=" + Safe(combatReason);
+        }
+
+        // A newer Vanguard movement command can be live even when it did not need a fresh
+        // external Orbit quiesce. In that case remove only the obsolete Travel bookkeeping;
+        // never resume/unpause the successor's physical backend.
+        if (VanguardReturnMovementCommandStore.TryGetActive(botProfileId ?? string.Empty, now, out var successorCommand))
+        {
+            SuppressedByBotProfileId.Remove(key);
+            return "travelOrbitRelease=state_retired_newer_vanguard_command;successorLease=" + Safe(successorCommand.LeaseId)
+                + ";successorGeneration=" + successorCommand.Generation.ToString(CultureInfo.InvariantCulture)
+                + ";mutation=false";
+        }
+
+        // The closing Travel window is still current during its own terminal handback.
+        // A distinct successor primary, however, must never be resumed by this old receipt.
+        if (VanguardMainIntentScheduler.TryGetActivePrimaryWindowIdentity(
+                key, now, out var successorKind, out _, out _)
+            && !VanguardMainIntentScheduler.IsExactTravelCorridorWindowCurrent(key, ownerWindowId, now))
+        {
+            SuppressedByBotProfileId.Remove(key);
+            return "travelOrbitRelease=retired_successor_primary_window;mutation=false;primary=" + Safe(successorKind);
+        }
+
+        SuppressedByBotProfileId.Remove(key);
+        var parts = new List<string>(8)
+        {
+            "travelOrbitRelease=released",
+            "lastReason=" + Safe(state.LastReason),
+            "ownerLease=" + Safe(state.OwnerLeaseId),
+            "ownerWindow=" + Safe(state.OwnerWindowId),
+            "ownerSerial=" + state.OwnerSerial.ToString(CultureInfo.InvariantCulture)
+        };
+
+        if (botOwner != null)
+        {
+            object? mover = VanguardOperatorRuntimeAuditReflection.GetPropertyOrField(botOwner, "Mover");
+            parts.Add("moverResume=" + Bool(TryInvoke(mover, "MovementResume") || TrySetPropertyOrField(mover, "Pause", false) || TrySetPropertyOrField(mover, "Paused", false)));
+            parts.Add("patrolUnpause=" + Bool(TryInvoke(VanguardOperatorRuntimeAuditReflection.GetPropertyOrField(botOwner, "PatrollingData"), "Unpause")));
+
+            bool shouldResumeOrbitAgent = state.OrbitAgentWasActive == true || ShouldResumeOrbitAgent(botOwner);
+            parts.Add(shouldResumeOrbitAgent
+                ? "orbitAgentResume=" + Bool(TrySetOrbitAgentActive(botProfileId, true, out _))
+                : "orbitAgentResume=false_no_prior_active_agent_or_layer");
+        }
+        else
+        {
+            parts.Add("botOwner=false");
+        }
+
+        string summary = string.Join(",", parts);
+        LogThrottled("travelOrbitRelease|" + key + "|" + Safe(reason), now, SnapshotLogInterval,
+            $"VANGUARD_TRAVEL_ORBIT_QUIESCE_RELEASED botProfile={key}; reason={Safe(reason)}; {summary}; exactTravelSuppressionOnly=true; newerAuthorityPreserved=true; tag={OrbitAuthorityQuiesceStatusTag}");
+        return summary;
+    }
+
+    // Loot authority: terminal/abort handback is guarded by exact (domain, lease, window).
+    // A newer SAIN, Vanguard, or scheduler primary owner always wins over a delayed Loot release.
+    public static string ReleaseLootOrbitAuthorityQuiesce(
+        BotOwner? botOwner, string? botProfileId, DateTimeOffset now, string reason,
+        string ownerDomain, string ownerLeaseId, string ownerWindowId)
+    {
+        string key = Normalize(botProfileId);
+        if (!SuppressedByBotProfileId.TryGetValue(key, out var state) || state == null)
+        {
+            return "lootOrbitRelease=no_state;mutation=false";
+        }
+
+        bool domainAllowed = string.Equals(ownerDomain, "CorpseLootApproach", StringComparison.Ordinal)
+            || string.Equals(ownerDomain, "WorldContainerLootApproach", StringComparison.Ordinal);
+        bool reasonMatchesDomain = string.Equals(ownerDomain, "CorpseLootApproach", StringComparison.Ordinal)
+            ? state.LastReason.StartsWith("orbit_authority_quiesce:corpse_loot_claim_and_approach", StringComparison.OrdinalIgnoreCase)
+            : state.LastReason.StartsWith("orbit_authority_quiesce:world_container_loot_claim_and_approach", StringComparison.OrdinalIgnoreCase);
+        if (!domainAllowed || !reasonMatchesDomain
+            || string.IsNullOrWhiteSpace(ownerLeaseId) || string.IsNullOrWhiteSpace(ownerWindowId)
+            || !string.Equals(state.OwnerDomain, ownerDomain, StringComparison.Ordinal)
+            || !string.Equals(state.OwnerLeaseId, ownerLeaseId, StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(state.OwnerWindowId, ownerWindowId, StringComparison.OrdinalIgnoreCase))
+        {
+            return "lootOrbitRelease=stale_owner_preserved;mutation=false;expectedDomain=" + Safe(ownerDomain)
+                + ";expectedLease=" + Safe(ownerLeaseId) + ";expectedWindow=" + Safe(ownerWindowId)
+                + ";activeDomain=" + Safe(state.OwnerDomain) + ";activeLease=" + Safe(state.OwnerLeaseId)
+                + ";activeWindow=" + Safe(state.OwnerWindowId) + ";activeReason=" + Safe(state.LastReason);
+        }
+
+        // Exact state bookkeeping may retire without touching a successor's physical ownership.
+        if (VanguardMainIntentScheduler.IsSainCombatExecutionProtected(key, now, out var combatReason))
+        {
+            SuppressedByBotProfileId.Remove(key);
+            return "lootOrbitRelease=retired_combat_protected;mutation=false;combat=" + Safe(combatReason);
+        }
+        if (VanguardReturnMovementCommandStore.TryGetActive(key, now, out var activeCommand))
+        {
+            SuppressedByBotProfileId.Remove(key);
+            return "lootOrbitRelease=retired_vanguard_command;mutation=false;successor=" + Safe(activeCommand.LeaseId);
+        }
+        if (VanguardMainIntentScheduler.TryGetActivePrimaryWindowIdentity(key, now, out var activeKind, out _, out _))
+        {
+            SuppressedByBotProfileId.Remove(key);
+            return "lootOrbitRelease=retired_primary_window;mutation=false;primary=" + Safe(activeKind);
+        }
+
+        SuppressedByBotProfileId.Remove(key);
+        if (botOwner == null)
+        {
+            return "lootOrbitRelease=released;botOwner=false;mutation=false";
+        }
+        object? mover = VanguardOperatorRuntimeAuditReflection.GetPropertyOrField(botOwner, "Mover");
+        bool moverResumed = TryInvoke(mover, "MovementResume")
+            || TrySetPropertyOrField(mover, "Pause", false)
+            || TrySetPropertyOrField(mover, "Paused", false);
+        bool patrolUnpaused = TryInvoke(VanguardOperatorRuntimeAuditReflection.GetPropertyOrField(botOwner, "PatrollingData"), "Unpause");
+        bool shouldResumeOrbit = state.OrbitAgentWasActive == true || ShouldResumeOrbitAgent(botOwner);
+        bool orbitResumed = shouldResumeOrbit && TrySetOrbitAgentActive(botProfileId, true, out _);
+        string summary = "lootOrbitRelease=released;moverResume=" + Bool(moverResumed)
+            + ";patrolUnpause=" + Bool(patrolUnpaused) + ";orbitResume=" + Bool(orbitResumed)
+            + ";owner=" + Safe(ownerDomain) + ";serial=" + state.OwnerSerial.ToString(CultureInfo.InvariantCulture);
+        LogThrottled("lootOrbitRelease|" + key + "|" + Safe(reason), now, SnapshotLogInterval,
+            $"VANGUARD_LOOT_ORBIT_QUIESCE_RELEASED botProfile={Safe(key)}; reason={Safe(reason)}; {summary}; exactReceipt=true; tag={OrbitAuthorityQuiesceStatusTag}");
+        return summary;
+    }
+
+    // Cohesion authority: release only the exact suppression acquisition, never a successor's physical state.
+    public static string ReleaseCohesionOrbitAuthorityQuiesce(
+        BotOwner? botOwner, string? botProfileId, DateTimeOffset now, string reason,
+        string ownerDomain, string ownerLeaseId, string ownerWindowId)
+    {
+        string key = Normalize(botProfileId);
+        if (!SuppressedByBotProfileId.TryGetValue(key, out var state) || state == null)
+        {
+            return "cohesionOrbitRelease=no_state;mutation=false";
+        }
+
+        bool domainAllowed = string.Equals(ownerDomain, "CloseCohesion", StringComparison.Ordinal)
+            || string.Equals(ownerDomain, "CohesionClaim", StringComparison.Ordinal);
+        bool reasonMatchesDomain = string.Equals(ownerDomain, "CloseCohesion", StringComparison.Ordinal)
+            ? state.LastReason.StartsWith("orbit_authority_quiesce:close_cohesion_micro_adjust", StringComparison.OrdinalIgnoreCase)
+            : state.LastReason.StartsWith("orbit_authority_quiesce:claimed_cohesion:", StringComparison.OrdinalIgnoreCase)
+                || state.LastReason.StartsWith("orbit_authority_quiesce:active_claim_refresh:", StringComparison.OrdinalIgnoreCase);
+        if (!domainAllowed || !reasonMatchesDomain
+            || string.IsNullOrWhiteSpace(ownerLeaseId) || string.IsNullOrWhiteSpace(ownerWindowId)
+            || !string.Equals(state.OwnerDomain, ownerDomain, StringComparison.Ordinal)
+            || !string.Equals(state.OwnerLeaseId, ownerLeaseId, StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(state.OwnerWindowId, ownerWindowId, StringComparison.OrdinalIgnoreCase))
+        {
+            return "cohesionOrbitRelease=stale_owner_preserved;mutation=false;expectedDomain=" + Safe(ownerDomain)
+                + ";expectedLease=" + Safe(ownerLeaseId) + ";expectedWindow=" + Safe(ownerWindowId)
+                + ";activeDomain=" + Safe(state.OwnerDomain) + ";activeLease=" + Safe(state.OwnerLeaseId)
+                + ";activeWindow=" + Safe(state.OwnerWindowId) + ";activeReason=" + Safe(state.LastReason);
+        }
+
+        // Retire exact bookkeeping even if an external or primary successor owns physical locomotion.
+        if (VanguardMainIntentScheduler.IsSainCombatExecutionProtected(key, now, out var combatReason))
+        {
+            SuppressedByBotProfileId.Remove(key);
+            return "cohesionOrbitRelease=retired_combat_protected;mutation=false;combat=" + Safe(combatReason);
+        }
+        if (VanguardReturnMovementCommandStore.TryGetActive(key, now, out var activeCommand))
+        {
+            SuppressedByBotProfileId.Remove(key);
+            return "cohesionOrbitRelease=retired_vanguard_command;mutation=false;successor=" + Safe(activeCommand.LeaseId);
+        }
+        if (VanguardMainIntentScheduler.TryGetActivePrimaryWindowIdentity(key, now, out var activeKind, out _, out _))
+        {
+            SuppressedByBotProfileId.Remove(key);
+            return "cohesionOrbitRelease=retired_primary_window;mutation=false;primary=" + Safe(activeKind);
+        }
+
+        SuppressedByBotProfileId.Remove(key);
+        if (botOwner == null || botOwner.IsDead)
+        {
+            return "cohesionOrbitRelease=released;botOwnerAvailable=false;mutation=false";
+        }
+        object? mover = VanguardOperatorRuntimeAuditReflection.GetPropertyOrField(botOwner, "Mover");
+        bool moverResumed = TryInvoke(mover, "MovementResume")
+            || TrySetPropertyOrField(mover, "Pause", false)
+            || TrySetPropertyOrField(mover, "Paused", false);
+        bool patrolUnpaused = TryInvoke(VanguardOperatorRuntimeAuditReflection.GetPropertyOrField(botOwner, "PatrollingData"), "Unpause");
+        bool shouldResumeOrbit = state.OrbitAgentWasActive == true || ShouldResumeOrbitAgent(botOwner);
+        bool orbitResumed = shouldResumeOrbit && TrySetOrbitAgentActive(botProfileId, true, out _);
+        string summary = "cohesionOrbitRelease=released;moverResume=" + Bool(moverResumed)
+            + ";patrolUnpause=" + Bool(patrolUnpaused) + ";orbitResume=" + Bool(orbitResumed)
+            + ";owner=" + Safe(ownerDomain) + ";serial=" + state.OwnerSerial.ToString(CultureInfo.InvariantCulture);
+        LogThrottled("cohesionOrbitRelease|" + key + "|" + Safe(reason), now, SnapshotLogInterval,
+            $"VANGUARD_COHESION_ORBIT_QUIESCE_RELEASED botProfile={Safe(key)}; reason={Safe(reason)}; {summary}; exactReceipt=true; tag={OrbitAuthorityQuiesceStatusTag}");
+        return summary;
+    }
+
+    private static bool IsTravelOrbitQuiesceReason(string? reason)
+    {
+        if (string.IsNullOrWhiteSpace(reason))
+        {
+            return false;
+        }
+
+        return reason.StartsWith("orbit_authority_quiesce:travel_cohesion_follow_through", StringComparison.OrdinalIgnoreCase)
+            || reason.StartsWith("orbit_authority_quiesce:tactical_volume_join", StringComparison.OrdinalIgnoreCase)
+            || reason.StartsWith("orbit_authority_quiesce:active_lease_refresh:TravelCohesionFollowThrough", StringComparison.OrdinalIgnoreCase)
+            || reason.StartsWith("orbit_authority_quiesce:active_lease_refresh:TacticalVolumeJoin", StringComparison.OrdinalIgnoreCase);
+    }
+
+    public static string ReleaseMovementHardReturnPreempt(BotOwner? botOwner, string? botProfileId, DateTimeOffset now, string reason, string ownerWindowId)
+    {
+        string summary = ReleaseMedicalPreempt(botOwner, botProfileId, now, "movement_hard_return:" + Safe(reason), ownerLeaseId: ownerWindowId);
         LogThrottled("movementHardReturnRelease|" + Normalize(botProfileId) + "|" + Safe(reason), now, SnapshotLogInterval,
             $"VANGUARD_EXTERNAL_SUPPRESS_RELEASED botProfile={Normalize(botProfileId)}; reason={Safe(reason)}; {summary}; tag={MovementHardReturnSuppressStatusTag}; adapterTag={StatusTag}");
         return summary;
     }
 
-    public static string ReleaseMedicalPreempt(BotOwner? botOwner, string? botProfileId, DateTimeOffset now, string reason)
+    public static string ReleaseGrenadeEmergencyPreempt(BotOwner? botOwner, string? botProfileId, DateTimeOffset now, string reason, string ownerWindowId)
+    {
+        return ReleaseMedicalPreempt(botOwner, botProfileId, now, "grenade_window_release:" + Safe(reason), ownerLeaseId: ownerWindowId);
+    }
+
+    public static string ReleaseMedicalPreempt(BotOwner? botOwner, string? botProfileId, DateTimeOffset now, string reason, string? ownerLeaseId = null)
     {
         string key = Normalize(botProfileId);
-        if (VanguardMainIntentScheduler.IsSainCombatExecutionProtected(key, now, out var combatProtectionReason))
+        bool had = SuppressedByBotProfileId.TryGetValue(key, out var state);
+        if (!had || state == null)
         {
-            string deferred = "externalRelease=deferred_sain_combat_protected;reason=" + Safe(combatProtectionReason);
-            LogThrottled("releaseDeferredCombat|" + key + "|" + Safe(reason), now, SnapshotLogInterval,
-                $"VANGUARD_EXTERNAL_RELEASE_DEFERRED botProfile={key}; reason={Safe(reason)}; combatReason={Safe(combatProtectionReason)}; mutation=false; orbitResume=false; patrolUnpause=false; doctrine=medical_or_movement_release_cannot_reactivate_external_driver_inside_sain_window; tag={VanguardPrimaryExecutionContract.SainWindowStatusTag}; adapterTag={StatusTag}");
-            return deferred;
+            return "externalRelease=no_state;mutation=false";
         }
 
-        bool had = SuppressedByBotProfileId.TryGetValue(key, out var state);
-        if (had)
+        // Medical/HardReturn/Combat releases must never drain a newer Orbit/Travel receipt.
+        // An exact domain/lease receipt for those families is added by the subsequent bounded slices.
+        bool hardReturnReleaseRequest = reason.StartsWith("movement_hard_return:", StringComparison.OrdinalIgnoreCase);
+        bool grenadeReleaseRequest = reason.StartsWith("grenade_window_release:", StringComparison.OrdinalIgnoreCase);
+        bool combatReleaseRequest = reason.StartsWith("combat_window_release:", StringComparison.OrdinalIgnoreCase);
+        bool medicalReleaseRequest = !hardReturnReleaseRequest && !grenadeReleaseRequest && !combatReleaseRequest
+            && (reason.IndexOf("medical", StringComparison.OrdinalIgnoreCase) >= 0
+                || reason.IndexOf("surgery", StringComparison.OrdinalIgnoreCase) >= 0
+                || reason.IndexOf("fracture", StringComparison.OrdinalIgnoreCase) >= 0
+                || reason.StartsWith("authority_release:", StringComparison.OrdinalIgnoreCase));
+        bool ownsDomain = medicalReleaseRequest
+            ? (state.LastReason.StartsWith("authority_lease:", StringComparison.OrdinalIgnoreCase)
+                || state.LastReason.StartsWith("medical_authority_hold:", StringComparison.OrdinalIgnoreCase)
+                || state.LastReason.StartsWith("hard_medical_procedure:", StringComparison.OrdinalIgnoreCase)
+                || state.LastReason.StartsWith("stationary_", StringComparison.OrdinalIgnoreCase)
+                || state.LastReason.StartsWith("medical_", StringComparison.OrdinalIgnoreCase))
+            : hardReturnReleaseRequest
+                ? (state.LastReason.StartsWith("movement_hard_return:", StringComparison.OrdinalIgnoreCase)
+                    || state.LastReason.StartsWith("scheduled_movement_hard_return:", StringComparison.OrdinalIgnoreCase)
+                    || state.LastReason.StartsWith("scheduled_sain_boundary_return:", StringComparison.OrdinalIgnoreCase)
+                    || state.LastReason.StartsWith("sain_boundary_return:", StringComparison.OrdinalIgnoreCase)
+                    || state.LastReason.StartsWith("movement_hard_return_continuation:", StringComparison.OrdinalIgnoreCase)
+                    || state.LastReason.StartsWith("sain_boundary_return_continuation:", StringComparison.OrdinalIgnoreCase)
+                    )
+                : grenadeReleaseRequest
+                    ? state.LastReason.StartsWith("grenade_emergency:", StringComparison.OrdinalIgnoreCase)
+                    : combatReleaseRequest && state.LastReason.StartsWith("combat_authority:", StringComparison.OrdinalIgnoreCase);
+        bool requiresExactReceipt = medicalReleaseRequest || hardReturnReleaseRequest || grenadeReleaseRequest || combatReleaseRequest;
+        string expectedDomain = hardReturnReleaseRequest ? "HardReturn"
+            : grenadeReleaseRequest ? "Grenade" : combatReleaseRequest ? "Combat" : "Medical";
+        if (!ownsDomain || (requiresExactReceipt
+            && (string.IsNullOrWhiteSpace(ownerLeaseId)
+                || !string.Equals(state.OwnerDomain, expectedDomain, StringComparison.Ordinal)
+                || !string.Equals(state.OwnerLeaseId, ownerLeaseId, StringComparison.OrdinalIgnoreCase)
+                || ((hardReturnReleaseRequest || grenadeReleaseRequest || combatReleaseRequest)
+                    && !string.Equals(state.OwnerWindowId, ownerLeaseId, StringComparison.OrdinalIgnoreCase)))))
+        {
+            return "externalRelease=stale_domain_preserved;reason=" + Safe(reason)
+                + ";expectedLease=" + Safe(ownerLeaseId) + ";activeLease=" + Safe(state.OwnerLeaseId)
+                + ";activeDomain=" + Safe(state.OwnerDomain) + ";lastReason=" + Safe(state.LastReason) + ";mutation=false";
+        }
+
+        if (VanguardMainIntentScheduler.IsSainCombatExecutionProtected(key, now, out var combatProtectionReason))
+        {
+            if (requiresExactReceipt)
+            {
+                SuppressedByBotProfileId.Remove(key);
+                return "externalRelease=retired_combat_protected;mutation=false;combat=" + Safe(combatProtectionReason);
+            }
+            return "externalRelease=deferred_sain_combat_protected;reason=" + Safe(combatProtectionReason) + ";mutation=false";
+        }
+        if (requiresExactReceipt && VanguardReturnMovementCommandStore.TryGetActive(key, now, out var successorCommand))
         {
             SuppressedByBotProfileId.Remove(key);
+            return "externalRelease=retired_vanguard_command;mutation=false;successor=" + Safe(successorCommand.LeaseId);
         }
+        if (requiresExactReceipt && VanguardMainIntentScheduler.TryGetActivePrimaryWindowIdentity(key, now, out var activeKind, out _, out _))
+        {
+            SuppressedByBotProfileId.Remove(key);
+            return "externalRelease=retired_primary_window;mutation=false;primary=" + Safe(activeKind);
+        }
+
+        SuppressedByBotProfileId.Remove(key);
 
         var parts = new List<string>(8)
         {
@@ -979,18 +1601,16 @@ internal static class VanguardExternalAuthorityAdapter
                 || reason.IndexOf("fracture", StringComparison.OrdinalIgnoreCase) >= 0;
 
             parts.Add("sprintFalse=" + Bool(TryInvoke(mover, "Sprint", false)));
-            if (medicalRelease)
+            if (requiresExactReceipt)
             {
-                // Vanguard: ending a medical lease must not hand the Operator back to patrol/ORBIT.
-                // Clear every residual movement driver and leave the next scheduler cycle to commit
-                // either combat, cohesion or a new medical action. Passive medical debt is not authority.
-                var cleanup = new List<string>(12);
-                ApplyPathPreempt(botOwner, cleanup);
-                parts.Add("pathCleanup=" + Safe(string.Join(",", cleanup)));
-                parts.Add("vanguardCommand=" + Safe(VanguardReturnMovementCommandStore.Clear(botProfileId ?? string.Empty, "medical_release:" + Safe(reason))));
-                parts.Add("moverPauseKept=" + Bool(TrySetPropertyOrField(mover, "Pause", true)));
-                parts.Add("patrolUnpause=false_scheduler_reacquire");
-                parts.Add("orbitAgentResume=false_scheduler_reacquire");
+                // The exact owner has ended; do not cancel a successor path or clear another
+                // movement command. Resume the native mover only after checking newer owners above.
+                parts.Add("moverResume=" + Bool(TryInvoke(mover, "MovementResume")
+                    || TrySetPropertyOrField(mover, "Pause", false)
+                    || TrySetPropertyOrField(mover, "Paused", false)));
+                parts.Add("patrolUnpause=" + Bool(TryInvoke(VanguardOperatorRuntimeAuditReflection.GetPropertyOrField(botOwner, "PatrollingData"), "Unpause")));
+                bool resumeMedicalOrbit = state.OrbitAgentWasActive == true || ShouldResumeOrbitAgent(botOwner);
+                parts.Add("orbitAgentResume=" + Bool(resumeMedicalOrbit && TrySetOrbitAgentActive(botProfileId, true, out _)));
             }
             else
             {
@@ -1018,9 +1638,29 @@ internal static class VanguardExternalAuthorityAdapter
         return summary;
     }
 
-    public static string ReleaseOrchestratorCombatAuthority(BotOwner? botOwner, string? botProfileId, DateTimeOffset now, string reason)
+    // A bounded target-chain renewal changes the scheduler WindowId but does not reacquire
+    // suppression. Transfer bookkeeping only when the exact prior Combat receipt still owns it.
+    public static bool TransferCombatWindowReceipt(string? botProfileId, string previousWindowId, string nextWindowId)
     {
-        return ReleaseMedicalPreempt(botOwner, botProfileId, now, "combat_window_release:" + Safe(reason));
+        string key = Normalize(botProfileId);
+        if (string.IsNullOrWhiteSpace(previousWindowId) || string.IsNullOrWhiteSpace(nextWindowId)
+            || !SuppressedByBotProfileId.TryGetValue(key, out var state)
+            || !string.Equals(state.OwnerDomain, "Combat", StringComparison.Ordinal)
+            || !string.Equals(state.OwnerWindowId, previousWindowId, StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(state.OwnerLeaseId, previousWindowId, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        state.OwnerWindowId = nextWindowId;
+        state.OwnerLeaseId = nextWindowId;
+        return true;
+    }
+
+    public static string ReleaseOrchestratorCombatAuthority(BotOwner? botOwner, string? botProfileId, DateTimeOffset now, string reason, string ownerWindowId)
+    {
+        return ReleaseMedicalPreempt(botOwner, botProfileId, now,
+            "combat_window_release:" + Safe(reason), ownerLeaseId: ownerWindowId);
     }
 
     public static string DescribeActivity(BotOwner? botOwner, OperatorDecisionSnapshot snapshot, DateTimeOffset now)
@@ -1108,7 +1748,9 @@ internal static class VanguardExternalAuthorityAdapter
         summary = (hardSurgeryHold ? "stationaryHold=hard_surgery_forced_refresh;" : "stationaryHold=suppressed;") + result.CompactSummary;
         LogThrottledLazy("stationaryHoldSuppress|" + Safe(snapshot.BotProfileId) + "|" + result.Outcome, now, PreemptLogInterval, VanguardAuditLevel.Trace, () =>
             $"VANGUARD_MEDICAL_STATIONARY_EXTERNAL_SUPPRESSED {compactLease}; reason={Safe(reason)}; outcome={result.Outcome}; canDriveMovement={Bool(result.CanDriveMovement)}; hardSurgeryHold={Bool(hardSurgeryHold)}; keepSurgeryWindow=true; patientOnly=true; fullExternalPayload=false; tag={MedicalAuthorityHoldStatusTag}; adapterTag={StatusTag}");
-        if (hardSurgeryHold && result.Outcome != VanguardExternalPreemptOutcome.RejectedCombatOwner && result.Outcome != VanguardExternalPreemptOutcome.FailedBotOwnerMissing)
+        if (hardSurgeryHold && result.Outcome != VanguardExternalPreemptOutcome.RejectedCombatOwner
+            && result.Outcome != VanguardExternalPreemptOutcome.FailedBotOwnerMissing
+            && result.Outcome != VanguardExternalPreemptOutcome.FailedNoAuthority)
         {
             LogThrottledLazy("hardSurgeryHoldRefresh|" + Safe(snapshot.BotProfileId), now, PreemptLogInterval, VanguardAuditLevel.Trace, () =>
                 $"VANGUARD_MEDICAL_SURGERY_HARD_HOLD_REFRESHED {compactLease}; reason={Safe(reason)}; outcome={result.Outcome}; passiveClearForbidden=true; externalDriversSuppressedEveryTick=true; fullExternalPayload=false; tag={MedicalSurgeryHardHoldStatusTag}; adapterTag={StatusTag}");
@@ -1572,6 +2214,22 @@ internal static class VanguardExternalAuthorityAdapter
         mutations.Add("directSprintStop=" + Bool(sprintStopped));
         mutations.Add("pathAuthorityProof=" + Bool(goToStopped || moverStopped));
         return goToStopped || moverStopped;
+    }
+
+    private static void ApplyVanguardOwnedPathPreservingQuiesce(BotOwner botOwner, List<string> mutations)
+    {
+        // During an already-owned Travel lease, Movement.HasPath is Vanguard's own
+        // BotMover path, not evidence of foreign path residue. Keep patrol quiesced but never
+        // cancel/stop/zero the exact physical path we are refreshing.
+        object? mover = VanguardOperatorRuntimeAuditReflection.GetPropertyOrField(botOwner, "Mover");
+        mutations.Add("activePathCancelSkipped=owned_vanguard_movement");
+        mutations.Add("moverStopSkipped=owned_vanguard_movement");
+        mutations.Add("targetSpeedZeroSkipped=owned_vanguard_movement");
+        mutations.Add("moverPauseFalse=" + Bool(TryInvoke(mover, "MovementResume") || TrySetPropertyOrField(mover, "Pause", false) || TrySetPropertyOrField(mover, "Paused", false)));
+        object? patrolling = VanguardOperatorRuntimeAuditReflection.GetPropertyOrField(botOwner, "PatrollingData");
+        mutations.Add("patrolPause=" + Bool(TryInvoke(patrolling, "Pause") || TrySetPropertyOrField(patrolling, "Paused", true) || TrySetPropertyOrField(patrolling, "Pause", true)));
+        mutations.Add("VanguardMovementDriver=true");
+        mutations.Add("ownedVanguardPathPreserved=true");
     }
 
     private static void ApplyPathPreempt(BotOwner botOwner, List<string> mutations)
@@ -2078,6 +2736,10 @@ internal static class VanguardExternalAuthorityAdapter
         public DateTimeOffset ExpiresAtUtc;
         public bool? OrbitAgentWasActive;
         public string LastReason = "none";
+        public string OwnerDomain = "none";
+        public string OwnerLeaseId = string.Empty;
+        public string OwnerWindowId = string.Empty;
+        public long OwnerSerial;
         public DateTimeOffset LastMedicalMutationAtUtc = DateTimeOffset.MinValue;
         public VanguardExternalPreemptResult? LastMedicalPreemptResult;
     }

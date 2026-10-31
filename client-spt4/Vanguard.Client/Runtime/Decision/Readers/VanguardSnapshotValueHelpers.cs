@@ -6,10 +6,10 @@ using EFT;
 using UnityEngine;
 using Vanguard.Client.Runtime.Audit;
 
-// Responsibility: Provides Snapshot Value Helpers support for the decision snapshot pipeline.
-// Flow: The file encapsulates one bounded piece of the subsystem and exchanges explicit inputs/results with neighboring services instead of relying on hidden cross-system state.
-// Authority boundary: Authority remains with the owning subsystem and any external EFT/SPT/Fika/SAIN component explicitly referenced by its call path.
-// Invariant: Behavior stays scoped to the current profile/raid/process contract and preserves existing safety and compatibility boundaries.
+// Responsibility: Convert optional reflected values into stable primitives for Operator decision snapshots.
+// Flow: Normalize text, booleans, finite numbers, vectors and sanitized identifiers for the snapshot builder.
+// Authority boundary: Snapshot reading is observational; these helpers do not update EFT actors or issue movement/medical commands.
+// Invariant: Unsupported values remain unknown, and NaN or infinity never becomes a valid numeric snapshot value.
 namespace Vanguard.Client.Runtime.Decision;
 
 internal sealed partial class VanguardOperatorDecisionSnapshotBuilder

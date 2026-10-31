@@ -4,10 +4,11 @@ using System.Collections;
 using System.Linq;
 using System.Reflection;
 
-// Responsibility: Provides Raid Hud Reflection support for the raid Operator HUD.
-// Flow: The file encapsulates one bounded piece of the subsystem and exchanges explicit inputs/results with neighboring services instead of relying on hidden cross-system state.
-// Authority boundary: Authority remains with the owning subsystem and any external EFT/SPT/Fika/SAIN component explicitly referenced by its call path.
-// Invariant: Behavior stays scoped to the current profile/raid/process contract and preserves existing safety and compatibility boundaries.
+// Responsibility: Supply defensive runtime reflection reads for optional raid HUD display inputs.
+// Flow: Resolve instance, static, and nested member data, with bounded fallbacks for missing runtime types.
+// Authority boundary: The reflection bridge reads presentation inputs and does not change gameplay state.
+// Invariant: Guarded member lookups return null when unavailable, and safe enumeration handles missing collections.
+
 namespace Vanguard.Client.Raid.Hud;
 
 /// <summary>

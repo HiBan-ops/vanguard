@@ -4,10 +4,10 @@ using System;
 using EFT;
 #endif
 
-// Responsibility: Provides Operator Bot Types support for the MoreBots integration.
-// Flow: The file encapsulates one bounded piece of the subsystem and exchanges explicit inputs/results with neighboring services instead of relying on hidden cross-system state.
-// Authority boundary: Authority remains with the owning subsystem and any external EFT/SPT/Fika/SAIN component explicitly referenced by its call path.
-// Invariant: Behavior stays scoped to the current profile/raid/process contract and preserves existing safety and compatibility boundaries.
+// Responsibility: Declare and classify the stable MoreBotsAPI role identifiers reserved for Vanguard Operators.
+// Flow: Map Operator faction to the expected WildSpawnType and recognize Operators by reserved name or value.
+// Authority boundary: This type contract identifies Operators to MoreBotsAPI and integration consumers; it does not spawn bots.
+// Invariant: USEC/BEAR role values and the vanguardOperator name substring remain stable for external role filters.
 namespace Vanguard.Client.Runtime.Integrations.MoreBots;
 
 /// <summary>

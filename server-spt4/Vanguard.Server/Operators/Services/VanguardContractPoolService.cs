@@ -18,9 +18,15 @@ public sealed class VanguardContractPoolService(
     VanguardOperatorStore store,
     VanguardEftExperienceCurveService experienceCurve,
     VanguardOperatorVisualIdentityService visualIdentityService,
+    VanguardOperatorPopulationLifecycleMigrationService populationMigrationService,
     ISptLogger<VanguardContractPoolService> logger)
 {
     private const string RoubleTemplateId = "5449016a4bdc2d6f028b456f";
+    private const int BootstrapWorldPopulationTarget = 30;
+    private const int SoftWorldPopulationSaturation = 40;
+    private const int HardWorldPopulationSafetyCeiling = VanguardCallsignCatalog.HardPopulationSafetyCeilingPerOwner;
+    private const int MaxNewPersonsPerPostSaturationWindow = 1;
+    private static readonly TimeSpan PostSaturationCreationCooldown = TimeSpan.FromHours(72);
     private static readonly string[] UsecFirstNames =
     [
         "Aaron", "Adam", "Adrian", "Alex", "Andrew", "Austin", "Blake", "Brandon", "Caleb", "Cameron", "Chris", "Cole",
@@ -54,19 +60,6 @@ public sealed class VanguardContractPoolService(
         "Popov", "Romanov", "Semenov", "Sergeev", "Sidorov", "Smirnov", "Sokolov", "Sorokin", "Tarasov", "Titov", "Volkov", "Voronin",
         "Yakovlev", "Zaitsev", "Zhukov", "Zorin"
     ];
-    private static readonly string[] Callsigns =
-    [
-        "Anchor", "Anvil", "Atlas", "Badger", "Bastion", "Beacon", "Bishop", "Bolt", "Breaker", "Briar", "Brim", "Cairn",
-        "Cipher", "Cobalt", "Condor", "Coyote", "Crane", "Crow", "Dagger", "Delta", "Drift", "Echo", "Falcon", "Flint",
-        "Forge", "Fox", "Frost", "Gale", "Ghost", "Grit", "Harrier", "Havoc", "Hawk", "Helix", "Hound", "Ibis",
-        "Jackal", "Karat", "Kestrel", "Kodiak", "Lancer", "Lynx", "Mallet", "Mantis", "Mastiff", "Mica", "Nomad", "Onyx",
-        "Orion", "Otter", "Palisade", "Pike", "Raven", "Razor", "Relay", "Rook", "Sable", "Scout", "Shade", "Slate",
-        "Spear", "Stitch", "Stone", "Strix", "Talon", "Tango", "Thorn", "Titan", "Trace", "Vega", "Vector", "Viper",
-        "Vostok", "Warden", "Wolf", "Wraith", "Yukon", "Zenith", "Aegis", "Arrow", "Ash", "Boreal", "Bronco", "Cedar",
-        "Cliff", "Comet", "Crest", "Ember", "Fathom", "Gannet", "Hearth", "Keel", "Lumen", "Morrow", "North", "Quill",
-        "Ridge", "Rivet", "Sierra", "Tern", "Timber", "Vale", "Whisper", "Zephyr"
-    ];
-
     private static readonly VanguardArchetype[] Archetypes =
     [
         new("Assault", "Pointman", "Disciplined", "fire_discipline_and_squad_cohesion", "methodical", "USEC Heavy Contractor", "vanguard.sain.disciplined", "controlled_push", "short_medium", "rifleman", ["disciplined", "formation_aware", "controlled_fire"]),
@@ -86,131 +79,138 @@ public sealed class VanguardContractPoolService(
 
     public async Task<IReadOnlyList<VanguardOperatorContractOffer>> EnsureContractPoolAsync(string profileId, int playerLevel)
     {
-        var storageProfileId = await store.ResolveStorageProfileIdAsync(profileId);
-        var existing = await store.LoadContractsAsync(storageProfileId);
-        var activeService = await store.LoadActiveServiceAsync(storageProfileId);
-        var operators = await store.LoadOperatorsAsync(storageProfileId);
+        string storageProfileId = await store.ResolveStorageProfileIdAsync(profileId);
+        IReadOnlyList<VanguardOperatorContractOffer> existing = await store.LoadContractsAsync(storageProfileId);
+        IReadOnlyList<VanguardActiveServiceRecord> activeService = await store.LoadActiveServiceAsync(storageProfileId);
+        IReadOnlyList<VanguardOperatorProfile> operators = await store.LoadOperatorsAsync(storageProfileId);
         LogMigrationStatusOnce(storageProfileId, operators);
-        var contacts = await store.LoadContactsAsync(storageProfileId);
-        var now = DateTimeOffset.UtcNow;
-        var normalizedLevel = Math.Max(playerLevel, 1);
-        var expectedCount = GetOfferCount(normalizedLevel);
+        IReadOnlyList<VanguardOperatorContactRecord> contacts = await store.LoadContactsAsync(storageProfileId);
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        int normalizedLevel = Math.Max(playerLevel, 1);
+        int expectedCount = GetOfferCount(normalizedLevel);
 
         await identityReservationGate.WaitAsync();
         try
         {
-            var registry = await LoadAndReconcileIdentityRegistryAsync(now);
-            var usedCallsigns = registry.Select(entry => entry.Callsign).Where(value => !string.IsNullOrWhiteSpace(value)).ToHashSet(StringComparer.OrdinalIgnoreCase);
-            var usedLegalNames = registry.Select(entry => BuildLegalName(entry.FirstName, entry.LastName)).Where(value => !string.IsNullOrWhiteSpace(value)).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            List<VanguardOperatorIdentityReservation> registry = await LoadAndReconcileIdentityRegistryAsync(now);
+            VanguardOperatorPopulationLifecycleMigrationResult migration = await populationMigrationService.ApplyIfRequiredAsync(
+                storageProfileId, operators, existing, activeService, contacts, registry, now);
+            operators = migration.Operators;
+            existing = migration.Contracts;
+            activeService = migration.ActiveService;
+            contacts = migration.Contacts;
+            registry = migration.IdentityRegistry.ToList();
 
-            var legacyVisibleWorldOperators = MaterializeWorldOperators(
-                operators,
-                existing.Where(offer => offer.AvailableUntilUtc > now),
-                now,
-                out int legacyVisibleMaterializedCount);
-            if (legacyVisibleMaterializedCount > 0)
+            if (migration.MigrationBlocked)
             {
-                // Upgrade bridge: a still-visible pre-0.8 offer becomes a durable world person before
-                // normal pool reconciliation can prune or replace the offer projection.
-                await store.SaveOperatorsAsync(storageProfileId, legacyVisibleWorldOperators);
-                operators = legacyVisibleWorldOperators;
+                logger.Warning(VanguardServerDiagnosticsLog.Present(
+                    $"[{WorldLifecycleStatusTag}] owner={storageProfileId}; phase=migration_blocked; worldPopulation={operators.Count}; activeService={activeService.Count}; visibleOffers={existing.Count(offer => offer.AvailableUntilUtc > now)}; marketMutation=false; neverHiredPurge=false; newPersonsCreated=0; creationSuppressedReason=population_migration_blocked_fail_closed; migrationReason={migration.Reason}; tag={WorldLifecycleStatusTag}"));
+                return existing.Where(offer => offer.AvailableUntilUtc > now).OrderBy(offer => offer.AvailableUntilUtc).Take(expectedCount).ToArray();
             }
+
+            var durableWorldIds = operators
+                .Where(profile => !string.IsNullOrWhiteSpace(profile.OperatorId))
+                .Select(profile => profile.OperatorId)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            int legacyOfferWithoutWorldDropped = existing.Count(offer => offer.AvailableUntilUtc > now && !durableWorldIds.Contains(offer.OperatorId));
+            if (legacyOfferWithoutWorldDropped > 0)
+            {
+                existing = existing.Where(offer => durableWorldIds.Contains(offer.OperatorId)).ToArray();
+                await store.SaveContractsAsync(storageProfileId, existing);
+                logger.Info(VanguardServerDiagnosticsLog.Present(
+                    $"[{WorldLifecycleStatusTag}] owner={storageProfileId}; phase=legacy_offer_cleanup; droppedVisibleOffersWithoutWorld={legacyOfferWithoutWorldDropped}; materializedFromOffer=0; reason=population_lifecycle_v1_offer_is_not_person; tag={WorldLifecycleStatusTag}"));
+            }
+
+            var usedCallsigns = registry.Select(entry => entry.Callsign)
+                .Where(value => !string.IsNullOrWhiteSpace(value))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var usedLegalNames = registry.Select(entry => BuildLegalName(entry.FirstName, entry.LastName))
+                .Where(value => !string.IsNullOrWhiteSpace(value))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
             var reservedOperatorIds = activeService.Select(record => record.OperatorId).ToHashSet(StringComparer.OrdinalIgnoreCase);
             var historical = BuildHistoricalContactOffers(operators, contacts, reservedOperatorIds, now, normalizedLevel).ToList();
             var historicalIds = historical.Select(offer => offer.OperatorId).ToHashSet(StringComparer.OrdinalIgnoreCase);
             var active = existing
-                .Where(offer => offer.AvailableUntilUtc > now && !reservedOperatorIds.Contains(offer.OperatorId) && !historicalIds.Contains(offer.OperatorId))
+                .Where(offer => offer.AvailableUntilUtc > now
+                    && durableWorldIds.Contains(offer.OperatorId)
+                    && !reservedOperatorIds.Contains(offer.OperatorId)
+                    && !historicalIds.Contains(offer.OperatorId))
                 .OrderByDescending(offer => offer.Rarity, StringComparer.OrdinalIgnoreCase)
                 .ThenByDescending(offer => offer.Level)
                 .ThenBy(offer => offer.AvailableUntilUtc)
                 .Take(Math.Max(0, expectedCount - historical.Count))
                 .ToList();
 
-            var combined = historical.Concat(active).Take(expectedCount).ToArray();
+            VanguardOperatorContractOffer[] combined = historical.Concat(active).Take(expectedCount).ToArray();
             if (combined.Length >= Math.Min(3, expectedCount))
             {
-                var worldOperators = MaterializeWorldOperators(operators, combined, now, out int materializedCount);
+                IReadOnlyList<VanguardOperatorProfile> worldOperators = MaterializeWorldOperators(operators, combined, now, out int materializedCount);
                 if (materializedCount > 0)
                 {
-                    // Persist the person before publishing/retaining the offer. A partial failure may leave a world
-                    // Operator without a visible contract, which is valid; the inverse is not.
                     await store.SaveOperatorsAsync(storageProfileId, worldOperators);
                     operators = worldOperators;
                 }
 
                 bool registryChanged = UpsertPermanentReservations(
-                    registry,
-                    storageProfileId,
-                    operators.Select(profile => new IdentityCandidate(
-                        profile.OperatorId,
-                        profile.Identity.FirstName,
-                        profile.Identity.LastName,
-                        profile.Identity.Callsign,
-                        profile.Identity.DisplayName,
-                        profile.Identity.Side)),
-                    now,
-                    "world_operator");
+                    registry, storageProfileId, operators.Select(profile => new IdentityCandidate(
+                        profile.OperatorId, profile.Identity.FirstName, profile.Identity.LastName, profile.Identity.Callsign, profile.Identity.DisplayName, profile.Identity.Side)),
+                    now, "world_operator");
                 if (registryChanged) await store.SaveIdentityRegistryAsync(registry);
                 if (combined.Length != existing.Count) await store.SaveContractsAsync(storageProfileId, combined);
-                LogWorldLifecycleStatus(
-                    storageProfileId,
-                    existing,
-                    combined,
-                    operators,
-                    activeService,
-                    materializedCount + legacyVisibleMaterializedCount,
-                    now,
-                    "retained_pool");
+                LogWorldLifecycleStatus(storageProfileId, existing, combined, operators, activeService, materializedCount, 0, "none", now, "retained_pool");
                 return combined;
             }
 
-            var dynamicCount = Math.Max(0, expectedCount - historical.Count - active.Count);
-            var generated = historical
+            int dynamicCount = Math.Max(0, expectedCount - historical.Count - active.Count);
+            IReadOnlyList<VanguardOperatorContractOffer> reusedProspectOffers = Array.Empty<VanguardOperatorContractOffer>();
+            int creationBudget;
+            string creationSuppressedReason;
+
+            if (operators.Count < BootstrapWorldPopulationTarget)
+            {
+                int bootstrapCapacity = Math.Max(0, BootstrapWorldPopulationTarget - operators.Count);
+                int hardCapacity = Math.Max(0, HardWorldPopulationSafetyCeiling - operators.Count);
+                creationBudget = Math.Min(dynamicCount, Math.Min(bootstrapCapacity, hardCapacity));
+                int remainingAfterBootstrapCreation = Math.Max(0, dynamicCount - creationBudget);
+                reusedProspectOffers = BuildExistingProspectOffers(operators, existing, reservedOperatorIds, historicalIds, now, normalizedLevel, remainingAfterBootstrapCreation);
+                creationSuppressedReason = hardCapacity <= 0
+                    ? "hard_ceiling"
+                    : creationBudget < dynamicCount
+                        ? "bootstrap_target_reached_reuse_existing"
+                        : "below_bootstrap_normal_creation";
+            }
+            else
+            {
+                reusedProspectOffers = BuildExistingProspectOffers(operators, existing, reservedOperatorIds, historicalIds, now, normalizedLevel, dynamicCount);
+                int remainingAfterReuse = Math.Max(0, dynamicCount - reusedProspectOffers.Count);
+                creationBudget = ResolveNewPersonCreationBudget(operators, remainingAfterReuse, now, out creationSuppressedReason);
+            }
+
+            VanguardOperatorContractOffer[] generated = historical
                 .Concat(active)
+                .Concat(reusedProspectOffers)
                 .Concat(GenerateContracts(
-                    storageProfileId,
-                    normalizedLevel,
-                    now,
-                    dynamicCount,
-                    reservedOperatorIds,
-                    usedLegalNames,
-                    usedCallsigns))
+                    storageProfileId, normalizedLevel, now, creationBudget, reservedOperatorIds, usedLegalNames, usedCallsigns))
                 .Take(expectedCount)
                 .ToArray();
 
-            var generatedWorldOperators = MaterializeWorldOperators(operators, generated, now, out int generatedMaterializedCount);
+            IReadOnlyList<VanguardOperatorProfile> generatedWorldOperators = MaterializeWorldOperators(operators, generated, now, out int generatedMaterializedCount);
             if (generatedMaterializedCount > 0)
             {
-                // World persistence precedes contract publication. These Operators remain valid world entities even
-                // if the offer later expires or the contract save fails.
                 await store.SaveOperatorsAsync(storageProfileId, generatedWorldOperators);
                 operators = generatedWorldOperators;
             }
 
             UpsertPermanentReservations(
-                registry,
-                storageProfileId,
-                operators.Select(profile => new IdentityCandidate(
-                    profile.OperatorId,
-                    profile.Identity.FirstName,
-                    profile.Identity.LastName,
-                    profile.Identity.Callsign,
-                    profile.Identity.DisplayName,
-                    profile.Identity.Side)),
-                now,
-                "world_operator");
+                registry, storageProfileId, operators.Select(profile => new IdentityCandidate(
+                    profile.OperatorId, profile.Identity.FirstName, profile.Identity.LastName, profile.Identity.Callsign, profile.Identity.DisplayName, profile.Identity.Side)),
+                now, "world_operator");
             await store.SaveIdentityRegistryAsync(registry);
             await store.SaveContractsAsync(storageProfileId, generated);
             LogWorldLifecycleStatus(
-                storageProfileId,
-                existing,
-                generated,
-                operators,
-                activeService,
-                generatedMaterializedCount + legacyVisibleMaterializedCount,
-                now,
-                "generated_pool");
+                storageProfileId, existing, generated, operators, activeService, generatedMaterializedCount,
+                reusedProspectOffers.Count, creationSuppressedReason, now, "generated_pool");
             return generated;
         }
         finally
@@ -259,45 +259,36 @@ public sealed class VanguardContractPoolService(
         IReadOnlyList<VanguardOperatorProfile> operators,
         IReadOnlyList<VanguardActiveServiceRecord> activeService,
         int materializedCount,
+        int reusedProspects,
+        string creationSuppressedReason,
         DateTimeOffset now,
         string phase)
     {
-        var worldOperatorIds = operators
-            .Where(profile => !string.IsNullOrWhiteSpace(profile.OperatorId))
-            .Select(profile => profile.OperatorId)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var activeOperatorIds = activeService
-            .Where(record => !string.IsNullOrWhiteSpace(record.OperatorId))
-            .Select(record => record.OperatorId)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var expiredOffers = previousContracts
-            .Where(offer => offer.AvailableUntilUtc <= now)
-            .ToArray();
+        var worldOperatorIds = operators.Where(profile => !string.IsNullOrWhiteSpace(profile.OperatorId))
+            .Select(profile => profile.OperatorId).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var activeOperatorIds = activeService.Where(record => !string.IsNullOrWhiteSpace(record.OperatorId))
+            .Select(record => record.OperatorId).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        VanguardOperatorContractOffer[] expiredOffers = previousContracts.Where(offer => offer.AvailableUntilUtc <= now).ToArray();
 
         int expiredWorldPreserved = expiredOffers.Count(offer => worldOperatorIds.Contains(offer.OperatorId));
         int visibleWithoutWorld = visibleContracts.Count(offer => !worldOperatorIds.Contains(offer.OperatorId));
         int worldOnly = operators.Count(profile => !activeOperatorIds.Contains(profile.OperatorId));
-        string fingerprint =
-            $"{phase}|{operators.Count}|{activeService.Count}|{visibleContracts.Count}|{materializedCount}|{expiredOffers.Length}|{expiredWorldPreserved}|{visibleWithoutWorld}|{worldOnly}";
+        int everHired = operators.Count(IsEverHiredFromCurrentProfileTruth);
+        int neverHired = Math.Max(0, operators.Count - everHired);
+        int eligibleProspects = operators.Count(profile => IsEligibleUncontractedProspect(profile, activeOperatorIds));
+        bool softSaturation = operators.Count >= SoftWorldPopulationSaturation;
+        bool hardCeiling = operators.Count >= HardWorldPopulationSafetyCeiling;
+        string fingerprint = $"{phase}|{operators.Count}|{activeService.Count}|{visibleContracts.Count}|{materializedCount}|{reusedProspects}|{creationSuppressedReason}|{expiredOffers.Length}|{visibleWithoutWorld}|{everHired}|{eligibleProspects}";
 
         if (lastWorldLifecycleStatusFingerprintByOwner.TryGetValue(ownerProfileId, out string? previous)
-            && string.Equals(previous, fingerprint, StringComparison.Ordinal))
-        {
-            return;
-        }
+            && string.Equals(previous, fingerprint, StringComparison.Ordinal)) return;
 
         lastWorldLifecycleStatusFingerprintByOwner[ownerProfileId] = fingerprint;
         string message =
-            $"[{WorldLifecycleStatusTag}] owner={ownerProfileId}; phase={phase}; worldOperators={operators.Count}; activeService={activeService.Count}; worldOnly={worldOnly}; visibleContracts={visibleContracts.Count}; materialized={materializedCount}; expiredOffersObserved={expiredOffers.Length}; expiredWorldPreserved={expiredWorldPreserved}; visibleOfferWithoutWorld={visibleWithoutWorld}; capacityAuthority=active_service; offerExpiryDeletesWorldOperator=false; mutation={(materializedCount > 0).ToString().ToLowerInvariant()}; tag={WorldLifecycleStatusTag}";
+            $"[{WorldLifecycleStatusTag}] owner={ownerProfileId}; phase={phase}; worldPopulation={operators.Count}; activeService={activeService.Count}; everHired={everHired}; neverHired={neverHired}; eligibleProspects={eligibleProspects}; visibleOffers={visibleContracts.Count}; reusedProspects={reusedProspects}; newPersonsCreated={materializedCount}; creationSuppressedReason={creationSuppressedReason}; bootstrapTarget={BootstrapWorldPopulationTarget}; softSaturationThreshold={SoftWorldPopulationSaturation}; softSaturation={softSaturation.ToString().ToLowerInvariant()}; hardSafetyCeiling={HardWorldPopulationSafetyCeiling}; hardCeiling={hardCeiling.ToString().ToLowerInvariant()}; worldOnly={worldOnly}; expiredOffersObserved={expiredOffers.Length}; expiredWorldPreserved={expiredWorldPreserved}; visibleOfferWithoutWorld={visibleWithoutWorld}; capacityAuthority=active_service; offerExpiryDeletesWorldOperator=false; mutation={(materializedCount > 0).ToString().ToLowerInvariant()}; tag={WorldLifecycleStatusTag}";
 
-        if (visibleWithoutWorld > 0)
-        {
-            logger.Warning(VanguardServerDiagnosticsLog.Present(message + "; invariant=visible_offer_requires_world_operator; state=violation"));
-        }
-        else
-        {
-            logger.Info(VanguardServerDiagnosticsLog.Present(message + "; invariant=visible_offer_requires_world_operator; state=ok"));
-        }
+        if (visibleWithoutWorld > 0) logger.Warning(VanguardServerDiagnosticsLog.Present(message + "; invariant=visible_offer_requires_world_operator; state=violation"));
+        else logger.Info(VanguardServerDiagnosticsLog.Present(message + "; invariant=visible_offer_requires_world_operator; state=ok"));
     }
 
     private void LogMigrationStatusOnce(string ownerProfileId, IReadOnlyList<VanguardOperatorProfile> operators)
@@ -549,6 +540,91 @@ public sealed class VanguardContractPoolService(
         };
     }
 
+    private static IReadOnlyList<VanguardOperatorContractOffer> BuildExistingProspectOffers(
+        IReadOnlyList<VanguardOperatorProfile> operators,
+        IReadOnlyList<VanguardOperatorContractOffer> existingContracts,
+        HashSet<string> reservedOperatorIds,
+        HashSet<string> historicalIds,
+        DateTimeOffset now,
+        int playerLevel,
+        int count)
+    {
+        if (count <= 0) return Array.Empty<VanguardOperatorContractOffer>();
+
+        var currentlyVisible = existingContracts.Where(offer => offer.AvailableUntilUtc > now)
+            .Select(offer => offer.OperatorId).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        string poolSequence = now.UtcDateTime.ToString("yyyyMMdd", CultureInfo.InvariantCulture);
+
+        return operators
+            .Where(profile => IsEligibleUncontractedProspect(profile, reservedOperatorIds))
+            .Where(profile => !historicalIds.Contains(profile.OperatorId) && !currentlyVisible.Contains(profile.OperatorId))
+            .OrderBy(profile => profile.CreatedAtUtc)
+            .ThenBy(profile => profile.OperatorId, StringComparer.OrdinalIgnoreCase)
+            .Take(count)
+            .Select(profile => new VanguardOperatorContractOffer(
+                $"vanguard-prospect-offer-{poolSequence}-{profile.OperatorId}",
+                profile.OperatorId, profile.Identity.DisplayName, profile.Identity.FirstName, profile.Identity.LastName, profile.Identity.Callsign, profile.Identity.Side,
+                profile.Role, profile.Specialty, profile.Progression.Level, profile.Progression.Experience, profile.HirePrice, profile.SalaryPerRaid, profile.CurrencyTpl,
+                "prospect", profile.Identity.VisualFamily, profile.Persona.BasePersona, profile.Persona.Doctrine, profile.Persona.Temperament,
+                profile.Persona.SainProfileFamily, profile.Persona.SainTuningPlan, profile.Persona.Traits, now, now.AddHours(24),
+                $"vanguard-prospect-pool-{poolSequence}-L{Math.Max(playerLevel, 1)}", Math.Max(playerLevel, 1), VanguardOperatorSchema.CurrentVersion,
+                profile.Persona.CombatStyle, profile.Persona.EngagementRange, profile.Persona.SquadRole, profile.Persona.BehaviorSummary,
+                true, "existing_prospect", "Existing Vanguard prospect returned to the contract market."))
+            .ToArray();
+    }
+
+    private static int ResolveNewPersonCreationBudget(
+        IReadOnlyList<VanguardOperatorProfile> operators,
+        int requested,
+        DateTimeOffset now,
+        out string reason)
+    {
+        if (requested <= 0)
+        {
+            reason = "not_required";
+            return 0;
+        }
+
+        int population = operators.Count;
+        int hardCapacity = Math.Max(0, HardWorldPopulationSafetyCeiling - population);
+        if (hardCapacity <= 0)
+        {
+            reason = "hard_ceiling";
+            return 0;
+        }
+
+        if (population < SoftWorldPopulationSaturation)
+        {
+            int softCapacity = Math.Max(0, SoftWorldPopulationSaturation - population);
+            reason = "pre_soft_saturation_insufficient_existing_prospects";
+            return Math.Min(requested, Math.Min(hardCapacity, softCapacity));
+        }
+
+        DateTimeOffset? mostRecentCreation = operators.Count == 0 ? null : operators.Max(profile => profile.CreatedAtUtc);
+        bool cooldownElapsed = !mostRecentCreation.HasValue || now - mostRecentCreation.Value >= PostSaturationCreationCooldown;
+        if (!cooldownElapsed)
+        {
+            reason = "population_saturated_creation_cooldown";
+            return 0;
+        }
+
+        reason = "population_saturated_sparse_creation";
+        return Math.Min(Math.Min(requested, hardCapacity), MaxNewPersonsPerPostSaturationWindow);
+    }
+
+    private static bool IsEligibleUncontractedProspect(VanguardOperatorProfile profile, HashSet<string> activeIds) =>
+        !string.IsNullOrWhiteSpace(profile.OperatorId)
+        && !activeIds.Contains(profile.OperatorId)
+        && string.Equals(profile.ContractStatus, VanguardOperatorContractStatuses.Uncontracted, StringComparison.OrdinalIgnoreCase)
+        && profile.Career is null
+        && profile.EnrollmentBaseline is null;
+
+    private static bool IsEverHiredFromCurrentProfileTruth(VanguardOperatorProfile profile) =>
+        string.Equals(profile.ContractStatus, VanguardOperatorContractStatuses.Contracted, StringComparison.OrdinalIgnoreCase)
+        || string.Equals(profile.ContractStatus, VanguardOperatorContractStatuses.Released, StringComparison.OrdinalIgnoreCase)
+        || profile.Career is not null
+        || profile.EnrollmentBaseline is not null;
+
     private IEnumerable<VanguardOperatorContractOffer> GenerateContracts(
         string profileId,
         int playerLevel,
@@ -576,8 +652,12 @@ public sealed class VanguardContractPoolService(
                 continue;
             }
 
-            var callsignFallback = $"Echo-{BuildStableIdSuffix($"{profileId}|{poolSequence}|{emitted}|callsign")}";
-            var callsign = PickUnique(random, Callsigns, usedCallsigns, callsignFallback);
+            if (!VanguardCallsignCatalog.TryPickUnique(random, usedCallsigns, out string callsign))
+            {
+                logger.Warning(VanguardServerDiagnosticsLog.Present(
+                    $"[VANGUARD_CALLSIGN_ALLOCATION_STATUS] owner={profileId}; state=exhausted_fail_closed; poolSize={VanguardCallsignCatalog.Values.Length}; used={usedCallsigns.Count}; visibleFallback=false; hashFallback=false; emitted={emitted}; requested={count}; tag=VANGUARD_CALLSIGN_ALLOCATION_STATUS"));
+                yield break;
+            }
             var display = $"{callsign} {last}";
 
             var archetype = Pick(random, Archetypes);
@@ -717,25 +797,6 @@ public sealed class VanguardContractPoolService(
 
     private static T Pick<T>(Random random, IReadOnlyList<T> values) => values[random.Next(values.Count)];
 
-    private static string PickUnique(Random random, IReadOnlyList<string> values, HashSet<string> used, string fallback)
-    {
-        for (var attempt = 0; attempt < Math.Max(20, values.Count * 2); attempt++)
-        {
-            var value = Pick(random, values);
-            if (used.Add(value))
-            {
-                return value;
-            }
-        }
-
-        string candidate = fallback;
-        int suffix = 2;
-        while (!used.Add(candidate))
-        {
-            candidate = $"{fallback}-{suffix++}";
-        }
-        return candidate;
-    }
 
     private static string BuildLegalName(string? firstName, string? lastName) =>
         $"{firstName?.Trim()}|{lastName?.Trim()}".Trim('|');

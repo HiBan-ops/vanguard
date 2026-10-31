@@ -56,7 +56,7 @@ internal static class VanguardIntentScoringPolicy
         if (candidate.IntentKey == "YieldToSainCombat" && snapshot.Threat.DirectThreat)
         {
             bool productive = Vanguard.Client.Runtime.Movement.VanguardMovementAuthorityDoctrine.IsCombatProductive(snapshot, out _);
-            if (!productive && snapshot.SquadCohesion.OperatorDistanceToOwner >= Vanguard.Client.Runtime.Movement.VanguardMovementAuthorityDoctrine.CombatCohesionForcedCatchupMeters)
+            if (!productive && snapshot.SquadCohesion.OperatorDistanceToOwner >= Vanguard.Client.Runtime.Movement.VanguardMovementAuthorityDoctrine.ForOwner(snapshot.OwnerProfileId).CombatCohesionForcedCatchupMeters)
             {
                 return 0.75f;
             }
@@ -318,7 +318,7 @@ internal static class VanguardIntentScoringPolicy
                 return 1.40f;
             }
 
-            if (snapshot.SquadCohesion.OperatorDistanceToOwner >= Vanguard.Client.Runtime.Movement.VanguardMovementAuthorityDoctrine.CombatCohesionForcedCatchupMeters)
+            if (snapshot.SquadCohesion.OperatorDistanceToOwner >= Vanguard.Client.Runtime.Movement.VanguardMovementAuthorityDoctrine.ForOwner(snapshot.OwnerProfileId).CombatCohesionForcedCatchupMeters)
             {
                 return 1.22f;
             }
@@ -350,7 +350,7 @@ internal static class VanguardIntentScoringPolicy
                 return 0.05f;
             }
 
-            if (snapshot.SquadCohesion.OperatorDistanceToOwner >= Vanguard.Client.Runtime.Movement.VanguardMovementAuthorityDoctrine.CombatCohesionForcedCatchupMeters)
+            if (snapshot.SquadCohesion.OperatorDistanceToOwner >= Vanguard.Client.Runtime.Movement.VanguardMovementAuthorityDoctrine.ForOwner(snapshot.OwnerProfileId).CombatCohesionForcedCatchupMeters)
             {
                 return 0.20f;
             }
@@ -380,7 +380,7 @@ internal static class VanguardIntentScoringPolicy
                 return 1.42f;
             }
 
-            if (snapshot.SquadCohesion.OperatorDistanceToOwner >= Vanguard.Client.Runtime.Movement.VanguardMovementAuthorityDoctrine.CombatCohesionForcedCatchupMeters)
+            if (snapshot.SquadCohesion.OperatorDistanceToOwner >= Vanguard.Client.Runtime.Movement.VanguardMovementAuthorityDoctrine.ForOwner(snapshot.OwnerProfileId).CombatCohesionForcedCatchupMeters)
             {
                 return 1.30f;
             }

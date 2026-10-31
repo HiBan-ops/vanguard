@@ -3,6 +3,8 @@ using System;
 using System.Globalization;
 using System.Linq;
 using UnityEngine;
+using Vanguard.Client.Api.Dtos;
+using Vanguard.Client.Runtime.Audit;
 using Vanguard.Client.Runtime.Decision;
 using Vanguard.Client.Runtime.Execution;
 using Vanguard.Client.Runtime.Medical;
@@ -81,32 +83,120 @@ internal static class VanguardMovementAuthorityDoctrine
     public const float DefaultActionRallyAcceptMeters = 45f;
     public const float DefaultActionRallyPreferredMeters = 24f;
 
-    public static float TacticalBubbleMeters => VanguardOperatorRuntimeAuditOptions.GetMovementTacticalBubbleMeters();
-    public static float SoftCorrectionMeters => Math.Max(TacticalBubbleMeters + 1f, VanguardOperatorRuntimeAuditOptions.GetMovementSoftCorrectionMeters());
-    public static float HardCorrectionMeters => Math.Max(SoftCorrectionMeters + 1f, VanguardOperatorRuntimeAuditOptions.GetMovementHardCorrectionMeters());
-    public static float ClearCorrectionMeters => Math.Max(TacticalBubbleMeters - 5f, ActionRallyAcceptMeters + 5f);
-    public static float ActionRallyClearMeters => Math.Min(VanguardOperatorRuntimeAuditOptions.GetMovementActionRallyClearMeters(), ActionRallyAcceptMeters);
-    public static float ActionRallyAcceptMeters => VanguardOperatorRuntimeAuditOptions.GetMovementActionRallyAcceptMeters();
-    public static float ActionRallyPreferredMeters => Math.Min(VanguardOperatorRuntimeAuditOptions.GetMovementActionRallyPreferredMeters(), Math.Max(8f, ActionRallyAcceptMeters - 4f));
-    public static float ActionRallyNearMeters => Math.Max(8f, ActionRallyPreferredMeters - 6f);
-    public static float ActionRallyWideMeters => Math.Min(ActionRallyAcceptMeters - 2f, ActionRallyPreferredMeters + 8f);
+    /// <summary>
+    /// Immutable owner-scoped view of every F12 movement/cohesion value that can influence an
+    /// Operator. The transport/cache is keyed by OwnerProfileId; derived thresholds are rebuilt
+    /// from that one coherent snapshot so a headless process never mixes two players' doctrine.
+    /// </summary>
+    internal readonly struct OwnerMovementPolicy
+    {
+        public OwnerMovementPolicy(VanguardOperatorRuntimeAuditSettingsDto settings)
+        {
+            ActiveBackendApplyEnabled = settings.MovementOutsideBubbleRecallEnabled;
+            ActiveSainBoundaryReturnEnabled = settings.MovementSainBoundaryReturnEnabled;
+            SuppressExternalDuringRecallEnabled = settings.MovementSuppressExternalDuringRecallEnabled;
+            TacticalRepositionActiveEnabled = settings.MovementTacticalRepositionEnabled;
+
+            TacticalRepositionCooldownSeconds = Clamp(settings.MovementTacticalRepositionCooldownSeconds, 3.0f, 30.0f);
+            TacticalRepositionMinDeltaMeters = Clamp(settings.MovementTacticalRepositionMinDeltaMeters, 3.0f, 18.0f);
+            TacticalBubbleMeters = Clamp(settings.MovementTacticalBubbleMeters, 35.0f, 120.0f);
+            SoftCorrectionMeters = Math.Max(TacticalBubbleMeters + 1.0f, Clamp(settings.MovementSoftCorrectionMeters, 40.0f, 135.0f));
+            HardCorrectionMeters = Math.Max(SoftCorrectionMeters + 1.0f, Clamp(settings.MovementHardCorrectionMeters, 45.0f, 150.0f));
+
+            ActionRallyAcceptMeters = Clamp(settings.MovementActionRallyAcceptMeters, 15.0f, 80.0f);
+            ActionRallyClearMeters = Math.Min(Clamp(settings.MovementActionRallyClearMeters, 12.0f, 70.0f), ActionRallyAcceptMeters);
+            ActionRallyPreferredMeters = Math.Min(
+                Clamp(settings.MovementActionRallyPreferredMeters, 8.0f, 55.0f),
+                Math.Max(8.0f, ActionRallyAcceptMeters - 4.0f));
+
+            ClearCorrectionMeters = Math.Max(TacticalBubbleMeters - 5.0f, ActionRallyAcceptMeters + 5.0f);
+            ActionRallyNearMeters = Math.Max(8.0f, ActionRallyPreferredMeters - 6.0f);
+            ActionRallyWideMeters = Math.Min(ActionRallyAcceptMeters - 2.0f, ActionRallyPreferredMeters + 8.0f);
+            ActionRallyOuterMeters = Math.Min(ActionRallyAcceptMeters - 1.0f, ActionRallyPreferredMeters + 16.0f);
+            HardReturnCompletionMeters = Math.Min(ActionRallyAcceptMeters, 28.0f);
+            StaleSearchDistanceMeters = TacticalBubbleMeters;
+
+            TacticalRepositionNoProgressSeconds = Math.Min(
+                5.5f,
+                Clamp(settings.MovementLeaseNoProgressSeconds, 3.0f, 20.0f));
+            TacticalRepositionSuccessCooldownSeconds = Math.Max(14.0f, TacticalRepositionCooldownSeconds * 2.0f);
+            TacticalSquadPressureBlockMeters = Math.Min(TacticalBubbleMeters, 55.0f);
+
+            CombatCohesionForcedCatchupMeters = Clamp(settings.MovementCombatCohesionForcedCatchupMeters, 16.0f, 80.0f);
+            float configuredTravelEnter = Clamp(settings.MovementTravelCatchUpEnterMeters, 18.0f, 60.0f);
+            TravelCatchUpEnterMeters = Math.Min(configuredTravelEnter, Math.Max(18.0f, HardCorrectionMeters - 4.0f));
+            float configuredTravelExit = Clamp(settings.MovementTravelCatchUpExitMeters, 10.0f, 55.0f);
+            TravelCatchUpExitMeters = Math.Min(configuredTravelExit, Math.Max(10.0f, TravelCatchUpEnterMeters - 2.0f));
+            TravelModeDwellSeconds = Clamp(settings.MovementTravelModeDwellSeconds, 0.25f, 5.0f);
+
+            MovementLeaseStartCooldownSeconds = Clamp(settings.MovementLeaseStartCooldownSeconds, 2.0f, 30.0f);
+            MovementLeaseFailureCooldownSeconds = Clamp(settings.MovementLeaseFailureCooldownSeconds, 4.0f, 45.0f);
+            MovementLeaseNoProgressSeconds = Clamp(settings.MovementLeaseNoProgressSeconds, 3.0f, 20.0f);
+            MovementLeaseMaxDurationSeconds = Clamp(settings.MovementLeaseMaxDurationSeconds, 18.0f, 90.0f);
+            MovementLeaseHardMaxSeconds = Math.Max(MovementLeaseMaxDurationSeconds + 15.0f, 75.0f);
+            ActionRallyMaxReanchorsPerLease = Math.Max(0, Math.Min(5, settings.MovementActionRallyMaxReanchors));
+            ActionRallyAnchorHardRejectMeters = Math.Max(178.0f, HardCorrectionMeters + ActionRallyAcceptMeters);
+
+            OpportunisticLootBrokerEnabled = settings.MovementOpportunisticLootBrokerEnabled;
+            OpportunisticLootMaxDistanceMeters = Clamp(settings.MovementOpportunisticLootMaxDistanceMeters, 6.0f, 42.0f);
+            OpportunisticLootScanCooldownSeconds = Clamp(settings.MovementOpportunisticLootScanCooldownSeconds, 8.0f, 60.0f);
+            OpportunisticLootGrantSeconds = Clamp(settings.MovementOpportunisticLootGrantSeconds, 4.0f, 20.0f);
+        }
+
+        public bool ActiveBackendApplyEnabled { get; }
+        public bool ActiveSainBoundaryReturnEnabled { get; }
+        public bool SuppressExternalDuringRecallEnabled { get; }
+        public bool TacticalRepositionActiveEnabled { get; }
+        public float TacticalRepositionCooldownSeconds { get; }
+        public float TacticalRepositionMinDeltaMeters { get; }
+        public float TacticalBubbleMeters { get; }
+        public float SoftCorrectionMeters { get; }
+        public float HardCorrectionMeters { get; }
+        public float ClearCorrectionMeters { get; }
+        public float ActionRallyClearMeters { get; }
+        public float ActionRallyAcceptMeters { get; }
+        public float ActionRallyPreferredMeters { get; }
+        public float ActionRallyNearMeters { get; }
+        public float ActionRallyWideMeters { get; }
+        public float ActionRallyOuterMeters { get; }
+        public float HardReturnCompletionMeters { get; }
+        public float StaleSearchDistanceMeters { get; }
+        public float TacticalRepositionNoProgressSeconds { get; }
+        public float TacticalRepositionSuccessCooldownSeconds { get; }
+        public float TacticalSquadPressureBlockMeters { get; }
+        public float CombatCohesionForcedCatchupMeters { get; }
+        public float TravelCatchUpEnterMeters { get; }
+        public float TravelCatchUpExitMeters { get; }
+        public float TravelModeDwellSeconds { get; }
+        public float MovementLeaseStartCooldownSeconds { get; }
+        public float MovementLeaseFailureCooldownSeconds { get; }
+        public float MovementLeaseNoProgressSeconds { get; }
+        public float MovementLeaseMaxDurationSeconds { get; }
+        public float MovementLeaseHardMaxSeconds { get; }
+        public int ActionRallyMaxReanchorsPerLease { get; }
+        public float ActionRallyAnchorHardRejectMeters { get; }
+        public bool OpportunisticLootBrokerEnabled { get; }
+        public float OpportunisticLootMaxDistanceMeters { get; }
+        public float OpportunisticLootScanCooldownSeconds { get; }
+        public float OpportunisticLootGrantSeconds { get; }
+    }
+
+    public static OwnerMovementPolicy ForOwner(string? ownerProfileId)
+    {
+        VanguardOperatorRuntimeAuditSettingsDto settings =
+            VanguardRuntimeSettingsAuthorityResolver.ResolvePlayerScoped(ownerProfileId, "movement_cohesion_runtime");
+        return new OwnerMovementPolicy(settings);
+    }
+
+    private static float Clamp(float value, float minimum, float maximum)
+        => Math.Max(minimum, Math.Min(maximum, value));
+
     public static float ActionRallyTightMeters => 12f;
-    public static float ActionRallyOuterMeters => Math.Min(ActionRallyAcceptMeters - 1f, ActionRallyPreferredMeters + 16f);
-    // Runtime invariant: emergency recall is not complete merely because the Operator re-enters the broad
-    // 45 m action-rally acceptance ring. It must hand back to normal travel/close cohesion from
-    // a genuinely useful support distance.
-    public static float HardReturnCompletionMeters => Math.Min(ActionRallyAcceptMeters, 28.0f);
     public static float HardReturnRetargetOwnerMoveMeters => 8.0f;
     public static float HardReturnRetargetAnchorOwnerDistanceMeters => 36.0f;
     public static float HardReturnRetargetNoProgressSeconds => 2.25f;
-    public static float StaleSearchDistanceMeters => TacticalBubbleMeters;
     public static float TacticalAnchorRadiusMeters => 5f;
-    public static float TacticalRepositionCooldownSeconds => VanguardOperatorRuntimeAuditOptions.GetMovementTacticalRepositionCooldownSeconds();
-    public static float TacticalRepositionMinDeltaMeters => VanguardOperatorRuntimeAuditOptions.GetMovementTacticalRepositionMinDeltaMeters();
     public static float TacticalRepositionMaxDurationSeconds => 16.0f;
-    public static float TacticalRepositionNoProgressSeconds => Math.Min(5.5f, MovementLeaseNoProgressSeconds);
-    public static float TacticalRepositionSuccessCooldownSeconds => Math.Max(14.0f, TacticalRepositionCooldownSeconds * 2.0f);
-    public static float TacticalSquadPressureBlockMeters => Math.Min(TacticalBubbleMeters, 55.0f);
     public static float CloseCohesionStartMinMeters => 18.0f;
     public static float CloseCohesionStartMaxMeters => 34.0f;
     public static float CloseCohesionForceStartMeters => 26.0f;
@@ -318,45 +408,23 @@ internal static class VanguardMovementAuthorityDoctrine
     public static float StationaryMedicalMaintainMaxOwnerDistanceMeters => 60.0f;
     public static float SquadContactCloseVisibleMeters => 52.0f;
     public static float CombatCohesionSupportRadiusMeters => 24.0f;
-    public static float CombatCohesionForcedCatchupMeters => VanguardOperatorRuntimeAuditOptions.GetMovementCombatCohesionForcedCatchupMeters();
     public static float CombatCohesionHardReturnMeters => 44.0f;
     public static float CombatCohesionEmergencyReturnMeters => 52.0f;
     public static float CombatCohesionProductiveHoldMaxMeters => 42.0f;
     public static float CombatCohesionHoldSectorMaxMeters => 24.0f;
-    public static float TravelCatchUpEnterMeters => VanguardOperatorRuntimeAuditOptions.GetMovementTravelCatchUpEnterMeters();
-    public static float TravelCatchUpExitMeters => VanguardOperatorRuntimeAuditOptions.GetMovementTravelCatchUpExitMeters();
-    public static float TravelModeDwellSeconds => VanguardOperatorRuntimeAuditOptions.GetMovementTravelModeDwellSeconds();
-    // Compatibility alias for existing logs and non-mode consumers. The runtime mode transitions use
-    // the explicit enter/exit+dwell contract above.
-    public static float TravelCohesionSprintDistanceMeters => TravelCatchUpEnterMeters;
     public static float TravelCohesionRequiredSprintDistanceMeters => 36.0f;
     public static float HardReturnCombatBackoffSeconds => 8.0f;
-    public static bool OpportunisticLootBrokerEnabled => VanguardOperatorRuntimeAuditOptions.GetMovementOpportunisticLootBrokerEnabled();
-    public static float OpportunisticLootMaxDistanceMeters => VanguardOperatorRuntimeAuditOptions.GetMovementOpportunisticLootMaxDistanceMeters();
-    public static float OpportunisticLootScanCooldownSeconds => VanguardOperatorRuntimeAuditOptions.GetMovementOpportunisticLootScanCooldownSeconds();
-    public static float OpportunisticLootGrantSeconds => VanguardOperatorRuntimeAuditOptions.GetMovementOpportunisticLootGrantSeconds();
-    public static bool TacticalRepositionActiveEnabled => VanguardOperatorRuntimeAuditOptions.GetMovementTacticalRepositionEnabled();
     public static float RegroupAnchorRadiusMeters => 6f;
     public static float HardReturnAnchorRadiusMeters => 7f;
     public static float MovementLeaseMinDurationSeconds => 4.0f;
-    public static float MovementLeaseMaxDurationSeconds => VanguardOperatorRuntimeAuditOptions.GetMovementLeaseMaxDurationSeconds();
-    public static float MovementLeaseNoProgressSeconds => VanguardOperatorRuntimeAuditOptions.GetMovementLeaseNoProgressSeconds();
-    public static float MovementLeaseStartCooldownSeconds => VanguardOperatorRuntimeAuditOptions.GetMovementLeaseStartCooldownSeconds();
-    public static float MovementLeaseFailureCooldownSeconds => VanguardOperatorRuntimeAuditOptions.GetMovementLeaseFailureCooldownSeconds();
     public static float MovementLeaseAbortCooldownSeconds => 4f;
     public static float PreemptPendingDelaySeconds => 0.55f;
     public static float PreemptPendingMaxSeconds => 3.25f;
     public static float MovementAuthorityRefreshSeconds => 1.25f;
     public static float MovementLeaseProgressExtendSeconds => 8.0f;
-    public static float MovementLeaseHardMaxSeconds => Math.Max(MovementLeaseMaxDurationSeconds + 15f, 75.0f);
-    public static int ActionRallyMaxReanchorsPerLease => VanguardOperatorRuntimeAuditOptions.GetMovementActionRallyMaxReanchors();
     public static float ActionRallyReanchorCooldownSeconds => 3.0f;
     public static float ActionRallyReanchorLimitCooldownSeconds => 22.0f;
-    public static float ActionRallyAnchorHardRejectMeters => Math.Max(178.0f, HardCorrectionMeters + ActionRallyAcceptMeters);
     public static float ActionRallyAnchorScoreMinimum => 8.0f;
-    public static bool ActiveBackendApplyEnabled => VanguardOperatorRuntimeAuditOptions.GetMovementOutsideBubbleRecallEnabled();
-    public static bool ActiveSainBoundaryReturnEnabled => VanguardOperatorRuntimeAuditOptions.GetMovementSainBoundaryReturnEnabled();
-    public static bool SuppressExternalDuringRecallEnabled => VanguardOperatorRuntimeAuditOptions.GetMovementSuppressExternalDuringRecallEnabled();
     public static bool VerboseDoctrineLogEnabled => VanguardOperatorRuntimeAuditOptions.GetMovementVerboseDoctrineLogEnabled();
 
 
@@ -634,6 +702,7 @@ internal static class VanguardMovementAuthorityDoctrine
             return false;
         }
 
+        OwnerMovementPolicy ownerPolicy = ForOwner(snapshot.OwnerProfileId);
         string text = SainText(snapshot);
         bool offensiveAction = text.Contains("shoot")
             || text.Contains("dogfight")
@@ -662,6 +731,7 @@ internal static class VanguardMovementAuthorityDoctrine
             return false;
         }
 
+        OwnerMovementPolicy ownerPolicy = ForOwner(snapshot.OwnerProfileId);
         string text = SainText(snapshot);
         bool offensiveAction = text.Contains("shoot")
             || text.Contains("dogfight")
@@ -689,7 +759,7 @@ internal static class VanguardMovementAuthorityDoctrine
         bool formationDetached = snapshot.SquadCohesion.OwnerKnown
             && snapshot.SquadCohesion.OwnerReliableForActiveMovement
             && snapshot.SquadCohesion.OwnerPosition.HasValue
-            && snapshot.SquadCohesion.OperatorDistanceToOwner >= CombatCohesionForcedCatchupMeters;
+            && snapshot.SquadCohesion.OperatorDistanceToOwner >= ownerPolicy.CombatCohesionForcedCatchupMeters;
         if (formationDetached
             && pursuitLikeMovement
             && speed >= 0.25f
@@ -827,8 +897,9 @@ internal static class VanguardMovementAuthorityDoctrine
             return false;
         }
 
+        OwnerMovementPolicy ownerPolicy = ForOwner(snapshot.OwnerProfileId);
         float distance = snapshot.SquadCohesion.OperatorDistanceToOwner;
-        if (distance < CombatCohesionForcedCatchupMeters)
+        if (distance < ownerPolicy.CombatCohesionForcedCatchupMeters)
         {
             reason = "inside_forced_catchup_band:" + distance.ToString("0.0", CultureInfo.InvariantCulture);
             return false;
@@ -976,9 +1047,10 @@ internal static class VanguardMovementAuthorityDoctrine
             return false;
         }
 
+        OwnerMovementPolicy ownerPolicy = ForOwner(snapshot.OwnerProfileId);
         bool notVisible = snapshot.Threat.EnemyVisible == false || snapshot.Threat.EnemyLineOfSight == false;
         bool cannotShoot = snapshot.Threat.EnemyCanShoot != true;
-        bool far = snapshot.Threat.Distance.HasValue && snapshot.Threat.Distance.Value >= StaleSearchDistanceMeters;
+        bool far = snapshot.Threat.Distance.HasValue && snapshot.Threat.Distance.Value >= ownerPolicy.StaleSearchDistanceMeters;
         bool noFreshExchange = snapshot.Threat.ShotMeRecently != true
             && snapshot.Threat.ShotAtMeRecently != true
             && !snapshot.Medical.Safety.IncomingFireRecent
@@ -1163,6 +1235,7 @@ internal static class VanguardMovementAuthorityDoctrine
 
     public static bool IsSainEnvelopeViolation(OperatorDecisionSnapshot snapshot, out string reason)
     {
+        OwnerMovementPolicy ownerPolicy = ForOwner(snapshot.OwnerProfileId);
         string order = snapshot.SquadCohesion.SquadOrder;
         if (IsGoOrder(order))
         {
@@ -1182,7 +1255,7 @@ internal static class VanguardMovementAuthorityDoctrine
             return false;
         }
 
-        if (!snapshot.SquadCohesion.InBubble && snapshot.SquadCohesion.OperatorDistanceToOwner >= TacticalBubbleMeters)
+        if (!snapshot.SquadCohesion.InBubble && snapshot.SquadCohesion.OperatorDistanceToOwner >= ownerPolicy.TacticalBubbleMeters)
         {
             reason = "sain_search_outside_tactical_bubble";
             return true;
@@ -1207,7 +1280,8 @@ internal static class VanguardMovementAuthorityDoctrine
             return false;
         }
 
-        if (!ActiveBackendApplyEnabled || !ActiveSainBoundaryReturnEnabled)
+        OwnerMovementPolicy ownerPolicy = ForOwner(snapshot.OwnerProfileId);
+        if (!ownerPolicy.ActiveBackendApplyEnabled || !ownerPolicy.ActiveSainBoundaryReturnEnabled)
         {
             reason = "movement_f12_sain_boundary_return_disabled";
             return false;
@@ -1238,7 +1312,7 @@ internal static class VanguardMovementAuthorityDoctrine
         }
 
         bool staleInsideOrOutside = IsSainCombatStaleNonActionable(snapshot, out var staleReason);
-        if (snapshot.SquadCohesion.OperatorDistanceToOwner < HardCorrectionMeters && !staleInsideOrOutside)
+        if (snapshot.SquadCohesion.OperatorDistanceToOwner < ownerPolicy.HardCorrectionMeters && !staleInsideOrOutside)
         {
             reason = "not_hard_outside_bubble_and_not_stale:" + staleReason;
             return false;

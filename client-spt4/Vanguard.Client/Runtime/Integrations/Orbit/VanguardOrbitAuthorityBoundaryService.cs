@@ -45,6 +45,19 @@ internal static class VanguardOrbitAuthorityBoundaryService
             $"VANGUARD_ORBIT_BOUNDARY_CACHE_RESET reason={Safe(reason)}; expected=role_excluded_before_agent_attach; auditInterval={ConfirmedAuditInterval.TotalSeconds:0}; mutation=false; tag={StatusTag}");
     }
 
+    public static bool ForgetRuntimePresence(string? botProfileId)
+    {
+        if (string.IsNullOrWhiteSpace(botProfileId))
+        {
+            return false;
+        }
+
+        lock (Sync)
+        {
+            return ByBotProfile.Remove(botProfileId.Trim());
+        }
+    }
+
     public static bool TryGetExcludedSnapshot(BotOwner? botOwner, string botProfileId, DateTimeOffset now, out VanguardOrbitDecisionSnapshot snapshot)
     {
         snapshot = null!;

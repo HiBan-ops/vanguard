@@ -69,6 +69,39 @@ internal static class VanguardCorpseLootApproachExecutor
             $"VANGUARD_CORPSE_LOOT_APPROACH_RESET reason={Safe(reason)}; activeCleared={active.Length}; claimsCleared=true; transactionsEnabled=true; interactionAtReset=false; atomicPerItem=true; sequentialSession=false; singleUtilityClaimPerVisit=true; operatorCorpseCommit=false");
     }
 
+    public static string ForgetRuntimePresence(string? botProfileId, string reason)
+    {
+        string key = string.IsNullOrWhiteSpace(botProfileId) ? "none" : botProfileId.Trim();
+        if (string.Equals(key, "none", StringComparison.OrdinalIgnoreCase))
+        {
+            return "corpseApproach=ignored_missing_profile";
+        }
+
+        ApproachLease? lease = null;
+        int logEntries = 0;
+        lock (Sync)
+        {
+            if (ActiveByBotProfileId.TryGetValue(key, out ApproachLease active))
+            {
+                lease = active;
+                ActiveByBotProfileId.Remove(key);
+            }
+
+            foreach (string logKey in LastLogByKey.Keys.ToArray())
+            {
+                if (logKey.IndexOf(key, StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    LastLogByKey.Remove(logKey);
+                    logEntries++;
+                }
+            }
+        }
+
+        return "corpseApproach=" + (lease == null ? "none" : "forgotten")
+            + ";logEntries=" + logEntries
+            + ";normalTerminal=false;outcomeMemoryMutation=false;reason=" + Safe(reason);
+    }
+
     public static void Tick(IReadOnlyList<OperatorDecisionSnapshot> snapshots, DateTimeOffset now)
     {
         if (!VanguardOperatorRuntimeAuditLoadGuard.IsOpen() || !VanguardFikaCompat.IsRaidAuthority)
@@ -113,7 +146,7 @@ internal static class VanguardCorpseLootApproachExecutor
             return;
         }
 
-        if (VanguardRuntimeFrameBudgetGuard.ShouldRunOptional("CorpseLootApproachPlanning", now, TimeSpan.FromSeconds(0.75d), out _))
+        if (VanguardRuntimeFrameBudgetGuard.ShouldRunOptional("CorpseLootApproachPlanning", now, TimeSpan.FromSeconds(0.75d)))
         {
             long approachPlanningStarted = VanguardRuntimePerformanceGuard.Begin();
             try
@@ -202,6 +235,35 @@ internal static class VanguardCorpseLootApproachExecutor
         }
 
         return $"claimsReleased={claimsReleased};commandsCleared={commandsCleared};schedulerWindowsAborted={schedulerWindowsAborted}";
+    }
+
+    internal static bool TryYieldForUrgentMedicSupport(
+        string botProfileId,
+        string expectedWindowId,
+        DateTimeOffset now,
+        out string summary)
+    {
+        ApproachLease lease;
+        lock (Sync)
+        {
+            if (!ActiveByBotProfileId.TryGetValue(botProfileId, out lease)
+                || !string.Equals(lease.WindowId, expectedWindowId, StringComparison.OrdinalIgnoreCase))
+            {
+                summary = "corpse_loot_active_lease_not_found_or_window_mismatch";
+                return false;
+            }
+        }
+
+        summary = FinishLease(
+            lease,
+            now,
+            "Interrupted",
+            "urgent_medic_supply_drop_preempt",
+            failureCooldown: false,
+            snapshotSignature: "medic_support_heavy_bleed_preempt",
+            finishScheduler: false,
+            cooldownOverride: 0f);
+        return true;
     }
 
     public static bool TryTerminateSchedulerExpiredWindow(string botProfileId, string windowId, DateTimeOffset now, string timeoutReason, out string summary)
@@ -367,6 +429,7 @@ internal static class VanguardCorpseLootApproachExecutor
                     () => $"VANGUARD_CORPSE_LOOT_TRAVEL_COHESION_YIELDED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; corpse={Safe(entry.CorpseId)}; proof={Safe(boundedTravelYieldProof)}; schedulerWindow={Safe(windowId)}; criticalSafetyGatesPreserved=true; movementCoreChanged=false");
             }
 
+            string leaseId = "corpse_loot_" + now.ToUnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture) + "_" + Safe(snapshot.BotProfileId);
             if (NeedsExternalPreempt(snapshot))
             {
                 VanguardExternalPreemptResult preempt = VanguardExternalAuthorityAdapter.RequestOrbitAuthorityQuiesce(
@@ -374,18 +437,20 @@ internal static class VanguardCorpseLootApproachExecutor
                     snapshot,
                     "corpse_loot_claim_and_approach",
                     TimeSpan.FromSeconds(VanguardCorpseLootApproachDoctrine.SchedulerMaximumWindowSeconds + 3.0f),
-                    now);
+                    now,
+                    ownerLeaseId: leaseId,
+                    ownerWindowId: windowId);
                 if (!preempt.CanDriveMovement)
                 {
                     VanguardCorpseLootClaimStore.Release(claim.ClaimId, "external_preempt_denied", out _);
                     VanguardMainIntentScheduler.FinishPrimaryWindow(snapshot.BotProfileId, now, "Failed", "external_preempt_not_granted:" + preempt.Outcome, preempt.Summary, windowId);
+                    _ = ReleaseLootQuiesce(record.BotOwner, snapshot.BotProfileId, now, leaseId, windowId, "external_preempt_denied");
                     _ = VanguardCorpseLootOutcomeMemory.Record(snapshot.OwnerProfileId, snapshot.OperatorId, snapshot.BotProfileId, entry.CorpseId, now, "Failed", "external_preempt_not_granted", false, VanguardCorpseLootApproachDoctrine.FailureCooldownSeconds, out _);
                     continue;
                 }
             }
 
             string preventSummary = VanguardOpportunisticLootBroker.PreventForVanguardOwnedWindow(record.BotOwner, VanguardCorpseLootApproachDoctrine.SchedulerMaximumWindowSeconds + 3.0f, "corpse_loot_operational_session");
-            string leaseId = "corpse_loot_" + now.ToUnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture) + "_" + Safe(snapshot.BotProfileId);
             DateTimeOffset maxUntil = now + TimeSpan.FromSeconds(VanguardCorpseLootApproachDoctrine.MaximumWindowSeconds);
             bool issued = VanguardReturnMovementCommandStore.Issue(
                 leaseId,
@@ -404,6 +469,7 @@ internal static class VanguardCorpseLootApproachExecutor
             {
                 VanguardCorpseLootClaimStore.Release(claim.ClaimId, "move_bridge_rejected", out _);
                 VanguardMainIntentScheduler.FinishPrimaryWindow(snapshot.BotProfileId, now, "Failed", "move_bridge_rejected:" + commandResult, plan.Summary, windowId);
+                _ = ReleaseLootQuiesce(record.BotOwner, snapshot.BotProfileId, now, leaseId, windowId, "move_bridge_rejected");
                 _ = VanguardCorpseLootOutcomeMemory.Record(snapshot.OwnerProfileId, snapshot.OperatorId, snapshot.BotProfileId, entry.CorpseId, now, "Failed", "move_bridge_rejected", false, VanguardCorpseLootApproachDoctrine.FailureCooldownSeconds, out _);
                 continue;
             }
@@ -415,6 +481,7 @@ internal static class VanguardCorpseLootApproachExecutor
                 VanguardReturnMovementCommandStore.ClearOwned(snapshot.BotProfileId, leaseId, now, "corpse_loot_command_identity_not_confirmed");
                 VanguardCorpseLootClaimStore.Release(claim.ClaimId, "command_identity_not_confirmed", out _);
                 VanguardMainIntentScheduler.FinishPrimaryWindow(snapshot.BotProfileId, now, "Failed", "move_bridge_identity_not_confirmed", plan.Summary, windowId);
+                _ = ReleaseLootQuiesce(record.BotOwner, snapshot.BotProfileId, now, leaseId, windowId, "command_identity_not_confirmed");
                 _ = VanguardCorpseLootOutcomeMemory.Record(snapshot.OwnerProfileId, snapshot.OperatorId, snapshot.BotProfileId, entry.CorpseId, now, "Failed", "command_identity_not_confirmed", false, VanguardCorpseLootApproachDoctrine.FailureCooldownSeconds, out _);
                 continue;
             }
@@ -451,6 +518,7 @@ internal static class VanguardCorpseLootApproachExecutor
                 VanguardReturnMovementCommandStore.ClearOwned(snapshot.BotProfileId, leaseId, now, "corpse_loot_scheduler_start_not_confirmed");
                 VanguardCorpseLootClaimStore.Release(claim.ClaimId, "scheduler_start_not_confirmed", out _);
                 VanguardMainIntentScheduler.FinishPrimaryWindow(snapshot.BotProfileId, now, "Failed", "scheduler_start_not_confirmed", lease.Summary, windowId);
+                _ = ReleaseLootQuiesce(record.BotOwner, snapshot.BotProfileId, now, leaseId, windowId, "scheduler_start_not_confirmed");
                 _ = VanguardCorpseLootOutcomeMemory.Record(snapshot.OwnerProfileId, snapshot.OperatorId, snapshot.BotProfileId, entry.CorpseId, now, "Failed", "scheduler_start_not_confirmed", false, VanguardCorpseLootApproachDoctrine.FailureCooldownSeconds, out _);
                 continue;
             }
@@ -608,7 +676,7 @@ internal static class VanguardCorpseLootApproachExecutor
                 lease.NoProgressUntilUtc = now + TimeSpan.FromSeconds(VanguardCorpseLootApproachDoctrine.NoProgressSeconds);
                 lease.PhysicalBlockedSinceUtc = DateTimeOffset.MinValue;
                 VanguardCorpseLootClaimStore.Refresh(lease.ClaimId, now);
-                VanguardReturnMovementCommandStore.RefreshLeaseWindow(lease.BotProfileId, lease.MaxUntilUtc, "corpse_loot_approach_progress");
+                VanguardReturnMovementCommandStore.RefreshLeaseWindow(lease.BotProfileId, lease.LeaseId, lease.MaxUntilUtc, "corpse_loot_approach_progress");
                 VanguardMainIntentScheduler.ReportPrimaryProgress(lease.BotProfileId, now, "corpse_loot_" + physical.ProgressKind, lease.Summary, lease.WindowId);
                 VanguardCorpseLootOperationalTelemetry.RecordApproachProgress(lease.BotProfileId, lease.CorpseId, corpseDistance);
                 LogThrottled("progress|" + lease.BotProfileId, now,
@@ -833,6 +901,8 @@ internal static class VanguardCorpseLootApproachExecutor
 
         if (VanguardMovementAuthorityDoctrine.IsStationaryMedicalAuthority(snapshot)) return "stationary_medical_authority";
         if (VanguardExecutionLeaseCoordinator.HasActiveLease(snapshot.BotProfileId)) return "active_medical_lease";
+        if (VanguardEffectiveMedicalExecutionPolicy.HasActionableSelfCareOpportunity(snapshot, now, out string actionableSelfCareReason))
+            return "actionable_self_medical_care:" + actionableSelfCareReason;
         if (VanguardSurgeryDebtService.HasDueDebt(snapshot, out string debtReason)) return "surgery_debt:" + debtReason;
         if (snapshot.Medical.Need.HasHeavyBleed || snapshot.Medical.Need.HasLightBleed || snapshot.Medical.Safety.ImmediateCombatBlock) return "urgent_medical_or_bleeding";
         if (snapshot.Medical.Actionability.AnyMedicineUsing || snapshot.Medical.Actionability.Reloading || snapshot.Medical.Actionability.GrenadeThrowing) return "hands_or_medical_busy";
@@ -840,6 +910,10 @@ internal static class VanguardCorpseLootApproachExecutor
         if (snapshot.Orbit.Active) return "orbit_authority_anomaly";
         return "none";
     }
+
+    private static string ReleaseLootQuiesce(BotOwner? botOwner, string botProfileId, DateTimeOffset now, string leaseId, string windowId, string reason)
+        => VanguardExternalAuthorityAdapter.ReleaseLootOrbitAuthorityQuiesce(
+            botOwner, botProfileId, now, reason, "CorpseLootApproach", leaseId, windowId);
 
     private static string FinishLease(ApproachLease lease, DateTimeOffset now, string outcome, string reason, bool failureCooldown, string snapshotSignature, bool finishScheduler, float? cooldownOverride = null)
     {
@@ -865,12 +939,19 @@ internal static class VanguardCorpseLootApproachExecutor
         {
             VanguardMainIntentScheduler.FinishPrimaryWindow(lease.BotProfileId, now, outcome, reason, lease.Summary, lease.WindowId);
         }
+        BotOwner? terminalBotOwner = null;
+        if (VanguardRaidOperatorRuntimeRegistry.TryGetRuntimeByBotProfileId(lease.BotProfileId, out var terminalRecord)
+            && terminalRecord.BotOwner != null && !terminalRecord.BotOwner.IsDead)
+        {
+            terminalBotOwner = terminalRecord.BotOwner;
+        }
+        string externalRelease = ReleaseLootQuiesce(terminalBotOwner, lease.BotProfileId, now, lease.LeaseId, lease.WindowId, "terminal:" + reason);
         VanguardCorpseLootOperationalTelemetry.RecordApproachTerminal(outcome, reason, lease.BotProfileId, lease.CorpseId);
         string eventName = completed
             ? "VANGUARD_CORPSE_LOOT_APPROACH_COMPLETED"
             : "VANGUARD_CORPSE_LOOT_APPROACH_ABORTED";
         VanguardClientDiagnosticsLog.Operational(StatusTag, () =>
-            $"{eventName} {lease.Summary}; outcome={Safe(outcome)}; reason={Safe(reason)}; commandCleanup={Safe(commandCleanup)}; snapshot={Safe(snapshotSignature)}; cooldown={cooldown:0.0}; arrivedOnly={Bool(completed)}; outcomeMemoryScope={Safe(outcomeMemoryScope)}; ownerSquadTerminalRemoved=true; terminalCommittedBeforeClaimRelease=false; interaction=false; transactions=false; equipmentMutation=false");
+            $"{eventName} {lease.Summary}; outcome={Safe(outcome)}; reason={Safe(reason)}; commandCleanup={Safe(commandCleanup)}; externalRelease={Safe(externalRelease)}; snapshot={Safe(snapshotSignature)}; cooldown={cooldown:0.0}; arrivedOnly={Bool(completed)}; outcomeMemoryScope={Safe(outcomeMemoryScope)}; ownerSquadTerminalRemoved=true; terminalCommittedBeforeClaimRelease=false; interaction=false; transactions=false; equipmentMutation=false");
         return "lease=" + Safe(lease.LeaseId) + ";outcome=" + Safe(outcome) + ";reason=" + Safe(reason) + ";command=" + Safe(commandCleanup);
     }
 

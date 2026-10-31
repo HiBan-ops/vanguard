@@ -1,10 +1,10 @@
 #if SPT_CLIENT
 using System;
 
-// Responsibility: Provides Post Loot Readiness Log Gate support for the post-loot recovery runtime.
-// Flow: The file encapsulates one bounded piece of the subsystem and exchanges explicit inputs/results with neighboring services instead of relying on hidden cross-system state.
-// Authority boundary: Authority remains with the owning subsystem and any external EFT/SPT/Fika/SAIN component explicitly referenced by its call path.
-// Invariant: Behavior stays scoped to the current profile/raid/process contract and preserves existing safety and compatibility boundaries.
+// Responsibility: Throttle repeated post-loot readiness and suspect-state diagnostic messages.
+// Flow: Log changed or forced snapshot signatures immediately and defer repeated signatures or suspect keys by cooldown.
+// Authority boundary: This gate updates diagnostic timestamps only; it does not control Operator readiness or recovery decisions.
+// Invariant: Identical snapshot or suspect diagnostics respect their respective cooldowns unless explicitly forced.
 namespace Vanguard.Client.Runtime.PostLoot;
 
 internal static class VanguardPostLootReadinessLogGate

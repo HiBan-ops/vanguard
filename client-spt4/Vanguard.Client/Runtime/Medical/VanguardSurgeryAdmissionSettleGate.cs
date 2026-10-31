@@ -4,10 +4,10 @@ using System.Collections.Generic;
 using Vanguard.Client.Diagnostics;
 using Vanguard.Client.Runtime.Decision;
 
-// Responsibility: Provides Surgery Admission Settle Gate support for the medical runtime.
-// Flow: The file encapsulates one bounded piece of the subsystem and exchanges explicit inputs/results with neighboring services instead of relying on hidden cross-system state.
-// Authority boundary: Authority remains with the owning subsystem and any external EFT/SPT/Fika/SAIN component explicitly referenced by its call path.
-// Invariant: Behavior stays scoped to the current profile/raid/process contract and preserves existing safety and compatibility boundaries.
+// Responsibility: Check transient hands stability before admitting an Operator into surgery preparation.
+// Flow: Observe brief hands-state settling while rejecting permanently invalid target or item conditions immediately.
+// Authority boundary: This pre-lease gate does not seize movement authority, launch cover search or record a failed treatment.
+// Invariant: Transient reload, grenade or medical hands states do not cause premature admission or a terminal failure.
 namespace Vanguard.Client.Runtime.Medical;
 
 /// <summary>
@@ -33,6 +33,27 @@ internal static class VanguardSurgeryAdmissionSettleGate
         LastLogAtByKey.Clear();
         VanguardClientDiagnosticsLog.Info(StatusTag,
             $"VANGUARD_SURGERY_ADMISSION_SETTLE_RESET reason={Safe(reason)}; preLease=true; movementMutation=false; medicalAuthorityMutation=false; failureOutcome=false; settleSeconds={SettleWindow.TotalSeconds:0.00}; tag={StatusTag}");
+    }
+
+    public static int ForgetRuntimePresence(string? botProfileId, string reason)
+    {
+        string key = Safe(botProfileId);
+        if (string.Equals(key, "none", StringComparison.OrdinalIgnoreCase))
+        {
+            return 0;
+        }
+
+        int removed = StateByBotProfile.Remove(key) ? 1 : 0;
+        foreach (string logKey in new List<string>(LastLogAtByKey.Keys))
+        {
+            if (logKey.IndexOf(key, StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                LastLogAtByKey.Remove(logKey);
+                removed++;
+            }
+        }
+
+        return removed;
     }
 
     public static bool CanAdmit(OperatorDecisionSnapshot snapshot, DateTimeOffset now, out string reason)

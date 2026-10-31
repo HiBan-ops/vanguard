@@ -1,9 +1,9 @@
 using SPTarkov.Server.Core.Models.Spt.Mod;
 
-// Responsibility: Provides Mod Metadata support for the Vanguard server.
-// Flow: The file encapsulates one bounded piece of the subsystem and exchanges explicit inputs/results with neighboring services instead of relying on hidden cross-system state.
-// Authority boundary: Authority remains with the owning subsystem and any external EFT/SPT/Fika/SAIN component explicitly referenced by its call path.
-// Invariant: Behavior stays scoped to the current profile/raid/process contract and preserves existing safety and compatibility boundaries.
+// Responsibility: Declare SPT server mod identity, release compatibility, dependency and incompatibility metadata.
+// Flow: Provide the mod GUID, semantic version, supported SPT range, incompatible mod IDs, MoreBotsAPI requirement and license.
+// Authority boundary: SPT mod loading consumes these declarations; this record does not modify server gameplay or persisted profiles.
+// Invariant: Semantic version, SPT compatibility and dependency constraints remain explicit loader-facing contracts.
 namespace Vanguard.Server;
 
 public sealed record ModMetadata : AbstractModMetadata

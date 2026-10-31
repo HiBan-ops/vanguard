@@ -39,9 +39,20 @@ internal static class VanguardOperatorAuthorityLeaseController
         VanguardClientDiagnosticsLog.Info(StatusTag, $"VANGUARD_AUTHORITY_RESET reason={Safe(reason)}; authority=Vanguard; orbitIsTool=true; medicalBeatsOrbit=true; goCoverOnly=true; combatAwareGate=true; orbitLayerIdleQuiesce=true; coverArrivalGrant=true; externalAdapterTag={ExternalAuthorityAdapterStatusTag}; externalMovementTag={ExternalMovementPreemptStatusTag}; combatGateTag={CombatAwareGateStatusTag}; orbitLayerTag={OrbitLayerQuiesceStatusTag}; coverArrivalTag={CoverArrivalGrantStatusTag}; hardOrbitExitTag={HardOrbitExitStatusTag}; tag={StatusTag}");
     }
 
+    public static string ForgetRuntimePresence(string? botProfileId, string reason)
+    {
+        string key = Normalize(botProfileId);
+        bool authorityRemoved = StateByBotProfileId.Remove(key);
+        string external = VanguardExternalAuthorityAdapter.ForgetRuntimePresence(key, "authority_runtime_presence_lost:" + Safe(reason));
+        string summary = "authorityRemoved=" + Bool(authorityRemoved) + ";" + external;
+        VanguardClientDiagnosticsLog.Info(StatusTag,
+            $"VANGUARD_AUTHORITY_RUNTIME_PRESENCE_FORGOTTEN botProfile={Safe(key)}; reason={Safe(reason)}; {summary}; handback=false; tag={StatusTag}");
+        return summary;
+    }
+
     public static string StartOrRefreshMedical(VanguardExecutionLeaseState lease, BotOwner? botOwner, OperatorDecisionSnapshot snapshot, DateTimeOffset now, string reason)
     {
-        if (lease == null || string.IsNullOrWhiteSpace(lease.BotProfileId))
+        if (lease == null || string.IsNullOrWhiteSpace(lease.BotProfileId) || string.IsNullOrWhiteSpace(lease.LeaseId))
         {
             return "authority=missing_lease";
         }
@@ -49,6 +60,7 @@ internal static class VanguardOperatorAuthorityLeaseController
         string key = Normalize(lease.BotProfileId);
         if (!StateByBotProfileId.TryGetValue(key, out var state)
             || state.ExpiresAtUtc <= now
+            || !string.Equals(state.OwnerLeaseId, lease.LeaseId, StringComparison.OrdinalIgnoreCase)
             || !string.Equals(Normalize(state.TargetPart), Normalize(lease.TargetPart), StringComparison.OrdinalIgnoreCase)
             || !string.Equals(Normalize(state.ItemTemplateId), Normalize(lease.ItemTemplateId), StringComparison.OrdinalIgnoreCase))
         {
@@ -56,6 +68,7 @@ internal static class VanguardOperatorAuthorityLeaseController
             {
                 OperatorId = lease.OperatorId,
                 BotProfileId = lease.BotProfileId,
+                OwnerLeaseId = lease.LeaseId,
                 Owner = "VanguardMedical",
                 Reason = reason,
                 TargetPart = lease.TargetPart,
@@ -78,7 +91,7 @@ internal static class VanguardOperatorAuthorityLeaseController
         {
             state.LastSuppressionAtUtc = now;
             long suppressStarted = VanguardRuntimePerformanceGuard.Begin();
-            var suppressionResult = SuppressExternalSystems(botOwner, snapshot, now, state.Reason);
+            var suppressionResult = SuppressExternalSystems(botOwner, snapshot, now, state.Reason, state.OwnerLeaseId);
             VanguardRuntimePerformanceGuard.End("MedicalAuthoritySuppressExternal", suppressStarted);
             suppressionOutcome = suppressionResult.Outcome;
             suppression = suppressionResult.CompactSummary;
@@ -119,7 +132,25 @@ internal static class VanguardOperatorAuthorityLeaseController
         return "authority=VanguardMedical;externalPermission=" + requestedPermission + ";orbit=MedicalPreemptRequested;loot=MedicalPreemptRequested;expiresIn=" + Math.Max(0.0d, (state.ExpiresAtUtc - now).TotalSeconds).ToString("0.00", System.Globalization.CultureInfo.InvariantCulture) + ";" + suppression;
     }
 
-    public static bool HasActiveMedicalAuthority(string? botProfileId, string? targetPart, string? itemTemplateId, DateTimeOffset now, out string summary)
+    // Only the active, unexpired authority receipt may renew Medical physical suppression.
+    // Legacy hard-procedure callers do not all carry a lease parameter; never invent one.
+    public static bool TryGetActiveMedicalLeaseIdentity(string? botProfileId, DateTimeOffset now, out string ownerLeaseId)
+    {
+        ownerLeaseId = string.Empty;
+        if (string.IsNullOrWhiteSpace(botProfileId)
+            || !StateByBotProfileId.TryGetValue(Normalize(botProfileId), out var state)
+            || state.ExpiresAtUtc <= now
+            || !string.Equals(state.Owner, "VanguardMedical", StringComparison.Ordinal)
+            || string.IsNullOrWhiteSpace(state.OwnerLeaseId))
+        {
+            return false;
+        }
+
+        ownerLeaseId = state.OwnerLeaseId;
+        return true;
+    }
+
+    public static bool HasActiveMedicalAuthority(string? botProfileId, string? targetPart, string? itemTemplateId, DateTimeOffset now, out string summary, string? ownerLeaseId = null)
     {
         string key = Normalize(botProfileId);
         summary = "authority=none";
@@ -128,7 +159,8 @@ internal static class VanguardOperatorAuthorityLeaseController
             return false;
         }
 
-        if (!string.Equals(Normalize(state.TargetPart), Normalize(targetPart), StringComparison.OrdinalIgnoreCase)
+        if ((!string.IsNullOrWhiteSpace(ownerLeaseId) && !string.Equals(state.OwnerLeaseId, ownerLeaseId, StringComparison.OrdinalIgnoreCase))
+            || !string.Equals(Normalize(state.TargetPart), Normalize(targetPart), StringComparison.OrdinalIgnoreCase)
             || !string.Equals(Normalize(state.ItemTemplateId), Normalize(itemTemplateId), StringComparison.OrdinalIgnoreCase))
         {
             summary = "authority=stale_target";
@@ -147,23 +179,28 @@ internal static class VanguardOperatorAuthorityLeaseController
         }
 
         string key = Normalize(lease.BotProfileId);
-        if (!StateByBotProfileId.Remove(key))
+        if (!StateByBotProfileId.TryGetValue(key, out var state)
+            || string.IsNullOrWhiteSpace(lease.LeaseId)
+            || !string.Equals(state.OwnerLeaseId, lease.LeaseId, StringComparison.OrdinalIgnoreCase))
         {
+            LogThrottled(key + "|stale_medical_release", now,
+                $"VANGUARD_AUTHORITY_LEASE_RELEASE_REJECTED botProfile={key}; lease={Safe(lease.LeaseId)}; activeLease={Safe(state?.OwnerLeaseId)}; reason={Safe(reason)}; mutation=false; tag={StatusTag}");
             return;
         }
 
-        string release = ReleaseExternalSystems(botOwner, lease.BotProfileId, now, reason);
+        StateByBotProfileId.Remove(key);
+        string release = ReleaseExternalSystems(botOwner, lease.BotProfileId, now, reason, state.OwnerLeaseId);
         LogThrottled(key + "|release|" + Safe(reason), now, $"VANGUARD_AUTHORITY_LEASE_RELEASED botProfile={key}; owner=VanguardMedical; reason={Safe(reason)}; {release}; nextOwner=VanguardSchedulerDecision; orbitPermission=MayResumeIfSchedulerAllows; goCoverOnly=true; externalAdapterTag={ExternalAuthorityAdapterStatusTag}; hardOrbitExitTag={HardOrbitExitStatusTag}; tag={StatusTag}");
     }
 
-    private static VanguardExternalPreemptResult SuppressExternalSystems(BotOwner botOwner, OperatorDecisionSnapshot snapshot, DateTimeOffset now, string reason)
+    private static VanguardExternalPreemptResult SuppressExternalSystems(BotOwner botOwner, OperatorDecisionSnapshot snapshot, DateTimeOffset now, string reason, string ownerLeaseId)
     {
-        return VanguardExternalAuthorityAdapter.RequestMedicalPreempt(botOwner, snapshot, "authority_lease:" + Safe(reason), TimeSpan.FromSeconds(10.00d), now);
+        return VanguardExternalAuthorityAdapter.RequestMedicalPreempt(botOwner, snapshot, "authority_lease:" + Safe(reason), TimeSpan.FromSeconds(10.00d), now, ownerLeaseId: ownerLeaseId);
     }
 
-    private static string ReleaseExternalSystems(BotOwner? botOwner, string? botProfileId, DateTimeOffset now, string reason)
+    private static string ReleaseExternalSystems(BotOwner? botOwner, string? botProfileId, DateTimeOffset now, string reason, string ownerLeaseId)
     {
-        return VanguardExternalAuthorityAdapter.ReleaseMedicalPreempt(botOwner, botProfileId, now, "authority_release:" + Safe(reason));
+        return VanguardExternalAuthorityAdapter.ReleaseMedicalPreempt(botOwner, botProfileId, now, "authority_release:" + Safe(reason), ownerLeaseId: ownerLeaseId);
     }
 
     private static void LogThrottled(string key, DateTimeOffset now, string message)
@@ -250,6 +287,7 @@ internal static class VanguardOperatorAuthorityLeaseController
         public string OperatorId = "none";
         public string BotProfileId = "none";
         public string Owner = "VanguardMedical";
+        public string OwnerLeaseId = string.Empty;
         public string Reason = "none";
         public string TargetPart = "none";
         public string ItemTemplateId = "none";

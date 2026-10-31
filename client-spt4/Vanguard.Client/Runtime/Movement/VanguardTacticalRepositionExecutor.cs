@@ -49,6 +49,25 @@ internal static class VanguardTacticalRepositionExecutor
             $"VANGUARD_TACTICAL_REPOSITION_RESET reason={Safe(reason)}; active=0; cooldowns=cleared; doctrine=environment_aware_sector_anchor_apply_once; tag={StatusTag}; clientBuildTag={ClientBuildStatusTag}; tuningTag={TacticalTuningStatusTag}; solverTag={VanguardTacticalPlacementSolver.StatusTag}; moveBridgeTag={VanguardReturnMovementCommandStore.StatusTag}");
     }
 
+    public static string ForgetRuntimePresence(string? botProfileId, string reason)
+    {
+        string key = Safe(botProfileId);
+        bool activeRemoved;
+        lock (Sync)
+        {
+            activeRemoved = ActiveByBotProfileId.Remove(key);
+            CooldownByBotProfileId.Remove(key);
+            SuccessCooldownByBotProfileId.Remove(key);
+            foreach (string logKey in LastLogByKey.Keys.Where(value => value.IndexOf(key, StringComparison.OrdinalIgnoreCase) >= 0).ToArray())
+            {
+                LastLogByKey.Remove(logKey);
+            }
+        }
+
+        return "tacticalRepositionForgotten=true;activeRemoved=" + Bool(activeRemoved)
+            + ";cooldownRetained=false;normalFinish=false;reason=" + Safe(reason);
+    }
+
     public static void Tick()
     {
         DateTimeOffset now = DateTimeOffset.UtcNow;
@@ -62,21 +81,15 @@ internal static class VanguardTacticalRepositionExecutor
         {
             bootLogged = true;
             VanguardClientDiagnosticsLog.Info(StatusTag,
-                $"VANGUARD_TACTICAL_REPOSITION_BOOT enabled={Bool(VanguardMovementAuthorityDoctrine.TacticalRepositionActiveEnabled)}; scope=inside_bubble_environment_aware_sector_reposition; backend=BigBrain_GoToSomePointData; applyPolicy=apply_once_no_tick_reapply; excludes=directThreat_medical_hardReturn_orbit_loot_existingPath; minDelta={VanguardMovementAuthorityDoctrine.TacticalRepositionMinDeltaMeters:0.0}; cooldown={VanguardMovementAuthorityDoctrine.TacticalRepositionCooldownSeconds:0.0}; max={VanguardMovementAuthorityDoctrine.TacticalRepositionMaxDurationSeconds:0.0}; successCooldown={VanguardMovementAuthorityDoctrine.TacticalRepositionSuccessCooldownSeconds:0.0}; squadPressureMeters={VanguardMovementAuthorityDoctrine.TacticalSquadPressureBlockMeters:0.0}; botPathPolicy=env_capped; tag={StatusTag}; clientBuildTag={ClientBuildStatusTag}; tuningTag={TacticalTuningStatusTag}; solverTag={VanguardTacticalPlacementSolver.StatusTag}; moveBridgeTag={VanguardReturnMovementCommandStore.StatusTag}; build={VanguardBuildVersion.BuildLabel}");
+                $"VANGUARD_TACTICAL_REPOSITION_BOOT enabled=player_scoped_owner_profile_id; movementF12Scope=PLAYER_SCOPED; scope=inside_bubble_environment_aware_sector_reposition; backend=BigBrain_GoToSomePointData; applyPolicy=apply_once_no_tick_reapply; excludes=directThreat_medical_hardReturn_orbit_loot_existingPath; botPathPolicy=env_capped; tag={StatusTag}; clientBuildTag={ClientBuildStatusTag}; tuningTag={TacticalTuningStatusTag}; solverTag={VanguardTacticalPlacementSolver.StatusTag}; moveBridgeTag={VanguardReturnMovementCommandStore.StatusTag}; build={VanguardBuildVersion.BuildLabel}");
         }
 
         var snapshots = VanguardOperatorDecisionSnapshotService.GetLatestSnapshots();
         TickActiveLeases(snapshots, now);
-        if (!VanguardMovementAuthorityDoctrine.TacticalRepositionActiveEnabled)
-        {
-            return;
-        }
-
         if (VanguardRuntimeFrameBudgetGuard.ShouldRunOptional(
             "TacticalRepositionPlanning",
             now,
-            TimeSpan.FromSeconds(1.5d),
-            out _))
+            TimeSpan.FromSeconds(1.5d)))
         {
             TryStartOneLease(snapshots, now);
         }
@@ -96,7 +109,8 @@ internal static class VanguardTacticalRepositionExecutor
                 continue;
             }
 
-            if (!IsTacticalContract(snapshot))
+            var ownerPolicy = VanguardMovementAuthorityDoctrine.ForOwner(snapshot.OwnerProfileId);
+            if (!ownerPolicy.TacticalRepositionActiveEnabled || !IsTacticalContract(snapshot))
             {
                 continue;
             }
@@ -166,7 +180,7 @@ internal static class VanguardTacticalRepositionExecutor
             Vector3 botPosition = ResolveBotPosition(record.BotOwner);
             if (!VanguardTacticalPlacementSolver.TryResolve(snapshot, botPosition, now, out var plan))
             {
-                SetCooldown(snapshot.BotProfileId, now, VanguardMovementAuthorityDoctrine.TacticalRepositionCooldownSeconds);
+                SetCooldown(snapshot.BotProfileId, now, ownerPolicy.TacticalRepositionCooldownSeconds);
                 VanguardMainIntentScheduler.FinishPrimaryWindow(snapshot.BotProfileId, now, "Failed", "tactical_anchor_failed:" + plan.Reason, plan.Summary, windowId);
                 VanguardClientDiagnosticsLog.Info(StatusTag,
                     $"VANGUARD_TACTICAL_ANCHOR_REJECTED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; reason={Safe(plan.Reason)}; env={Safe(snapshot.SquadCohesion.TacticalEnvironmentKind)}; currentSector={Safe(snapshot.SquadCohesion.Sector)}; topology={Safe(snapshot.SquadCohesion.SectorTopologyReason)}; window={Safe(windowId)}; tuningTag={TacticalTuningStatusTag}; tag={StatusTag}; solverTag={VanguardTacticalPlacementSolver.StatusTag}");
@@ -191,7 +205,7 @@ internal static class VanguardTacticalRepositionExecutor
                 out var commandResult);
             if (!issued)
             {
-                SetCooldown(snapshot.BotProfileId, now, VanguardMovementAuthorityDoctrine.TacticalRepositionCooldownSeconds);
+                SetCooldown(snapshot.BotProfileId, now, ownerPolicy.TacticalRepositionCooldownSeconds);
                 VanguardMainIntentScheduler.FinishPrimaryWindow(snapshot.BotProfileId, now, "Failed", "move_bridge_rejected:" + commandResult, plan.Summary, windowId);
                 VanguardClientDiagnosticsLog.Info(StatusTag,
                     $"VANGUARD_TACTICAL_COMMAND_REJECTED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; command={Safe(commandResult)}; plan={Safe(plan.Summary)}; window={Safe(windowId)}; tuningTag={TacticalTuningStatusTag}; tag={StatusTag}; moveBridgeTag={VanguardReturnMovementCommandStore.StatusTag}");
@@ -204,6 +218,7 @@ internal static class VanguardTacticalRepositionExecutor
                 WindowId = windowId,
                 OperatorId = snapshot.OperatorId,
                 BotProfileId = snapshot.BotProfileId,
+                OwnerProfileId = snapshot.OwnerProfileId,
                 DesiredSector = plan.DesiredSector,
                 EnvironmentKind = plan.EnvironmentKind,
                 Anchor = plan.Anchor,
@@ -211,7 +226,7 @@ internal static class VanguardTacticalRepositionExecutor
                 StartedAtUtc = now,
                 MinUntilUtc = now + TimeSpan.FromSeconds(2.25d),
                 MaxUntilUtc = maxUntil,
-                NoProgressUntilUtc = now + TimeSpan.FromSeconds(VanguardMovementAuthorityDoctrine.TacticalRepositionNoProgressSeconds),
+                NoProgressUntilUtc = now + TimeSpan.FromSeconds(ownerPolicy.TacticalRepositionNoProgressSeconds),
                 LastProgressAtUtc = now,
                 InitialAnchorDistance = HorizontalDistance(botPosition, plan.Anchor),
                 LastAnchorDistance = HorizontalDistance(botPosition, plan.Anchor),
@@ -252,6 +267,8 @@ internal static class VanguardTacticalRepositionExecutor
                 FinishLease(lease, now, "Failed", "snapshot_missing", true, "none");
                 continue;
             }
+
+            var ownerPolicy = VanguardMovementAuthorityDoctrine.ForOwner(snapshot.OwnerProfileId);
 
             if (!VanguardRaidOperatorRuntimeRegistry.TryGetRuntimeByBotProfileId(lease.BotProfileId, out var record) || record.BotOwner == null || record.BotOwner.IsDead)
             {
@@ -297,7 +314,7 @@ internal static class VanguardTacticalRepositionExecutor
                     lease.LastAnchorDistance = Math.Min(lease.LastAnchorDistance, anchorDistance);
                 }
                 lease.LastProgressAtUtc = now;
-                lease.NoProgressUntilUtc = now + TimeSpan.FromSeconds(VanguardMovementAuthorityDoctrine.TacticalRepositionNoProgressSeconds);
+                lease.NoProgressUntilUtc = now + TimeSpan.FromSeconds(ownerPolicy.TacticalRepositionNoProgressSeconds);
                 lease.PhysicalBlockedSinceUtc = DateTimeOffset.MinValue;
                 lease.LastWorldPosition = botPosition;
                 lease.LastWorldSampleAtUtc = now;
@@ -328,7 +345,7 @@ internal static class VanguardTacticalRepositionExecutor
                         lease.PhysicalBlockedSinceUtc = DateTimeOffset.MinValue;
                         lease.LastWorldPosition = botPosition;
                         lease.LastWorldSampleAtUtc = now;
-                        lease.NoProgressUntilUtc = now + TimeSpan.FromSeconds(VanguardMovementAuthorityDoctrine.TacticalRepositionNoProgressSeconds);
+                        lease.NoProgressUntilUtc = now + TimeSpan.FromSeconds(ownerPolicy.TacticalRepositionNoProgressSeconds);
                         lock (Sync)
                         {
                             ActiveByBotProfileId[lease.BotProfileId] = lease;
@@ -388,12 +405,14 @@ internal static class VanguardTacticalRepositionExecutor
             return false;
         }
 
-        return snapshot.SquadCohesion.OperatorDistanceToOwner <= Math.Min(VanguardMovementAuthorityDoctrine.ActionRallyAcceptMeters, 34.0f);
+        var ownerPolicy = VanguardMovementAuthorityDoctrine.ForOwner(snapshot.OwnerProfileId);
+        return snapshot.SquadCohesion.OperatorDistanceToOwner <= Math.Min(ownerPolicy.ActionRallyAcceptMeters, 34.0f);
     }
 
     private static bool HasNearbySquadCombatPressure(IReadOnlyList<OperatorDecisionSnapshot> snapshots, OperatorDecisionSnapshot candidate, out string reason)
     {
         reason = "none";
+        var ownerPolicy = VanguardMovementAuthorityDoctrine.ForOwner(candidate.OwnerProfileId);
         if (snapshots == null || candidate == null)
         {
             return false;
@@ -416,7 +435,7 @@ internal static class VanguardTacticalRepositionExecutor
                 continue;
             }
 
-            if (other.SquadCohesion.OperatorDistanceToOwner > VanguardMovementAuthorityDoctrine.TacticalSquadPressureBlockMeters)
+            if (other.SquadCohesion.OperatorDistanceToOwner > ownerPolicy.TacticalSquadPressureBlockMeters)
             {
                 continue;
             }
@@ -502,9 +521,10 @@ internal static class VanguardTacticalRepositionExecutor
         }
 
         VanguardReturnMovementCommandStore.ClearOwned(lease.BotProfileId, lease.LeaseId, lease.StartedAtUtc, "tactical_reposition_finished:" + reason);
+        var ownerPolicy = VanguardMovementAuthorityDoctrine.ForOwner(lease.OwnerProfileId);
         float cooldownSeconds = failureCooldown
-            ? VanguardMovementAuthorityDoctrine.TacticalRepositionCooldownSeconds
-            : VanguardMovementAuthorityDoctrine.TacticalRepositionSuccessCooldownSeconds;
+            ? ownerPolicy.TacticalRepositionCooldownSeconds
+            : ownerPolicy.TacticalRepositionSuccessCooldownSeconds;
         SetCooldown(lease.BotProfileId, now, cooldownSeconds);
         if (!failureCooldown)
         {
@@ -579,6 +599,7 @@ internal static class VanguardTacticalRepositionExecutor
         public string WindowId;
         public string OperatorId;
         public string BotProfileId;
+        public string OwnerProfileId;
         public string DesiredSector;
         public string EnvironmentKind;
         public Vector3 Anchor;
@@ -601,6 +622,7 @@ internal static class VanguardTacticalRepositionExecutor
             + ";window=" + Safe(WindowId)
             + ";operator=" + Safe(OperatorId)
             + ";botProfile=" + Safe(BotProfileId)
+            + ";owner=" + Safe(OwnerProfileId)
             + ";sector=" + Safe(DesiredSector)
             + ";env=" + Safe(EnvironmentKind)
             + ";anchor=" + Anchor.x.ToString("0.0", CultureInfo.InvariantCulture) + "," + Anchor.y.ToString("0.0", CultureInfo.InvariantCulture) + "," + Anchor.z.ToString("0.0", CultureInfo.InvariantCulture)

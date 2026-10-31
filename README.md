@@ -1,4 +1,4 @@
-﻿# Vanguard
+# Vanguard
 
 > **Vanguard is not a faction. It is a network.**
 
@@ -12,7 +12,7 @@ You build a roster, prepare Operators Off-Raid, deploy with them, survive togeth
 
 Vanguard is designed around Operators as independent combat entities rather than disposable followers waiting for constant player input.
 
-**Current release:** Vanguard **0.8.1** for **SPT 4.0.13**.
+**Vanguard 0.8.7** targets **SPT 4.0.13**. See the compatibility matrix below before installing or updating dependencies.
 
 ## What Vanguard adds
 
@@ -58,7 +58,7 @@ Opening an Operator inventory creates a persistent Off-Raid authority context ra
 
 ### Main Menu squad preview
 
-Vanguard 0.8.1 can render the selected squad directly in the main-menu presentation using EFT's native character rendering path.
+The selected squad can be rendered directly in the main-menu presentation using EFT's native character rendering path.
 
 The preview is a **read-only projection** of persistent Operator truth:
 
@@ -71,8 +71,6 @@ The preview is a **read-only projection** of persistent Operator truth:
 Both the Vanilla main menu and **Menu Overhaul** are supported. Menu Overhaul retains ownership of its PMC, camera, lights and viewport; Vanguard owns only its Operator presentation and never takes ownership of the Menu Overhaul PMC.
 
 During raid loading the selected squad can remain visible until the effective BattleUI boundary, where Vanguard-owned preview bodies/cameras/lights are cleaned up.
-
-**0.8.1 hotfix:** entering the EFT Hideout now acquires the same screen-lifetime presentation suppression used by weapon-edit/build flows, so Squad Preview Operators do not remain rendered over the Hideout view. Leaving the Hideout releases the lease and restores normal menu eligibility.
 
 ### Main Menu placement profiles
 
@@ -101,7 +99,7 @@ Each Operator currently starts from a private clone of the loaded SAIN `Normal` 
 
 Operators can perform configurable opportunistic looting for useful equipment, weapons, compatible ammunition, medical supplies and selected valuables.
 
-Combat, medical urgency and squad cohesion remain higher priorities than opportunistic loot.
+Looting is opportunistic and requires an admissible safety window. Operators can temporarily leave a Tactical Authoring HOLD or interrupt normal Cohesion movement to loot, then return to the applicable HOLD while the player remains inside the authored zone, or resume Cohesion outside it. Combat authority, dangerous grenades and urgent medical needs can interrupt looting.
 
 ### Tactical Editor
 
@@ -114,9 +112,9 @@ Basic workflow:
 - **Ctrl+Insert** — place a tactical slot at the player's position; current look direction becomes the watch direction;
 - **Ctrl+S** — save the authored layout.
 
-Saved layouts are reused across raids. With automatic authored-zone occupancy enabled, Vanguard reloads the saved map and activates the relevant authored zone when its owner enters it. Persisted layouts are consumed by the active raid authority in standalone/local play, Fika direct-host play and Fika Headless. Author identity remains part of the live Tactical state, so another player's authored zone does not take control of your Operators.
+Saved layouts are reused across raids. With automatic authored-zone occupancy enabled, entering one of your saved zones activates its available HOLD slots automatically, **without opening the Tactical Editor**. While the player remains in that zone, HOLD slots take precedence over ordinary Travel/Cohesion positioning, subject to safety, medical, loot and combat arbitration. Leaving the zone releases its HOLD occupancy and returns movement to Cohesion when no higher authority is active. Persisted layouts are consumed by the active raid authority in standalone/local play, Fika direct-host play and Fika Headless. Author identity remains part of the live Tactical state, so another player's authored zone does not take control of your Operators.
 
-Authored slots are tactical assignments, not RTS-style direct orders. Combat, grenade safety, medical needs and higher-priority authorities can interrupt an assignment; Vanguard can return the Operator when it becomes valid again.
+Authored slots are tactical positioning assignments, not RTS-style direct orders. Operators may temporarily interrupt a HOLD for a dangerous grenade, admissible medical care or safe looting. During active combat SAIN retains combat movement authority; ordinary HOLD, looting and Cohesion movement do not override it. When combat ends, movement is reconsidered against the player's current authored-zone occupancy.
 
 Useful editing controls:
 
@@ -141,7 +139,7 @@ Fika is required only for Fika topologies. The exact versions qualified for the 
 
 ## Requirements
 
-Vanguard 0.8.1 targets **SPT 4.0.13**. The shipping release was qualified against this exact reference stack:
+Vanguard 0.8.7 targets **SPT 4.0.13**. The following is the reference compatibility stack inherited from the validated development baseline; it is not a guarantee of support for untested later dependency versions:
 
 | Component | Qualified version | Status |
 |---|---:|---|
@@ -156,7 +154,7 @@ Vanguard 0.8.1 targets **SPT 4.0.13**. The shipping release was qualified agains
 | Looting Bots | `1.7.0` | Optional / recommended and tested |
 | Menu Overhaul | `1.2.2` | Optional / supported and tested |
 
-These are the **qualified shipping-reference versions**, not a promise that every newer upstream release is automatically compatible. When updating a dependency beyond this matrix, preserve a rollback copy and re-check Vanguard behavior.
+These are the **reference versions used for compatibility work**. The final packaged build and release integrity must be checked before publication. Newer versions of these dependencies are not automatically supported; keep rollback copies when changing your mod stack.
 
 Vanguard currently reserves MoreBotsAPI role IDs:
 
@@ -169,13 +167,15 @@ Vanguard owns the persistent player-allied Operator squad domain. Mods that also
 
 Compatibility is classified by authority and runtime evidence rather than by “it starts without crashing” alone.
 
-Menu Overhaul coexistence remains supported in 0.8.1, including shared main-menu presentation without Vanguard taking ownership of Menu Overhaul's PMC/camera/lights. Career Log button coexistence continues to use placement profiles.
+Menu Overhaul coexistence is supported, including shared main-menu presentation without Vanguard taking ownership of Menu Overhaul's PMC/camera/lights. Career Log button coexistence continues to use placement profiles.
 
 The release page may carry additional compatibility notes; the exact core shipping-reference versions are frozen in this README.
 
 ## Release status
 
-Vanguard remains an **Alpha/Beta field-validation release**. The goal is to expose the persistent-Operator architecture to more machines, mod stacks and edge cases while keeping the core behavior stable enough to produce useful reports.
+**Vanguard 0.8.7 is currently a pre-release source candidate, not an approved public distribution.** The installation layout below describes the intended official archive; it does not certify that a publishable archive exists. Final release requires source-to-binary provenance, independent package integrity checks, a consistent installed client/server version, runtime qualification and resolution of the embedded-artwork redistribution gate recorded in `MANIFEST.txt`.
+
+The stabilization goal is to expose the persistent-Operator architecture to broader field validation only after those release requirements have been met, while keeping the core behavior stable enough to produce useful reports.
 
 Priority during stabilization:
 
@@ -223,9 +223,13 @@ Use **Operational** for normal play, **Diagnostic** for support/reproduction, an
 
 ## Installation
 
-Use the release archive and instructions published for the selected topology. The public package is intended to be installed from the SPT root rather than by manually distributing individual Vanguard binaries.
+1. Back up your SPT installation and existing Vanguard data before upgrading. Do not delete persistent Operator data during an ordinary update.
+2. Install the required compatible SPT and AI dependencies listed above. Fika components are required only for the corresponding Fika topology.
+3. Once a qualified public release has been issued, extract the official `Vanguard-0.8.7-SPT-4.0.13.zip` archive at the installation root containing the **`BepInEx`** and **`SPT`** folders (for example, `E:\Games\SPT\`). The ZIP contains those two folders directly at its root. Merge both folders into the existing installation; do not extract into a new version-named subdirectory. The `SPT` folder is intentional and must be preserved.
+4. Verify `BepInEx/plugins/Vanguard.Client/Vanguard.Client.dll`, `BepInEx/patchers/Vanguard.MoreBotsPrePatch/Vanguard.MoreBotsPrePatch.dll` and `SPT/user/mods/Vanguard.Server/Vanguard.Server.dll` relative to that outer installation root. Launch the SPT server and game and review Vanguard startup health diagnostics.
+5. For updates and removal, preserve your persistent Operator data and configuration backups; removing the three Vanguard assemblies is not equivalent to deleting saved Operator records.
 
-Release-specific install/update/removal paths are finalized from the shipping package itself.
+The actual shipping archive layout, file hashes and final upgrade/removal instructions must be verified against the frozen public release package. Do not install development-only handoffs or `SCOPED_SOURCE` patch archives as public releases.
 
 ## Roadmap
 
@@ -233,7 +237,7 @@ Longer-term work is intended to deepen the identity of persistent Operators rath
 
 Planned directions include richer relationships and loyalty/respect, contract types and durations, payment consequences, dynamic Operator events, emergent encounters, deeper careers, expanded Off-Raid management and additional tactical knowledge systems.
 
-Future contract concepts include one-shot companions that do not remain in the roster, time-based contracts driven by server time, and Operators who may later propose work, extend/decline contracts or react to survival history and treatment. These are post-0.8.0 directions, not current shipping behavior.
+Future contract concepts include one-shot companions that do not remain in the roster, time-based contracts driven by server time, and Operators who may later propose work, extend/decline contracts or react to survival history and treatment. These are future directions, not current shipping behavior.
 
 ### Persistent Operators beyond the raid
 
@@ -250,9 +254,25 @@ These are post-release roadmap goals with no committed delivery date.
 
 ## Building from source
 
-Build Vanguard 0.8.1 against an **SPT 4.0.13** installation. Copy `client-spt4/Directory.Build.props.example` to `client-spt4/Directory.Build.props`, set `SptRoot`, and keep that local file out of commits. The three shipping projects share their release identity through `build/Vanguard.Version.props`.
+The repository contains three independently buildable C# projects. Build Vanguard **0.8.7** with the **.NET 9 SDK**, using an **SPT 4.0.13** installation and the compatible dependencies listed above. The client and pre-patch projects reference local SPT/EFT, BepInEx, BigBrain and MoreBotsAPI assemblies; those binaries are **not included in this source repository**. The server project restores its declared NuGet dependencies.
 
-Internal development KBs, handoffs, runtime evidence and private project artifacts are intentionally excluded from the public repository.
+On Windows, start in the repository root:
+
+```powershell
+Copy-Item client-spt4/Directory.Build.props.example client-spt4/Directory.Build.props
+```
+
+Edit `client-spt4/Directory.Build.props` and point `SptRoot` to your own SPT installation. Check that the referenced game, BepInEx, BigBrain and MoreBotsAPI DLL paths exist. This file is machine-specific and excluded by `.gitignore`; **do not commit it**.
+
+Build the shipping targets separately (there is no requirement to build the client's alternative `net9.0` target):
+
+```powershell
+dotnet build client-spt4/Vanguard.Client/Vanguard.Client.csproj -c Release -f netstandard2.1 --nologo
+dotnet build server-spt4/Vanguard.Server/Vanguard.Server.csproj -c Release -f net9.0 --nologo
+dotnet build client-spt4/Vanguard.MoreBotsPrePatch/Vanguard.MoreBotsPrePatch.csproj -c Release -f netstandard2.1 --nologo
+```
+
+The three projects import `build/Vanguard.Version.props` for their shared semantic version. The build outputs are `Vanguard.Client.dll`, `Vanguard.Server.dll` and `Vanguard.MoreBotsPrePatch.dll`; see the installation section for their eventual locations in SPT. A successful local compilation **does not establish** Fika/SAIN/runtime compatibility or certify a release archive. Public release packages require a frozen source snapshot, matching DLL SHA-256 values and separate validation of the installation layout.
 
 ## AI-assisted development
 
@@ -263,3 +283,5 @@ AI tools have been used throughout Vanguard development, especially to ensure pr
 Vanguard is published under the **Mozilla Public License 2.0 (MPL-2.0)**.
 
 SPT, EFT and Vanguard's external dependencies/integrations remain the property of their respective authors and are governed by their own licenses and terms. Required third-party notices will be included with the public source/release where applicable.
+
+The client project embeds 14 Operator portrait JPEGs and 2 interface PNGs. `MANIFEST.txt` records the exact source paths and SHA-256 values for all 16. This is a file-integrity inventory, **not an attribution record or a license grant**. Asset authorship, applicable licenses, notices and redistribution permissions must be independently established before public source or binary distribution; the MPL-2.0 declaration for Vanguard code does not prove rights to these assets.

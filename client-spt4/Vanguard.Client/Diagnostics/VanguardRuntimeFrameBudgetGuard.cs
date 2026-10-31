@@ -1,4 +1,4 @@
-#if SPT_CLIENT
+﻿#if SPT_CLIENT
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -77,12 +77,22 @@ internal static class VanguardRuntimeFrameBudgetGuard
     }
 
     public static bool ShouldRunOptional(string subsystem, DateTimeOffset now, TimeSpan maxDeferral, out string reason)
+        => ShouldRunOptionalCore(subsystem, now, maxDeferral, includeReason: true, out reason);
+
+    public static bool ShouldRunOptional(string subsystem, DateTimeOffset now, TimeSpan maxDeferral)
+        => ShouldRunOptionalCore(subsystem, now, maxDeferral, includeReason: false, out _);
+
+    private static bool ShouldRunOptionalCore(string subsystem, DateTimeOffset now, TimeSpan maxDeferral, bool includeReason, out string reason)
     {
+        reason = string.Empty;
         string key = Normalize(subsystem);
         double elapsed = ElapsedMilliseconds();
         BudgetSummary? summary = null;
         bool shouldRun;
-        bool postStallRecovery = VanguardHeadlessRuntimeStallGuard.IsOptionalRecoveryActive(now, out string recoveryReason);
+        string recoveryReason = string.Empty;
+        bool postStallRecovery = includeReason
+            ? VanguardHeadlessRuntimeStallGuard.IsOptionalRecoveryActive(now, out recoveryReason)
+            : VanguardHeadlessRuntimeStallGuard.IsOptionalRecoveryActive(now);
         lock (Sync)
         {
             if (!StateBySubsystem.TryGetValue(key, out var state))
@@ -103,7 +113,7 @@ internal static class VanguardRuntimeFrameBudgetGuard
             {
                 state.DeferredRuns++;
                 state.LastDeferredUtc = now;
-                reason = recoveryReason + ";subsystem=" + Safe(key) + ";maxDeferralHonored=true";
+                if (includeReason) reason = recoveryReason + ";subsystem=" + Safe(key) + ";maxDeferralHonored=true";
                 shouldRun = false;
             }
             else if (elapsed <= SoftBudgetMilliseconds || forceByMaxDeferral)
@@ -113,17 +123,17 @@ internal static class VanguardRuntimeFrameBudgetGuard
                 if (forceByMaxDeferral && postStallRecovery)
                 {
                     state.ForcedRuns++;
-                    reason = "post_stall_max_deferral_elapsed;elapsedMs=" + elapsed.ToString("0.00", CultureInfo.InvariantCulture)
+                    if (includeReason) reason = "post_stall_max_deferral_elapsed;elapsedMs=" + elapsed.ToString("0.00", CultureInfo.InvariantCulture)
                         + ";recovery=" + Safe(recoveryReason);
                 }
                 else if (forceByMaxDeferral && elapsed > SoftBudgetMilliseconds)
                 {
                     state.ForcedRuns++;
-                    reason = "max_deferral_elapsed;elapsedMs=" + elapsed.ToString("0.00", CultureInfo.InvariantCulture);
+                    if (includeReason) reason = "max_deferral_elapsed;elapsedMs=" + elapsed.ToString("0.00", CultureInfo.InvariantCulture);
                 }
                 else
                 {
-                    reason = "within_soft_budget;elapsedMs=" + elapsed.ToString("0.00", CultureInfo.InvariantCulture);
+                    if (includeReason) reason = "within_soft_budget;elapsedMs=" + elapsed.ToString("0.00", CultureInfo.InvariantCulture);
                 }
                 shouldRun = true;
             }
@@ -131,7 +141,7 @@ internal static class VanguardRuntimeFrameBudgetGuard
             {
                 state.DeferredRuns++;
                 state.LastDeferredUtc = now;
-                reason = "soft_budget_exhausted;elapsedMs=" + elapsed.ToString("0.00", CultureInfo.InvariantCulture);
+                if (includeReason) reason = "soft_budget_exhausted;elapsedMs=" + elapsed.ToString("0.00", CultureInfo.InvariantCulture);
                 shouldRun = false;
             }
 

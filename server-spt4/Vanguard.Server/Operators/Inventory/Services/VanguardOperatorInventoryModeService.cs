@@ -39,7 +39,7 @@ namespace Vanguard.Server.Operators.Inventory.Services;
 public sealed class VanguardOperatorInventoryModeService(
     VanguardOperatorStore operatorStore,
     SaveServer saveServer,
-    VanguardSpt40LostOnDeathConfigProvider lostOnDeathConfigProvider,
+    VanguardLostOnDeathConfigProvider lostOnDeathConfigProvider,
     PaymentHelper paymentHelper,
     JsonUtil jsonUtil,
     VanguardOperatorEnrollmentBaselineService enrollmentBaselineService,
@@ -477,7 +477,7 @@ public sealed class VanguardOperatorInventoryModeService(
     }
 
     /// <summary>
-    /// Apply the same equipment-loss policy SPT 4.0 uses for a dead PMC to a
+    /// Apply the same equipment-loss policy SPT uses for a dead PMC to a
     /// runtime Operator snapshot.  The runtime snapshot remains the
     /// forensic truth used to reconcile the actual corpse before this method is
     /// called; the returned snapshot is the distinct post-death persistence truth.

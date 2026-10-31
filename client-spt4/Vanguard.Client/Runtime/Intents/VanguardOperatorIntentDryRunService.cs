@@ -77,6 +77,7 @@ internal static partial class VanguardOperatorIntentDryRunService
     private static readonly IVanguardIntentProducer[] Producers =
     {
         new VanguardMedicalPlanIntentProducer(),
+        new VanguardMedicSupportIntentProducer(),
         new VanguardThreatScannerIntentProducer(),
         new VanguardAwarenessIntentProducer(),
         new VanguardThreatIntentProducer(),
@@ -154,7 +155,7 @@ internal static partial class VanguardOperatorIntentDryRunService
                 $"VANGUARD_MOVEMENT_CONTRACTS_BOOT enabled=true; readOnly=true; activeMovement=false; separatesHoldSectorFromReturnBubble=true; contracts=HoldCurrent,BreakSainHoldSector,BreakSainActionRally,ActionRallyHardReturn,SuppressExternal,YieldMedical,YieldSain,BlockOwner; build={VanguardBuildVersion.BuildLabel}");
             VanguardClientDiagnosticsLog.Info(
                 VanguardBuildVersion.MovementLeasePlanStatusTag,
-                $"VANGUARD_MOVEMENT_LEASE_PLAN_BOOT enabled=true; readOnly=true; applyEnabled={Vanguard.Client.Runtime.Movement.VanguardMovementAuthorityDoctrine.ActiveBackendApplyEnabled}; backendApply=hard_return_plus_sain_boundary_executor; leaseModel=true; reapplyPolicy=apply_once_no_periodic_reapply; bubbleRadius=75; hardCorrection=88; build={VanguardBuildVersion.BuildLabel}");
+                $"VANGUARD_MOVEMENT_LEASE_PLAN_BOOT enabled=true; readOnly=true; applyEnabled=player_scoped_owner_profile_id; movementF12Scope=PLAYER_SCOPED; backendApply=hard_return_plus_sain_boundary_executor; leaseModel=true; reapplyPolicy=apply_once_no_periodic_reapply; build={VanguardBuildVersion.BuildLabel}");
             VanguardClientDiagnosticsLog.Info(
                 VanguardBuildVersion.MovementHardReturnActiveStatusTag,
                 $"VANGUARD_HARD_RETURN_ACTIVE_BOOT enabled=true; activeMovement=true; dryRunStillReadOnly=true; scope=hard_outside_action_rally_return; backend=BigBrain_GoToSomePoint; applyPolicy=apply_once; suppressExternal=once; build={VanguardBuildVersion.BuildLabel}");

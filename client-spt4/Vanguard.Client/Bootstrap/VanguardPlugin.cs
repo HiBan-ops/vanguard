@@ -21,8 +21,10 @@ using Vanguard.Client.Runtime.Execution;
 using Vanguard.Client.Runtime.Intents;
 using Vanguard.Client.Runtime.Medical.Execution;
 using Vanguard.Client.Runtime.Medical;
+using Vanguard.Client.Runtime.Medical.Support;
 using Vanguard.Client.Runtime.Movement;
 using Vanguard.Client.Runtime.Movement.Brain;
+using Vanguard.Client.Runtime.Movement.Diagnostics;
 using Vanguard.Client.Runtime.Loot;
 using Vanguard.Client.Runtime.Awareness;
 using Vanguard.Client.Runtime.Combat;
@@ -36,6 +38,7 @@ using Vanguard.Client.Runtime.Integrations.Sain;
 using Vanguard.Client.Runtime.Grenades;
 using Vanguard.Client.Raid.Runtime.Fika;
 using Vanguard.Client.Runtime.External;
+using Vanguard.Client.Runtime.SquadCohesion;
 using Vanguard.Client.Runtime.TacticalAuthoring;
 #endif
 
@@ -74,7 +77,7 @@ public sealed class VanguardPlugin
         try
         {
             VanguardClientDiagnosticsLog.Startup(
-                $"Vanguard client loaded; version={VanguardBuildVersion.Value}");
+                $"Vanguard client loaded; developmentLine={VanguardBuildVersion.DevelopmentLine}; runtimeVersion={VanguardBuildVersion.Value}");
 #if SPT_CLIENT
             TryMigrateLegacyBepInExConfig();
 #endif
@@ -113,6 +116,30 @@ public sealed class VanguardPlugin
             EnablePatch("VanguardNativePmcExfiltrationLayerVetoPatch", () => new VanguardNativePmcExfiltrationLayerVetoPatch().Enable());
             EnablePatch("VanguardSainExtractTimeUpdateVetoPatch", () => new VanguardSainExtractTimeUpdateVetoPatch().Enable());
             EnablePatch("VanguardSainOperatorSearchTimingPatch", () => new VanguardSainOperatorSearchTimingPatch().Enable());
+            EnablePatch("VanguardSainRouteSubmissionObservationPatch", () => new VanguardSainRouteSubmissionObservationPatch().Enable());
+            EnablePatch("VanguardSainPhysicalPathObservationPatch", () => new VanguardSainPhysicalPathObservationPatch().Enable());
+            // Restore the original EFT fixed tick only for an exact, active grenade BigBrain lease.
+            EnablePatch("VanguardGrenadeSainFixedUpdateCompatibilityPatch", () => new VanguardGrenadeSainFixedUpdateCompatibilityPatch().Enable());
+            EnablePatch("VanguardGrenadeSainManualPathExclusionPatch", () => new VanguardGrenadeSainManualPathExclusionPatch().Enable());
+            // Native EFT execution witness only; Trace gated, no movement authority or commands.
+            EnablePatch("VanguardNativeEftTickObservationPatch", () => new VanguardNativeEftTickObservationPatch().Enable());
+            EnablePatch("VanguardSainPathReuseObservationPatch", () => new VanguardSainPathReuseObservationPatch().Enable());
+            EnablePatch("VanguardSainSearchIntentCoordinationPatch", () => new VanguardSainSearchIntentCoordinationPatch().Enable());
+            EnablePatch("VanguardSainNativeWalkByWayArbitrationPatch", () => new VanguardSainNativeWalkByWayArbitrationPatch().Enable());
+            EnablePatch("VanguardSainNativeRunByWayArbitrationPatch", () => new VanguardSainNativeRunByWayArbitrationPatch().Enable());
+            EnablePatch("VanguardSainDogFightIntentObservationPatch", () => new VanguardSainDogFightIntentObservationPatch().Enable());
+            EnablePatch("VanguardSainCoverSelectionObservationPatch", () => new VanguardSainCoverSelectionObservationPatch().Enable());
+            bool searchTranslationGatePatchEnabled = EnablePatch("SainSearchTranslationGatePatch", () => new SainSearchTranslationGatePatch().Enable());
+            SearchTranslationGateBridge.ConfigurePatch(
+                searchTranslationGatePatchEnabled,
+                searchTranslationGatePatchEnabled ? "enabled" : "enable_failed");
+            EnablePatch("VanguardSainAuthoredPoseChannelOverridePatch", () => new VanguardSainAuthoredPoseChannelOverridePatch().Enable());
+            EnablePatch("VanguardSainAuthoredLeanChannelOverridePatch", () => new VanguardSainAuthoredLeanChannelOverridePatch().Enable());
+            EnablePatch("VanguardSainAuthoredStanceChannelOverridePatch", () => new VanguardSainAuthoredStanceChannelOverridePatch().Enable());
+            if (VanguardTemporalSchedulingProbePatch.IsRuntimeTypeAvailable)
+            {
+                EnablePatch("VanguardTemporalSchedulingProbePatch", () => new VanguardTemporalSchedulingProbePatch().Enable());
+            }
             EnablePatch("VanguardFikaOperatorDogtagGuardPatch", () => new VanguardFikaOperatorDogtagGuardPatch().Enable());
             EnablePatch("VanguardRaidStartPatch", () => new VanguardRaidStartPatch().Enable());
             EnablePatch("VanguardRaidPersistenceLocalStopPatch", () => new VanguardRaidPersistenceLocalStopPatch().Enable());
@@ -131,6 +158,8 @@ public sealed class VanguardPlugin
             EnablePatch("VanguardOwnerImmediateThreatPatch", () => new VanguardOwnerImmediateThreatPatch().Enable());
             EnablePatch("VanguardBattleInputNodeReleasePatch", () => new VanguardBattleInputNodeReleasePatch().Enable());
             EnablePatch("VanguardBotsControllerStatePatch", () => new VanguardBotsControllerStatePatch().Enable());
+            EnablePatch("VanguardBotLeaveDataRemoveFromMapPresencePatch", () => new VanguardBotLeaveDataRemoveFromMapPresencePatch().Enable());
+            EnablePatch("VanguardBotOwnerDisposePresencePatch", () => new VanguardBotOwnerDisposePresencePatch().Enable());
             EnablePatch("VanguardBotsEventsControllerSpawnPatch", () => new VanguardBotsEventsControllerSpawnPatch().Enable());
             EnablePatch("VanguardOperatorGroupEnemySyncPatch", () => new VanguardOperatorGroupEnemySyncPatch().Enable());
             EnablePatch("VanguardBotMemoryFriendlyGuardPatch", () => new VanguardBotMemoryFriendlyGuardPatch().Enable());
@@ -139,6 +168,8 @@ public sealed class VanguardPlugin
             EnablePatch("VanguardShootDataFriendlyCorridorPatch", () => new VanguardShootDataFriendlyCorridorPatch().Enable());
             EnablePatch("VanguardShootDataBurstFriendlyCorridorPatch", () => new VanguardShootDataBurstFriendlyCorridorPatch().Enable());
             EnablePatch("VanguardActualProjectileFriendlyCorridorPatch", () => new VanguardActualProjectileFriendlyCorridorPatch().Enable());
+            EnablePatch("VanguardCloseCombatWeaponSwapPatch", () => new VanguardCloseCombatWeaponSwapPatch().Enable());
+            EnablePatch("VanguardWeaponSuitabilityContinuityPatch", () => new VanguardWeaponSuitabilityContinuityPatch().Enable());
             EnablePatch("VanguardShootDataProductionDiagnosticsPatch", () => new VanguardShootDataProductionDiagnosticsPatch().Enable());
             EnablePatch("VanguardShootDataTriggerDiagnosticsPatch", () => new VanguardShootDataTriggerDiagnosticsPatch().Enable());
             EnablePatch("VanguardInitiateShotProductionDiagnosticsPatch", () => new VanguardInitiateShotProductionDiagnosticsPatch().Enable());
@@ -212,6 +243,7 @@ public sealed class VanguardPlugin
         }
 
         DateTimeOffset frameNow = DateTimeOffset.UtcNow;
+        VanguardTemporalSchedulingProbeService.BeginVanguardFrame(frameNow);
         VanguardRuntimeFrameBudgetGuard.BeginFrame(frameNow);
         VanguardHeadlessRuntimeStallGuard.BeginFrame(frameNow);
         long updateStarted = VanguardRuntimePerformanceGuard.Begin();
@@ -362,7 +394,7 @@ public sealed class VanguardPlugin
         }
 
         if (VanguardOperatorRuntimeAuditSyncService.EffectiveEnabled &&
-            VanguardRuntimeFrameBudgetGuard.ShouldRunOptional("RuntimeAudit", frameNow, TimeSpan.FromSeconds(2.0d), out _))
+            VanguardRuntimeFrameBudgetGuard.ShouldRunOptional("RuntimeAudit", frameNow, TimeSpan.FromSeconds(2.0d)))
         {
             try
             {
@@ -412,10 +444,35 @@ public sealed class VanguardPlugin
 
         var latestDecisionSnapshots = VanguardOperatorDecisionSnapshotService.GetLatestSnapshots();
 
+        // Decision snapshots capture their own UtcNow after frameNow was sampled at the start of this
+        // update. Rebase the shared downstream timestamp after snapshot publication so same-frame
+        // snapshots cannot be misclassified as coming from the future. Keep IsFresh fail-closed for
+        // genuinely future timestamps instead of weakening the freshness contract globally.
+        frameNow = DateTimeOffset.UtcNow;
+        VanguardTemporalSchedulingProbeService.ObserveSnapshotBatch(latestDecisionSnapshots, frameNow);
+
+        long medicSupportBoardStarted = VanguardRuntimePerformanceGuard.Begin();
+        try
+        {
+            // Read-only relational medical triage. This consumes already-published decision snapshots plus
+            // stable runtime role identity and cannot open an intent/window, rescan inventories or mutate EFT state.
+            VanguardSquadMedicalSupportBoard.Tick(latestDecisionSnapshots, frameNow);
+        }
+        catch (Exception exception)
+        {
+            VanguardClientDiagnosticsLog.Warning(
+                VanguardSquadMedicalSupportBoard.StatusTag,
+                $"medic support triage dry-run tick failed: {exception.GetType().Name}: {exception.Message}; failOpen=true; readOnly=true; gameplayUnaffected=true");
+        }
+        finally
+        {
+            VanguardRuntimePerformanceGuard.End("MedicSupportTriageDryRun", medicSupportBoardStarted);
+        }
+
         long hudTelemetryStarted = VanguardRuntimePerformanceGuard.Begin();
         try
         {
-            // HUD-001B: authority-only semantic telemetry. The bridge never mutates AI state and
+            // Authority-only semantic telemetry. The bridge never mutates AI state and
             // clients only cache a presentation-neutral read model. Fika remains an optional
             // runtime dependency because the transport binding itself is reflection-based/fail-open.
             VanguardFikaHudTelemetryService.Tick(latestDecisionSnapshots, frameNow);
@@ -546,7 +603,7 @@ public sealed class VanguardPlugin
 
             try
             {
-                if (VanguardRuntimeFrameBudgetGuard.ShouldRunOptional("CombatNoFireWatchdog", frameNow, TimeSpan.FromSeconds(0.75d), out _))
+                if (VanguardRuntimeFrameBudgetGuard.ShouldRunOptional("CombatNoFireWatchdog", frameNow, TimeSpan.FromSeconds(0.75d)))
                 {
                     VanguardCombatNoFireWatchdogService.Tick();
                 }
@@ -560,7 +617,7 @@ public sealed class VanguardPlugin
             try
             {
                 if (VanguardGlobalCombatProductionDiagnosticsService.FireBoundariesEnabled &&
-                    VanguardRuntimeFrameBudgetGuard.ShouldRunOptional("GlobalCombatProductionDiagnostics", frameNow, TimeSpan.FromSeconds(0.80d), out _))
+                    VanguardRuntimeFrameBudgetGuard.ShouldRunOptional("GlobalCombatProductionDiagnostics", frameNow, TimeSpan.FromSeconds(0.80d)))
                 {
                     globalCombatDiagnosticsStarted = VanguardRuntimePerformanceGuard.Begin();
                     VanguardGlobalCombatProductionDiagnosticsService.Tick();
@@ -585,7 +642,7 @@ public sealed class VanguardPlugin
         }
 
         if (VanguardOperatorRuntimeAuditOptions.GetIntentDryRunEnabled() &&
-            VanguardRuntimeFrameBudgetGuard.ShouldRunOptional("IntentDryRun", frameNow, TimeSpan.FromSeconds(2.0d), out _))
+            VanguardRuntimeFrameBudgetGuard.ShouldRunOptional("IntentDryRun", frameNow, TimeSpan.FromSeconds(2.0d)))
         {
             long intentDryRunStarted = VanguardRuntimePerformanceGuard.Begin();
             try
@@ -604,7 +661,7 @@ public sealed class VanguardPlugin
         }
 
         bool awarenessUrgent = HasUrgentAwarenessWork(latestDecisionSnapshots);
-        if (awarenessUrgent || VanguardRuntimeFrameBudgetGuard.ShouldRunOptional("AwarenessBridge", frameNow, TimeSpan.FromSeconds(1.0d), out _))
+        if (awarenessUrgent || VanguardRuntimeFrameBudgetGuard.ShouldRunOptional("AwarenessBridge", frameNow, TimeSpan.FromSeconds(1.0d)))
         {
             long awarenessStarted = VanguardRuntimePerformanceGuard.Begin();
             try
@@ -635,6 +692,25 @@ public sealed class VanguardPlugin
         {
             VanguardRuntimePerformanceGuard.End("MedicalExecutor", medicalStarted);
             VanguardRuntimeFrameBudgetGuard.MarkMandatory("MedicalExecutor", medicalStarted);
+        }
+
+        long medicSupplyDropStarted = VanguardRuntimePerformanceGuard.Begin();
+        try
+        {
+            // M3 physical POC: no rendezvous/movement. A selected Medic Support intent may only
+            // drop one exact Medic-owned item when the pair is already close, stationary and safe.
+            VanguardMedicSupplyDropExecutor.Tick(latestDecisionSnapshots, DateTimeOffset.UtcNow);
+        }
+        catch (Exception exception)
+        {
+            VanguardClientDiagnosticsLog.Warning(
+                VanguardMedicSupplyDropExecutor.StatusTag,
+                $"medic supply drop executor tick failed: {exception.GetType().Name}: {exception.Message}; failClosed=true; movement=false; patientLease=false; healthMutation=false");
+        }
+        finally
+        {
+            VanguardRuntimePerformanceGuard.End("MedicSupplyDrop", medicSupplyDropStarted);
+            VanguardRuntimeFrameBudgetGuard.MarkMandatory("MedicSupplyDrop", medicSupplyDropStarted);
         }
 
         long corpseLootApproachStarted = VanguardRuntimePerformanceGuard.Begin();
@@ -742,7 +818,338 @@ public sealed class VanguardPlugin
             VanguardRuntimeFrameBudgetGuard.MarkMandatory("TacticalReposition", tacticalRepositionStarted);
         }
 
-        if (VanguardRuntimeFrameBudgetGuard.ShouldRunOptional("LootBroker", frameNow, TimeSpan.FromSeconds(1.5d), out _))
+        // Route convergence is optional observation-only geometry analysis. It deliberately runs after
+        // mandatory scheduler/medical/movement work so direct-path probes share the existing
+        // frame/heavy-work governance instead of displacing safety or active execution.
+        long routeConvergenceStarted = VanguardRuntimePerformanceGuard.Begin();
+        try
+        {
+            RouteConvergenceService.Tick(frameNow);
+        }
+        catch (Exception exception)
+        {
+            VanguardClientDiagnosticsLog.Warning(
+                RouteConvergenceService.StatusTag,
+                $"Route convergence tick failed fail-open: {exception.GetType().Name}: {exception.Message}; observationOnly=true; executionAllowed=false");
+        }
+        finally
+        {
+            VanguardRuntimePerformanceGuard.End("RouteConvergence", routeConvergenceStarted);
+        }
+
+        // Choke detection consumes only the complete current convergence publication plus passive EFT structural
+        // reads. It remains observation-only and is scheduled after convergence so no choke result can
+        // outlive or bypass the convergence generation that produced it.
+        long chokeDetectionStarted = VanguardRuntimePerformanceGuard.Begin();
+        try
+        {
+            ChokeDetectionService.Tick(frameNow);
+        }
+        catch (Exception exception)
+        {
+            VanguardClientDiagnosticsLog.Warning(
+                ChokeDetectionService.StatusTag,
+                $"Choke detection choke detection tick failed fail-open: {exception.GetType().Name}: {exception.Message}; observationOnly=true; executionAllowed=false; doorMutation=false");
+        }
+        finally
+        {
+            VanguardRuntimePerformanceGuard.End("ChokeDetection", chokeDetectionStarted);
+        }
+
+        // Route independence generates and scores bounded alternate-route families from the coherent convergence/choke detection
+        // observation pair. It is still observation-only: no route assignment, Operator gate,
+        // movement lease or executable TC plan exists before the explicit anti-conga authority boundary.
+        long routeIndependenceStarted = VanguardRuntimePerformanceGuard.Begin();
+        try
+        {
+            RouteIndependenceService.Tick(frameNow);
+        }
+        catch (Exception exception)
+        {
+            VanguardClientDiagnosticsLog.Warning(
+                RouteIndependenceService.StatusTag,
+                $"Route independence route independence tick failed fail-open: {exception.GetType().Name}: {exception.Message}; observationOnly=true; executionAllowed=false; routeAssignment=false; leaseAuthority=false");
+        }
+        finally
+        {
+            VanguardRuntimePerformanceGuard.End("RouteIndependence", routeIndependenceStarted);
+        }
+
+        // Threat-exposure qualification is observation-only. It consumes the already-published Direct/Alt
+        // geometry plus fresh Awareness-qualified runtime threat pose and records bounded raw facing/LOS evidence.
+        // It cannot classify HeldAccess/KillLane, influence route choice, request replan or acquire movement authority.
+        long threatExposureStarted = VanguardRuntimePerformanceGuard.Begin();
+        try
+        {
+            ThreatExposureObservationService.Tick(frameNow);
+        }
+        catch (Exception exception)
+        {
+            VanguardClientDiagnosticsLog.Warning(
+                ThreatExposureObservationService.StatusTag,
+                $"Threat exposure observation tick failed fail-open: {exception.GetType().Name}: {exception.Message}; observationOnly=true; executionAllowed=false; heldAccessClassification=false; killLaneClassification=false; replanMutation=false");
+        }
+        finally
+        {
+            VanguardRuntimePerformanceGuard.End("ThreatExposureObservation", threatExposureStarted);
+        }
+
+
+        // Anti-conga is the first bounded influence. It consumes only coherent convergence/choke detection/route independence publications
+        // and owns at most one short fail-open SearchAction translation gate through the shared
+        // anti-conga/commit support physical bridge. Unlike optional geometry analysis, release/expiry must always be serviced.
+        long antiCongaStarted = VanguardRuntimePerformanceGuard.Begin();
+        try
+        {
+            AntiCongaService.Tick(frameNow);
+        }
+        catch (Exception exception)
+        {
+            VanguardClientDiagnosticsLog.Warning(
+                AntiCongaService.StatusTag,
+                $"Anti-conga anti-conga tick failed fail-open: {exception.GetType().Name}: {exception.Message}; boundedInfluence=true; routeAssignment=false; flank=false; staleResume=false");
+            AntiCongaService.Reset("tick_exception_fail_open");
+        }
+        finally
+        {
+            VanguardRuntimePerformanceGuard.End("AntiConga", antiCongaStarted);
+            VanguardRuntimeFrameBudgetGuard.MarkMandatory("AntiConga", antiCongaStarted);
+        }
+
+        // Choke commit/support adds the first shared-plan contribution pair above spacing control. The leading
+        // DirectCommit member keeps native SAIN movement; one trailing StageHold member may reuse
+        // the exact anti-conga SearchAction translation gate family. anti-conga runs first and therefore keeps
+        // precedence for unsafe Anti-Conga spacing; commit support only stages a support member when no anti-conga
+        // gate owns that bot and the larger commit/support spacing window is coherent.
+        long chokeCommitSupportStarted = VanguardRuntimePerformanceGuard.Begin();
+        try
+        {
+            ChokeCommitSupportService.Tick(frameNow);
+        }
+        catch (Exception exception)
+        {
+            VanguardClientDiagnosticsLog.Warning(
+                ChokeCommitSupportService.StatusTag,
+                $"Choke commit/support choke commit/support tick failed fail-open: {exception.GetType().Name}: {exception.Message}; boundedInfluence=true; directCommitMovementMutation=false; stageHold=true; routeAssignment=false; flank=false; staleResume=false");
+            ChokeCommitSupportService.Reset("tick_exception_fail_open");
+        }
+        finally
+        {
+            VanguardRuntimePerformanceGuard.End("ChokeCommitSupport", chokeCommitSupportStarted);
+            VanguardRuntimeFrameBudgetGuard.MarkMandatory("ChokeCommitSupport", chokeCommitSupportStarted);
+        }
+
+        // Route assignment  selects one current Operator/AltEstablishment pair per observed threat group in shadow.
+        // Hard local/authority Conditions and a candidate-specific current path remain mandatory before
+        // preference ordering. The selection itself stays non-authoritative; the first bounded physical
+        // authority is owned separately by the AltDevelop movement service immediately below.
+        long routeAssignmentStarted = VanguardRuntimePerformanceGuard.Begin();
+        try
+        {
+            RouteAssignmentService.Tick(frameNow);
+        }
+        catch (Exception exception)
+        {
+            VanguardClientDiagnosticsLog.Warning(
+                RouteAssignmentService.StatusTag,
+                $"Route assignment member/axis assignment tick failed fail-open: {exception.GetType().Name}: {exception.Message}; assignmentShadow=true; movementAuthoritySeparate=true; directCommit=false; splitFlankExecution=false");
+            RouteAssignmentService.Reset("tick_exception_fail_open");
+        }
+        finally
+        {
+            VanguardRuntimePerformanceGuard.End("RouteAssignment", routeAssignmentStarted);
+        }
+
+        // Tactical fitness calibration observes the exact RouteAssignment candidate matrix plus live capability
+        // facts. It is deliberately shadow-only: role and raw geometry references are compared, but no material
+        // geometry threshold, equipment-fit class, persona bias or executable replacement is invented here.
+        long tacticalFitnessShadowStarted = VanguardRuntimePerformanceGuard.Begin();
+        try
+        {
+            TacticalFitnessShadowService.Tick(frameNow);
+        }
+        catch (Exception exception)
+        {
+            VanguardClientDiagnosticsLog.Warning(
+                TacticalFitnessShadowService.StatusTag,
+                $"Tactical fitness shadow tick failed fail-open: {exception.GetType().Name}: {exception.Message}; observationOnly=true; assignmentMutation=false; pathfinding=false; movementAuthority=false");
+            TacticalFitnessShadowService.Reset("tick_exception_fail_open");
+        }
+        finally
+        {
+            VanguardRuntimePerformanceGuard.End("TacticalFitnessShadow", tacticalFitnessShadowStarted);
+        }
+
+        // Assignment-aligned threat exposure closes the observation gap between "some Alt is relieved" and
+        // "the exact RouteAssignment-selected Operator/path is relieved". It samples only the already-proven
+        // candidate-specific selected path and owns no assignment, replan, scheduler or movement authority.
+        long threatExposureAssignmentAlignmentStarted = VanguardRuntimePerformanceGuard.Begin();
+        try
+        {
+            ThreatExposureAssignmentAlignmentService.Tick(frameNow);
+        }
+        catch (Exception exception)
+        {
+            VanguardClientDiagnosticsLog.Warning(
+                ThreatExposureAssignmentAlignmentService.StatusTag,
+                $"Threat exposure assignment-alignment tick failed fail-open: {exception.GetType().Name}: {exception.Message}; observationOnly=true; heldAccessClassification=false; assignmentMutation=false; replanMutation=false; movementStart=false");
+            ThreatExposureAssignmentAlignmentService.Reset("tick_exception_fail_open");
+        }
+        finally
+        {
+            VanguardRuntimePerformanceGuard.End("ThreatExposureAssignmentAlignment", threatExposureAssignmentAlignmentStarted);
+        }
+
+        // Exposure classification remains shadow-only and is based on the exact assignment-aligned
+        // Direct element and selected Alt Operator/path. The current alignment publication must still match its
+        // current raw exposure/route-independence/route-assignment producers before any stability sample advances.
+        long threatExposureShadowStarted = VanguardRuntimePerformanceGuard.Begin();
+        try
+        {
+            ThreatExposureShadowClassificationService.Tick(frameNow);
+        }
+        catch (Exception exception)
+        {
+            VanguardClientDiagnosticsLog.Warning(
+                ThreatExposureShadowClassificationService.StatusTag,
+                $"Threat exposure shadow classification tick failed fail-open: {exception.GetType().Name}: {exception.Message}; source=assignment_aligned; probeOnly=true; thresholdsNotDoctrine=true; killLaneClassification=false; executionAllowed=false; replanMutation=false; movementStart=false");
+            ThreatExposureShadowClassificationService.Reset("tick_exception_fail_open");
+        }
+        finally
+        {
+            VanguardRuntimePerformanceGuard.End("ThreatExposureShadowClassification", threatExposureShadowStarted);
+        }
+
+        // Route assignment AltDevelop Movement  is the first authority that turns the qualified shadow selection
+        // into physical travel toward the route independence AltEstablishmentRegion. It is deliberately weaker than
+        // SAIN combat/survival and all existing primary execution windows: no sprint, no retarget/restart,
+        // immediate abort on local veto, anti-conga/commit support conflict, lost command/window identity or vertical anomaly.
+        long altDevelopStarted = VanguardRuntimePerformanceGuard.Begin();
+        try
+        {
+            AltDevelopMovementService.Tick(frameNow);
+        }
+        catch (Exception exception)
+        {
+            VanguardClientDiagnosticsLog.Warning(
+                AltDevelopMovementService.StatusTag,
+                $"Route assignment AltDevelop movement tick failed fail-open: {exception.GetType().Name}: {exception.Message}; boundedMovement=true; sprint=false; recoveryMutation=false; directCommit=false; fullAltEstablished=false");
+            AltDevelopMovementService.ResetForRaidLifecycle("tick_exception_fail_open");
+        }
+        finally
+        {
+            VanguardRuntimePerformanceGuard.End("AltDevelopMovement", altDevelopStarted);
+            VanguardRuntimeFrameBudgetGuard.MarkMandatory("AltDevelopMovement", altDevelopStarted);
+        }
+
+        // Split-flank readiness/state remains the non-executing fusion layer above physical AltDevelop. It revalidates
+        // Alt/Direct admission, observes FullAlt/synchronized readiness, and publishes the exact truth consumed below.
+        // Physical DirectCommit authority is owned only by the dedicated bounded consumer after that truth is published.
+        long splitFlankReadinessStarted = VanguardRuntimePerformanceGuard.Begin();
+        try
+        {
+            SplitFlankReadinessService.Tick(frameNow);
+        }
+        catch (Exception exception)
+        {
+            VanguardClientDiagnosticsLog.Warning(
+                SplitFlankReadinessService.StatusTag,
+                $"Split-flank split-flank dependency shadow tick failed fail-open: {exception.GetType().Name}: {exception.Message}; shadowOnly=true; altDevelopmentEvidence=false; synchronizedCommitReady=false; executionAllowed=false; movementMutation=false");
+            SplitFlankReadinessService.Reset("tick_exception_fail_open");
+        }
+        finally
+        {
+            VanguardRuntimePerformanceGuard.End("SplitFlankReadiness", splitFlankReadinessStarted);
+        }
+
+        // Opportunity-first multi-axis composition (canonical Kaban scenario): the exact active AltDevelop
+        // FlankLead may recruit one second same-axis support member while the existing Direct/HeldAccess
+        // element keeps the primary entry contained. SplitFlank remains the sole pressure/commit truth and
+        // this layer cannot release holds or command aim/fire.
+        long multiAxisAssaultStarted = VanguardRuntimePerformanceGuard.Begin();
+        try
+        {
+            MultiAxisAssaultService.Tick(frameNow);
+        }
+        catch (Exception exception)
+        {
+            int releasedFlankSupport = TacticalOpportunityMovementService.ReleaseFlankSupportFailOpen(frameNow, "multi_axis_tick_exception");
+            VanguardClientDiagnosticsLog.Warning(
+                MultiAxisAssaultService.StatusTag,
+                $"Multi-axis assault composition tick failed fail-open: {exception.GetType().Name}: {exception.Message}; flankSupportReleased={releasedFlankSupport}; directHoldsUntouched=true; fireCommand=false; targetMutation=false");
+            MultiAxisAssaultService.ResetForRaidLifecycle("tick_exception_fail_open");
+        }
+        finally
+        {
+            VanguardRuntimePerformanceGuard.End("MultiAxisAssault", multiAxisAssaultStarted);
+        }
+
+        // Bounded held-access influence: once strict or balanced assignment-aligned HeldAccess + SplitOpportunity evidence is stable
+        // and the exact selected Alt member owns the current logical AltDevelop maneuver, the existing ChokeCommitSupport
+        // physical family may hold Search-compatible Direct members near the same converged choke. Containment follows
+        // that logical maneuver through physical arrival/stable establishment until SplitFlank releases it for commit;
+        // SAIN retains target/aim/fire/steering and every rolling hold slice fails open on stale evidence.
+        long heldAccessFixStarted = VanguardRuntimePerformanceGuard.Begin();
+        try
+        {
+            ChokeCommitSupportService.TickHeldAccessFix(frameNow);
+        }
+        catch (Exception exception)
+        {
+            VanguardClientDiagnosticsLog.Warning(
+                ChokeCommitSupportService.StatusTag,
+                $"Held-access fix tick failed fail-open: {exception.GetType().Name}: {exception.Message}; boundedInfluence=true; strictOrBalancedStableProbe=true; sensitiveProbe=false; selectedAltManeuverRequired=true; stableEstablishmentContinuity=true; directTranslationOnly=true; fireCommand=false; targetMutation=false");
+            ChokeCommitSupportService.ReleaseHeldAccessFixFailOpen(frameNow, "held_access_fix_tick_exception");
+        }
+        finally
+        {
+            VanguardRuntimePerformanceGuard.End("HeldAccessFix", heldAccessFixStarted);
+            VanguardRuntimeFrameBudgetGuard.MarkMandatory("HeldAccessFix", heldAccessFixStarted);
+        }
+
+        // DirectCommit consumes the fully-fused SplitFlank state plus the exact TacticalReplan plan epoch.
+        // It is intentionally scheduled after SplitFlankReadiness/State/Replan have published for this frame,
+        // and owns at most one short SAIN-native translation lease for one Direct member.
+        long directCommitStarted = VanguardRuntimePerformanceGuard.Begin();
+        try
+        {
+            DirectCommitMovementService.Tick(frameNow);
+        }
+        catch (Exception exception)
+        {
+            VanguardClientDiagnosticsLog.Warning(
+                DirectCommitMovementService.StatusTag,
+                $"DirectCommit movement tick failed fail-open: {exception.GetType().Name}: {exception.Message}; boundedTranslation=true; fireCommand=false; targetMutation=false");
+            DirectCommitMovementService.ResetForRaidLifecycle("tick_exception_fail_open");
+        }
+        finally
+        {
+            VanguardRuntimePerformanceGuard.End("DirectCommitMovement", directCommitStarted);
+            VanguardRuntimeFrameBudgetGuard.MarkMandatory("DirectCommitMovement", directCommitStarted);
+        }
+
+        // Tactical opportunity execution consumes already-qualified combat truth after the split-flank family
+        // had first refusal. It creates one bounded combat-sidecar reposition per owner/threat for emergency
+        // regroup, buddy support or long-range overwatch, using the same SAIN BotPathDataManual bridge.
+        long tacticalOpportunityStarted = VanguardRuntimePerformanceGuard.Begin();
+        try
+        {
+            TacticalOpportunityMovementService.Tick(frameNow);
+        }
+        catch (Exception exception)
+        {
+            VanguardClientDiagnosticsLog.Warning(
+                TacticalOpportunityMovementService.StatusTag,
+                $"Tactical opportunity movement tick failed fail-open: {exception.GetType().Name}: {exception.Message}; combatPrimaryPreserved=true; sprint=false; targetMutation=false; aimMutation=false; fireCommand=false");
+            TacticalOpportunityMovementService.ResetForRaidLifecycle("tick_exception_fail_open");
+        }
+        finally
+        {
+            VanguardRuntimePerformanceGuard.End("TacticalOpportunityMovement", tacticalOpportunityStarted);
+            VanguardRuntimeFrameBudgetGuard.MarkMandatory("TacticalOpportunityMovement", tacticalOpportunityStarted);
+        }
+
+        if (VanguardRuntimeFrameBudgetGuard.ShouldRunOptional("LootBroker", frameNow, TimeSpan.FromSeconds(1.5d)))
         {
             long lootBrokerStarted = VanguardRuntimePerformanceGuard.Begin();
             try
@@ -759,7 +1166,7 @@ public sealed class VanguardPlugin
             }
         }
 
-        if (VanguardRuntimeFrameBudgetGuard.ShouldRunOptional("PostLootAudit", frameNow, TimeSpan.FromSeconds(2.5d), out _))
+        if (VanguardRuntimeFrameBudgetGuard.ShouldRunOptional("PostLootAudit", frameNow, TimeSpan.FromSeconds(2.5d)))
         {
             long postLootAuditStarted = VanguardRuntimePerformanceGuard.Begin();
             try
@@ -776,7 +1183,7 @@ public sealed class VanguardPlugin
             }
         }
 
-        if (VanguardRuntimeFrameBudgetGuard.ShouldRunOptional("WeaponHandsAudit", frameNow, TimeSpan.FromSeconds(2.5d), out _))
+        if (VanguardRuntimeFrameBudgetGuard.ShouldRunOptional("WeaponHandsAudit", frameNow, TimeSpan.FromSeconds(2.5d)))
         {
             long weaponHandsAuditStarted = VanguardRuntimePerformanceGuard.Begin();
             try
@@ -793,7 +1200,7 @@ public sealed class VanguardPlugin
             }
         }
 
-        if (VanguardRuntimeFrameBudgetGuard.ShouldRunOptional("RaidHud", frameNow, TimeSpan.FromSeconds(0.75d), out _))
+        if (VanguardRuntimeFrameBudgetGuard.ShouldRunOptional("RaidHud", frameNow, TimeSpan.FromSeconds(0.75d)))
         {
             long raidHudStarted = VanguardRuntimePerformanceGuard.Begin();
             try
@@ -970,7 +1377,7 @@ public sealed class VanguardPlugin
         }
     }
 
-    private static void EnablePatch(string patchName, Action enable)
+    private static bool EnablePatch(string patchName, Action enable)
     {
         try
         {
@@ -978,12 +1385,14 @@ public sealed class VanguardPlugin
             VanguardClientDiagnosticsLog.Diagnostic(
                 VanguardBuildVersion.ClientBootStatusTag,
                 () => $"client patch enabled: {patchName}");
+            return true;
         }
         catch (Exception exception)
         {
             VanguardClientDiagnosticsLog.Warning(
                 VanguardBuildVersion.ClientBootStatusTag,
                 $"client patch not enabled: {patchName}; reason={exception.GetType().Name}: {exception.Message}");
+            return false;
         }
     }
 #endif

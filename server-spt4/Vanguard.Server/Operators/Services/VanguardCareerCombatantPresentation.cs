@@ -1,7 +1,7 @@
-// Responsibility: Provides Career Combatant Presentation support for the Operator domain services.
-// Flow: The file encapsulates one bounded piece of the subsystem and exchanges explicit inputs/results with neighboring services instead of relying on hidden cross-system state.
-// Authority boundary: Authority remains with the owning subsystem and any external EFT/SPT/Fika/SAIN component explicitly referenced by its call path.
-// Invariant: Behavior stays scoped to the current profile/raid/process contract and preserves existing safety and compatibility boundaries.
+// Responsibility: Format persisted Career combatant identities into readable display names.
+// Flow: Prefer the persisted name and fall back to side or raw-role labels when no name is provided.
+// Authority boundary: Career persistence remains authoritative; presentation fallback does not classify combat evidence.
+// Invariant: Fallback labels never convert an unverified raw role into a verified combatant classification.
 namespace Vanguard.Server.Operators.Services;
 
 /// <summary>

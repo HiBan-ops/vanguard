@@ -3,10 +3,10 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 
-// Responsibility: Provides Medical Item Capability Resolver support for the medical runtime.
-// Flow: The file encapsulates one bounded piece of the subsystem and exchanges explicit inputs/results with neighboring services instead of relying on hidden cross-system state.
-// Authority boundary: Authority remains with the owning subsystem and any external EFT/SPT/Fika/SAIN component explicitly referenced by its call path.
-// Invariant: Behavior stays scoped to the current profile/raid/process contract and preserves existing safety and compatibility boundaries.
+// Responsibility: Map known medical item templates to needs, treatment roles and candidate priorities.
+// Flow: Select matching template capabilities from available inventory identifiers for a requested medical need.
+// Authority boundary: The capability table describes item eligibility; live EFT medical actions belong to the native controller.
+// Invariant: Selection only considers known, normalized template IDs whose capabilities match the requested need.
 namespace Vanguard.Client.Runtime.Medical;
 
 internal sealed record VanguardMedicalItemCapability(

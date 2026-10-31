@@ -33,6 +33,46 @@ internal static class VanguardExecutionLeaseStore
         }
     }
 
+    public static string ForgetRuntimePresence(string? botProfileId, string reason)
+    {
+        string key = Normalize(botProfileId);
+        if (string.Equals(key, "none", StringComparison.OrdinalIgnoreCase))
+        {
+            return "missing_identity";
+        }
+
+        int activeRemoved;
+        int cooldownRemoved;
+        int outcomeRemoved;
+        string prefix = key + "|";
+        lock (Sync)
+        {
+            activeRemoved = ActiveByBotProfileId.Remove(key) ? 1 : 0;
+            string[] cooldownKeys = CooldownUntilByKey.Keys
+                .Where(candidate => candidate.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                .ToArray();
+            foreach (string candidate in cooldownKeys)
+            {
+                CooldownUntilByKey.Remove(candidate);
+            }
+            cooldownRemoved = cooldownKeys.Length;
+
+            string[] outcomeKeys = OutcomeByKey.Keys
+                .Where(candidate => candidate.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                .ToArray();
+            foreach (string candidate in outcomeKeys)
+            {
+                OutcomeByKey.Remove(candidate);
+            }
+            outcomeRemoved = outcomeKeys.Length;
+        }
+
+        return "activeRemoved=" + activeRemoved.ToString(CultureInfo.InvariantCulture)
+            + ";cooldownRemoved=" + cooldownRemoved.ToString(CultureInfo.InvariantCulture)
+            + ";outcomeRemoved=" + outcomeRemoved.ToString(CultureInfo.InvariantCulture)
+            + ";reason=" + Normalize(reason);
+    }
+
     public static IReadOnlyList<VanguardExecutionLeaseState> GetActiveLeases()
     {
         lock (Sync)

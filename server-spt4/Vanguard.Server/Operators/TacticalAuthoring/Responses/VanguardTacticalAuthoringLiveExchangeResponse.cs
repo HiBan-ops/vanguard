@@ -11,6 +11,7 @@ public sealed class VanguardTacticalAuthoringLiveExchangeResponse
     public bool Success { get; set; }
     public string Reason { get; set; } = string.Empty;
     public List<VanguardTacticalAuthoringLiveAuthorSnapshot> Authors { get; set; } = [];
+    public List<VanguardTacticalCoordinationTopologySnapshot> Topologies { get; set; } = [];
     public List<VanguardTacticalAuthoringLiveHeadlessResult> HeadlessResults { get; set; } = [];
     public DateTimeOffset ServerTimeUtc { get; set; } = DateTimeOffset.UtcNow;
 }

@@ -67,7 +67,7 @@ internal static class VanguardExecutionWindowPolicy
             bool productive = Vanguard.Client.Runtime.Movement.VanguardMovementAuthorityDoctrine.IsCombatProductive(snapshot, out var productiveReason);
             bool farAndUnproductive = !productive
                 && snapshot.SquadCohesion.OwnerKnown
-                && snapshot.SquadCohesion.OperatorDistanceToOwner >= Vanguard.Client.Runtime.Movement.VanguardMovementAuthorityDoctrine.CombatCohesionForcedCatchupMeters;
+                && snapshot.SquadCohesion.OperatorDistanceToOwner >= Vanguard.Client.Runtime.Movement.VanguardMovementAuthorityDoctrine.ForOwner(snapshot.OwnerProfileId).CombatCohesionForcedCatchupMeters;
             return Window(
                 "combat_release_window",
                 "SainCombatReleaseWindow",

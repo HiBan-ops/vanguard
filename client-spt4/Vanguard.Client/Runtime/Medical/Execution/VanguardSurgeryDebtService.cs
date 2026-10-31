@@ -38,6 +38,27 @@ internal static class VanguardSurgeryDebtService
         VanguardClientDiagnosticsLog.Info(StatusTag, $"VANGUARD_MEDICAL_SURGERY_DEBT_RESET reason={Safe(reason)}; active=false; tag={StatusTag}");
     }
 
+    public static int ForgetRuntimePresence(string? botProfileId, string reason)
+    {
+        string key = string.IsNullOrWhiteSpace(botProfileId) ? "none" : botProfileId.Trim();
+        if (string.Equals(key, "none", StringComparison.OrdinalIgnoreCase))
+        {
+            return 0;
+        }
+
+        int removed = DebtByBotProfile.Remove(key) ? 1 : 0;
+        foreach (string logKey in new List<string>(LastLogAtByKey.Keys))
+        {
+            if (logKey.IndexOf(key, StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                LastLogAtByKey.Remove(logKey);
+                removed++;
+            }
+        }
+
+        return removed;
+    }
+
     public static void UpdateFromSnapshots(IEnumerable<OperatorDecisionSnapshot> snapshots, DateTimeOffset now)
     {
         foreach (var snapshot in snapshots ?? Enumerable.Empty<OperatorDecisionSnapshot>())
@@ -103,7 +124,10 @@ internal static class VanguardSurgeryDebtService
         string currentReadinessSignature = BuildReadinessSignature(snapshot);
         current.LastReadinessSignature = currentReadinessSignature;
         current.LastActionabilityReason = debt.LastActionabilityReason;
-        if (!string.Equals(previousReadinessSignature, currentReadinessSignature, StringComparison.OrdinalIgnoreCase)
+        // An unchanged native CanApply=false rejection must not be awakened by reload/medicine/hands
+        // transitions; these affect readiness, not native applicability of the same operation.
+        if (!current.NativeApplicabilityBlocked
+            && !string.Equals(previousReadinessSignature, currentReadinessSignature, StringComparison.OrdinalIgnoreCase)
             && VanguardMedicalSurgeryTargetPolicy.EvaluateSurgeryPreparationCandidate(snapshot, out var readinessReason) == VanguardSurgeryCandidateState.Ready)
         {
             current.RetryAllowedAtUtc = now;
@@ -116,6 +140,43 @@ internal static class VanguardSurgeryDebtService
         if (current.RetryAllowedAtUtc == DateTimeOffset.MinValue)
         {
             current.RetryAllowedAtUtc = now;
+        }
+
+        // The first GO_COVER may legitimately precede an up-to-date native applicability probe.
+        // Once a PREPARED operation is definitively rejected as non-applicable, however, movement
+        // preparation for the same unchanged target/template is not a useful retry. Keep the debt
+        // without stopping other medical actions or SAIN/TC locomotion.
+        if (current.NativeApplicabilityBlocked)
+        {
+            var actionability = snapshot.Medical.Actionability;
+            string nativeContext = BuildNativeApplicabilityContext(snapshot, current.TargetPart);
+            bool sameQualifiedSurgery = VanguardMedicalSurgeryTargetPolicy.IsSurgeryNeed(snapshot.Medical.Need.DominantNeed)
+                && actionability.TargetKnown
+                && SameTarget(actionability.TargetPart, current.TargetPart);
+            bool recoveredNativeApply = sameQualifiedSurgery && actionability.CanApplyItem == true;
+            bool differentQualifiedContext = sameQualifiedSurgery
+                && actionability.PersistentCapabilityAvailable
+                && actionability.CanApplyItem == false
+                && !string.Equals(current.NativeApplicabilityContext, nativeContext, StringComparison.OrdinalIgnoreCase);
+            if (!recoveredNativeApply && !differentQualifiedContext)
+            {
+                current.Actionable = false;
+                current.RetryAllowedAtUtc = DateTimeOffset.MaxValue;
+                current.RetryState = "NativeApplicabilityStateBound";
+                current.LastActionabilityReason = "prepared_native_item_not_applicable_unchanged";
+                LogLazy(StatusTag, "native_applicability_hold|" + snapshot.BotProfileId + "|" + current.TargetPart, now, VanguardAuditLevel.Trace, () =>
+                    $"VANGUARD_MEDICAL_SURGERY_DEBT_NATIVE_APPLICABILITY_HOLD operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; target={Safe(current.TargetPart)}; canApply={Safe(actionability.CanApplyItem.HasValue ? Bool(actionability.CanApplyItem.Value) : "unknown")}; persistence=true; next=native_applicability_or_qualified_context_change; handsOnlyWake=false; tag={StatusTag}");
+                return;
+            }
+
+            current.NativeApplicabilityBlocked = false;
+            current.NativeApplicabilityContext = "none";
+            current.RetryAllowedAtUtc = now;
+            current.RetryState = "NativeApplicabilityRequalified";
+            current.Actionable = debt.Actionable;
+            current.LastActionabilityReason = recoveredNativeApply ? "native_can_apply_recovered" : "qualified_surgery_context_changed";
+            Log(StatusTag, "native_applicability_released|" + snapshot.BotProfileId + "|" + current.TargetPart, now,
+                $"VANGUARD_MEDICAL_SURGERY_DEBT_NATIVE_APPLICABILITY_RELEASED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; target={Safe(current.TargetPart)}; reason={Safe(current.LastActionabilityReason)}; nativeApplicabilityRetested=true; tag={StatusTag}");
         }
 
         if (current.BlockedUntilStateChange)
@@ -157,6 +218,55 @@ internal static class VanguardSurgeryDebtService
             Log(StatusTag, "blocked_state|" + snapshot.BotProfileId + "|" + current.TargetPart + "|" + state, now,
                 $"VANGUARD_MEDICAL_SURGERY_DEBT_BLOCKED_STATE operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; target={Safe(current.TargetPart)}; state={state}; reason={Safe(current.LastActionabilityReason)}; retryAt={current.RetryAllowedAtUtc:O}; debtPreserved=true; otherActionableMedicalAllowed=true; tag={StatusTag}");
         }
+    }
+
+    // Only record a bounded, native selector failure. Preparation deferred by combat, settling
+    // hands or an unknown CanApply probe remains eligible for the existing bounded retry path.
+    public static void RecordPreparedNativeApplicabilityFailure(VanguardExecutionLeaseState lease, OperatorDecisionSnapshot snapshot, DateTimeOffset now)
+    {
+        if (lease == null || snapshot == null
+            || !VanguardMedicalSurgeryTargetPolicy.IsSurgeryNeed(lease.MedicalNeed)
+            || string.IsNullOrWhiteSpace(lease.BotProfileId)
+            || !string.Equals(lease.BotProfileId, snapshot.BotProfileId, StringComparison.OrdinalIgnoreCase)
+            || snapshot.Medical.Actionability.CanApplyItem != false
+            || !snapshot.Medical.Actionability.TargetKnown
+            || !snapshot.Medical.Actionability.PersistentCapabilityAvailable
+            || !SameTarget(lease.TargetPart, snapshot.Medical.Actionability.TargetPart))
+        {
+            return;
+        }
+
+        var debt = GetOrCreateFromLease(lease, now);
+        debt.NativeApplicabilityBlocked = true;
+        debt.NativeApplicabilityContext = BuildNativeApplicabilityContext(snapshot, lease.TargetPart);
+        debt.RetryAllowedAtUtc = DateTimeOffset.MaxValue;
+        debt.LastSeenAtUtc = now;
+        debt.LastAttemptAtUtc = now;
+        debt.Actionable = false;
+        debt.RetryState = "NativeApplicabilityStateBound";
+        debt.LastFailureReason = "prepared_launch_blocked_bounded:live_item_not_applicable";
+        debt.LastActionabilityReason = "prepared_native_item_not_applicable_unchanged";
+        DebtByBotProfile[lease.BotProfileId] = debt;
+        Log(StatusTag, "native_applicability_blocked|" + lease.BotProfileId + "|" + lease.TargetPart, now,
+            $"VANGUARD_MEDICAL_SURGERY_DEBT_NATIVE_APPLICABILITY_BLOCKED {lease.Summary}; reason=native_selector_rejected_after_bounded_prepare; canApply=false; debtPreserved=true; goCoverRetry=false; until=native_applicability_or_qualified_context_change; tag={StatusTag}");
+    }
+
+    // Enforce this at the physical preparation executor as well as at scheduler debt admission.
+    // A normal (non-forced) surgery intent must not bypass the native applicability block.
+    public static bool ShouldDeferPrepareForNativeApplicability(OperatorDecisionSnapshot snapshot, DateTimeOffset now, out string reason)
+    {
+        reason = "none";
+        snapshot ??= OperatorDecisionSnapshot.Empty;
+        UpdateFromSnapshot(snapshot, now);
+        if (!string.IsNullOrWhiteSpace(snapshot.BotProfileId)
+            && DebtByBotProfile.TryGetValue(snapshot.BotProfileId, out var debt)
+            && debt.NativeApplicabilityBlocked
+            && SameTarget(snapshot.Medical.Actionability.TargetPart, debt.TargetPart))
+        {
+            reason = "native_applicability_unchanged_for_target:" + Safe(debt.TargetPart);
+            return true;
+        }
+        return false;
     }
 
     public static int AppendFailedItemInstanceExclusions(OperatorDecisionSnapshot snapshot, ISet<string> excludedItemInstances, DateTimeOffset now, out string summary)
@@ -620,6 +730,19 @@ internal static class VanguardSurgeryDebtService
         return state == VanguardSurgeryCandidateState.Ready;
     }
 
+    // No hands/posture/reload bits: they are not proof that EFT can apply this kit to this limb.
+    // The reader probes every usable instance for CanApplyItem; a new applicable instance
+    // therefore releases the block via CanApply=true even if the template remains identical.
+    private static string BuildNativeApplicabilityContext(OperatorDecisionSnapshot snapshot, string targetPart)
+    {
+        var actionability = snapshot.Medical.Actionability;
+        return "debtTarget=" + Safe(SafeTarget(targetPart))
+            + "|actionTarget=" + Safe(SafeTarget(actionability.TargetPart))
+            + "|item=" + Safe(actionability.SelectedItemTemplateId)
+            + "|role=" + Safe(actionability.SelectedItemRole)
+            + "|need=" + snapshot.Medical.Need.DominantNeed;
+    }
+
     private static string BuildReadinessSignature(OperatorDecisionSnapshot snapshot)
     {
         var actionability = snapshot.Medical.Actionability;
@@ -834,6 +957,8 @@ internal static class VanguardSurgeryDebtService
         public string RetryState { get; set; } = "Detected";
         public bool BlockedUntilStateChange { get; set; }
         public string StateBoundBlockSignature { get; set; } = "none";
+        public bool NativeApplicabilityBlocked { get; set; }
+        public string NativeApplicabilityContext { get; set; } = "none";
     }
 }
 #endif

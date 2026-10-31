@@ -10,6 +10,7 @@ using Vanguard.Client.Raid.Runtime;
 using Vanguard.Client.Runtime.Audit;
 using Vanguard.Client.Runtime.Decision;
 using Vanguard.Client.Runtime.Execution;
+using Vanguard.Client.Runtime.External;
 using Vanguard.Client.Runtime.Integrations.Looting;
 using Vanguard.Client.Runtime.Medical.Execution;
 using Vanguard.Client.Runtime.Movement;
@@ -41,6 +42,7 @@ internal static class VanguardOpportunisticLootBroker
     private static readonly TimeSpan TickInterval = TimeSpan.FromSeconds(0.85d);
     private static readonly TimeSpan LogInterval = TimeSpan.FromSeconds(2.00d);
     private static readonly TimeSpan PreventRefreshInterval = TimeSpan.FromSeconds(1.75d);
+    private static readonly TimeSpan PreventDuration = TimeSpan.FromSeconds(3.00d);
 
     public static void ResetForRaidLifecycle(string reason)
     {
@@ -56,6 +58,56 @@ internal static class VanguardOpportunisticLootBroker
         bootLogged = false;
         VanguardClientDiagnosticsLog.Info(StatusTag,
             $"VANGUARD_LOOT_BROKER_RESET reason={Safe(reason)}; activeGrant=none; oneLooter=true; cooldowns=cleared; tag={StatusTag}; hardReturnBackoffTag={VanguardMovementAuthorityDoctrine.HardReturnCombatBackoffStatusTag}");
+    }
+
+    public static string ForgetRuntimePresence(string? botProfileId, string reason)
+    {
+        string key = string.IsNullOrWhiteSpace(botProfileId) ? "none" : botProfileId.Trim();
+        if (string.Equals(key, "none", StringComparison.OrdinalIgnoreCase))
+        {
+            return "lootRuntime=ignored_missing_profile";
+        }
+
+        int localRemoved = 0;
+        lock (Sync)
+        {
+            if (ScanCooldownByBotProfileId.Remove(key)) localRemoved++;
+            if (PreventRefreshByBotProfileId.Remove(key)) localRemoved++;
+            if (activeGrant.HasValue && string.Equals(activeGrant.Value.BotProfileId, key, StringComparison.OrdinalIgnoreCase))
+            {
+                activeGrant = null;
+                localRemoved++;
+            }
+
+            foreach (string logKey in LastLogByKey.Keys.ToArray())
+            {
+                if (logKey.IndexOf(key, StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    LastLogByKey.Remove(logKey);
+                    localRemoved++;
+                }
+            }
+        }
+
+        string corpseSession = VanguardCorpseLootSessionExecutor.ForgetRuntimePresence(key, reason);
+        string corpseApproach = VanguardCorpseLootApproachExecutor.ForgetRuntimePresence(key, reason);
+        string containerSession = VanguardWorldLootContainerSessionExecutor.ForgetRuntimePresence(key, reason);
+        string containerApproach = VanguardWorldLootContainerApproachExecutor.ForgetRuntimePresence(key, reason);
+        int containerReadModel = VanguardWorldLootContainerReadOnlyEvaluator.ForgetRuntimePresence(key, reason);
+        VanguardLootItemClaimStore.ReleaseByBot(key, "runtime_presence_lost:" + reason);
+        bool targetClaimReleased = VanguardLootTargetClaimStore.ReleaseByBot(
+            key,
+            "runtime_presence_lost:" + reason,
+            out VanguardLootTargetClaim _);
+
+        return "lootRuntime=forgotten;local=" + localRemoved
+            + ";corpseSession=" + Safe(corpseSession)
+            + ";corpseApproach=" + Safe(corpseApproach)
+            + ";containerSession=" + Safe(containerSession)
+            + ";containerApproach=" + Safe(containerApproach)
+            + ";containerReadModel=" + containerReadModel
+            + ";itemClaimsReleased=true;targetClaimReleased=" + Bool(targetClaimReleased)
+            + ";normalTerminal=false;outcomeMemoryMutation=false;externalResume=false;reason=" + Safe(reason);
     }
 
     public static void Tick()
@@ -76,7 +128,7 @@ internal static class VanguardOpportunisticLootBroker
         {
             bootLogged = true;
             VanguardClientDiagnosticsLog.Info(StatusTag,
-                $"VANGUARD_LOOT_BROKER_BOOT legacyGlobalAdmissionIgnored=true; playerScopedAdmission=corpse_snapshot_owner_resolved; mode=operator_lootingbots_suppression_only; maxDistance=player_scoped_owner_resolved; activeLootPath=vanguard_corpse_qualification_claim_approach; selectedClaimantAlsoSuppressed=true; f12DisabledStillSuppressed=true; preventBackend=LootingBots.External.PreventBotFromLooting_transition_guard; noAutonomousLootDriver=true; noForceScan=true; tag={StatusTag}; clientBuildTag={ClientBuildStatusTag}; build={VanguardBuildVersion.BuildLabel}");
+                $"VANGUARD_LOOT_BROKER_BOOT legacyGlobalAdmissionIgnored=true; playerScopedAdmission=corpse_snapshot_owner_resolved; mode=operator_lootingbots_suppression_only; maxDistance=player_scoped_owner_resolved; activeLootPath=vanguard_corpse_qualification_claim_approach; selectedClaimantAlsoSuppressed=true; f12DisabledStillSuppressed=true; preventBackend=VanguardExternalAuthorityAdapter_continuous_refresh_guard; noAutonomousLootDriver=true; noForceScan=true; tag={StatusTag}; clientBuildTag={ClientBuildStatusTag}; build={VanguardBuildVersion.BuildLabel}");
         }
 
         var snapshots = VanguardOperatorDecisionSnapshotService.GetLatestSnapshots();
@@ -85,8 +137,8 @@ internal static class VanguardOpportunisticLootBroker
             return;
         }
 
-        if (VanguardCorpseLootApproachDoctrine.ApproachExecutionEnabled
-            && VanguardMovementAuthorityDoctrine.OpportunisticLootBrokerEnabled)
+        bool approachExecutionEnabled = VanguardCorpseLootApproachDoctrine.ApproachExecutionEnabled;
+        if (approachExecutionEnabled)
         {
             lock (Sync)
             {
@@ -95,16 +147,7 @@ internal static class VanguardOpportunisticLootBroker
 
             // The runtime movement is entirely Vanguard-owned. LootingBots remains suppressed for every
             // Operator, including the selected corpse-loot claimant; it never receives a temporary grant.
-            PreventUnsafeLooters(snapshots, now, selectedBotProfileId: null, "claim_and_approach_boundary");
-            return;
-        }
-
-        if (!VanguardMovementAuthorityDoctrine.OpportunisticLootBrokerEnabled)
-        {
-            // F12 disables Vanguard corpse-loot admission only. LootingBots remains suppressed for
-            // Operators until a future explicit integration phase grants it a reviewed authority.
-            ClearGrantIfAny(now, "f12_disabled", snapshots);
-            PreventUnsafeLooters(snapshots, now, selectedBotProfileId: null, "f12_disabled_lootingbots_still_suppressed");
+            RefreshLootingBotsSuppression(snapshots, now, diagnosticSelectedBotProfileId: null, "claim_and_approach_boundary");
             return;
         }
 
@@ -115,7 +158,7 @@ internal static class VanguardOpportunisticLootBroker
             selected = activeGrant?.BotProfileId;
         }
 
-        PreventUnsafeLooters(snapshots, now, selected, "single_looter_policy");
+        RefreshLootingBotsSuppression(snapshots, now, selected, "single_looter_policy");
         if (selected != null)
         {
             return;
@@ -149,11 +192,11 @@ internal static class VanguardOpportunisticLootBroker
             }
 
             bool forceScan = TryForceLootScan(record.BotOwner, snapshot, out var scanSummary);
-            DateTimeOffset until = now + TimeSpan.FromSeconds(VanguardMovementAuthorityDoctrine.OpportunisticLootGrantSeconds);
+            DateTimeOffset until = now + TimeSpan.FromSeconds(VanguardMovementAuthorityDoctrine.ForOwner(snapshot.OwnerProfileId).OpportunisticLootGrantSeconds);
             lock (Sync)
             {
                 activeGrant = new LootGrant(snapshot.OperatorId, snapshot.BotProfileId, until, forceScan, scanSummary);
-                ScanCooldownByBotProfileId[snapshot.BotProfileId] = now + TimeSpan.FromSeconds(VanguardMovementAuthorityDoctrine.OpportunisticLootScanCooldownSeconds);
+                ScanCooldownByBotProfileId[snapshot.BotProfileId] = now + TimeSpan.FromSeconds(VanguardMovementAuthorityDoctrine.ForOwner(snapshot.OwnerProfileId).OpportunisticLootScanCooldownSeconds);
             }
 
             VanguardClientDiagnosticsLog.Info(StatusTag,
@@ -241,32 +284,27 @@ internal static class VanguardOpportunisticLootBroker
             return;
         }
 
-        string prevent = botOwner == null ? "prevent=skipped_no_botowner" : PreventLoot(botOwner, 2.0f);
+        string prevent = botOwner == null
+            ? "prevent=skipped_no_botowner"
+            : VanguardExternalAuthorityAdapter.RequestLootingBotsAutonomySuppression(
+                botOwner,
+                "grant_clear:" + reason,
+                TimeSpan.FromSeconds(2.0d),
+                cleanupActiveState: true);
         VanguardClientDiagnosticsLog.Info(StatusTag,
             $"VANGUARD_LOOT_GRANT_CLEARED operator={Safe(snapshot?.OperatorId ?? grant.Value.OperatorId)}; botProfile={Safe(grant.Value.BotProfileId)}; reason={Safe(reason)}; prevent={Safe(prevent)}; forceScanAtStart={Bool(grant.Value.ForceScanIssued)}; scan={Safe(grant.Value.ScanSummary)}; tag={StatusTag}");
     }
 
-    private static void PreventUnsafeLooters(IReadOnlyList<OperatorDecisionSnapshot> snapshots, DateTimeOffset now, string? selectedBotProfileId, string reason)
+    private static void RefreshLootingBotsSuppression(IReadOnlyList<OperatorDecisionSnapshot> snapshots, DateTimeOffset now, string? diagnosticSelectedBotProfileId, string reason)
     {
+        // LootingBots suppression is a standing Operator firewall, not a response to unsafe state.
+        // Every live Operator receives a refresh before the previous TTL expires, including a stable
+        // idle Operator with no current loot target. This prevents LootingBots' own scheduled scan
+        // from ever becoming a competing movement authority. A selected Vanguard loot claimant is
+        // diagnostic context only and is never exempted from the external-autonomy suppression.
         foreach (var snapshot in snapshots)
         {
             if (snapshot == null || string.IsNullOrWhiteSpace(snapshot.BotProfileId))
-            {
-                continue;
-            }
-
-            if (string.Equals(snapshot.BotProfileId, selectedBotProfileId, StringComparison.OrdinalIgnoreCase) && IsGrantStillSafe(snapshot, snapshots, out _))
-            {
-                continue;
-            }
-
-            bool activeLoot = snapshot.Looting.BotLooting == true || snapshot.Looting.LootTaskRunning == true || snapshot.Looting.HasActiveLootable == true;
-            if (!activeLoot && IsGrantStillSafe(snapshot, snapshots, out _))
-            {
-                continue;
-            }
-
-            if (!ShouldRefreshPrevent(snapshot.BotProfileId, now))
             {
                 continue;
             }
@@ -276,9 +314,21 @@ internal static class VanguardOpportunisticLootBroker
                 continue;
             }
 
-            string prevent = PreventLoot(record.BotOwner, 3.0f);
+            // Do not consume the refresh cadence until a live runtime owner exists; otherwise an
+            // attach-order race could spend the firewall window without actually extending LootingBots suppression.
+            if (!ShouldRefreshPrevent(snapshot.BotProfileId, now))
+            {
+                continue;
+            }
+
+            bool activeLoot = snapshot.Looting.BotLooting == true || snapshot.Looting.LootTaskRunning == true || snapshot.Looting.HasActiveLootable == true;
+            string prevent = VanguardExternalAuthorityAdapter.RequestLootingBotsAutonomySuppression(
+                record.BotOwner,
+                "operator_firewall:" + reason,
+                PreventDuration,
+                cleanupActiveState: activeLoot);
             LogThrottled("prevent|" + snapshot.BotProfileId + "|" + reason, now,
-                () => $"VANGUARD_LOOT_PREVENTED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; reason={Safe(reason)}; selected={Safe(selectedBotProfileId)}; prevent={Safe(prevent)}; lootActive={Bool(activeLoot)}; directThreat={Bool(VanguardMovementAuthorityDoctrine.IsTrueDirectThreat(snapshot))}; inBubble={Bool(snapshot.SquadCohesion.InBubble)}; medical={Safe(snapshot.Medical.Need.DominantNeed.ToString())}; tag={StatusTag}");
+                () => $"VANGUARD_LOOT_PREVENTED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; reason={Safe(reason)}; selectedDiagnostic={Safe(diagnosticSelectedBotProfileId)}; prevent={Safe(prevent)}; lootActive={Bool(activeLoot)}; continuousSuppression=true; cleanupActiveState={Bool(activeLoot)}; refreshSeconds={PreventRefreshInterval.TotalSeconds:0.00}; ttlSeconds={PreventDuration.TotalSeconds:0.00}; directThreat={Bool(VanguardMovementAuthorityDoctrine.IsTrueDirectThreat(snapshot))}; inBubble={Bool(snapshot.SquadCohesion.InBubble)}; medical={Safe(snapshot.Medical.Need.DominantNeed.ToString())}; tag={StatusTag}");
         }
     }
 
@@ -298,6 +348,13 @@ internal static class VanguardOpportunisticLootBroker
 
     private static bool IsGrantEligible(OperatorDecisionSnapshot snapshot, IReadOnlyList<OperatorDecisionSnapshot> snapshots, DateTimeOffset now, out string reason)
     {
+        var ownerPolicy = VanguardMovementAuthorityDoctrine.ForOwner(snapshot.OwnerProfileId);
+        if (!ownerPolicy.OpportunisticLootBrokerEnabled)
+        {
+            reason = "owner_loot_broker_disabled";
+            return false;
+        }
+
         if (!IsGrantStillSafe(snapshot, snapshots, out reason))
         {
             return false;
@@ -315,7 +372,7 @@ internal static class VanguardOpportunisticLootBroker
             return false;
         }
 
-        if (snapshot.Looting.DistanceToLoot.HasValue && snapshot.Looting.DistanceToLoot.Value > VanguardMovementAuthorityDoctrine.OpportunisticLootMaxDistanceMeters)
+        if (snapshot.Looting.DistanceToLoot.HasValue && snapshot.Looting.DistanceToLoot.Value > ownerPolicy.OpportunisticLootMaxDistanceMeters)
         {
             reason = "loot_too_far:" + snapshot.Looting.DistanceToLoot.Value.ToString("0.0", CultureInfo.InvariantCulture);
             return false;
@@ -360,7 +417,7 @@ internal static class VanguardOpportunisticLootBroker
             return false;
         }
 
-        if (snapshot.SquadCohesion.OperatorDistanceToOwner > Math.Max(8.0f, VanguardMovementAuthorityDoctrine.TacticalBubbleMeters - 8.0f))
+        if (snapshot.SquadCohesion.OperatorDistanceToOwner > Math.Max(8.0f, VanguardMovementAuthorityDoctrine.ForOwner(snapshot.OwnerProfileId).TacticalBubbleMeters - 8.0f))
         {
             reason = "near_bubble_edge";
             return false;
@@ -444,7 +501,7 @@ internal static class VanguardOpportunisticLootBroker
             }
 
             float distance = HorizontalDistance(other.Position, subject.Position);
-            if (distance > VanguardMovementAuthorityDoctrine.TacticalSquadPressureBlockMeters)
+            if (distance > VanguardMovementAuthorityDoctrine.ForOwner(subject.OwnerProfileId).TacticalSquadPressureBlockMeters)
             {
                 continue;
             }
@@ -472,7 +529,7 @@ internal static class VanguardOpportunisticLootBroker
         if (snapshot.Looting.HasFreeSpace == true) score += 8f;
         if (snapshot.SquadCohesion.UsefulPosition) score += 8f;
         if (snapshot.RealSpeed < 0.35f) score += 4f;
-        if (snapshot.Looting.DistanceToLoot.HasValue) score += Math.Max(0f, VanguardMovementAuthorityDoctrine.OpportunisticLootMaxDistanceMeters - snapshot.Looting.DistanceToLoot.Value);
+        if (snapshot.Looting.DistanceToLoot.HasValue) score += Math.Max(0f, VanguardMovementAuthorityDoctrine.ForOwner(snapshot.OwnerProfileId).OpportunisticLootMaxDistanceMeters - snapshot.Looting.DistanceToLoot.Value);
         if (snapshot.Medical.Need.HasAnyNeed) score -= 30f;
         if (snapshot.SquadCohesion.SectorDuplicate) score -= 10f;
         if (!snapshot.SquadCohesion.SectorTopologyValid) score -= 20f;
@@ -488,20 +545,11 @@ internal static class VanguardOpportunisticLootBroker
 
     public static string PreventForVanguardOwnedWindow(BotOwner botOwner, float seconds, string reason)
     {
-        string result = PreventLoot(botOwner, seconds);
-        return "reason=" + Safe(reason) + ";" + result;
-    }
-
-    private static string PreventLoot(BotOwner botOwner, float seconds)
-    {
-        Type? externalType = VanguardOperatorRuntimeAuditReflection.FindType("LootingBots.External");
-        if (externalType == null)
-        {
-            return "external_type_missing";
-        }
-
-        object? result = VanguardOperatorRuntimeAuditReflection.InvokeStatic(externalType, "PreventBotFromLooting", botOwner, seconds);
-        return result is bool b ? "PreventBotFromLooting=" + Bool(b) + ":seconds=" + seconds.ToString("0.0", CultureInfo.InvariantCulture) : "PreventBotFromLooting_result=" + Safe(result?.ToString());
+        return VanguardExternalAuthorityAdapter.RequestLootingBotsAutonomySuppression(
+            botOwner,
+            "vanguard_owned_window:" + reason,
+            TimeSpan.FromSeconds(Math.Max(1.0f, seconds)),
+            cleanupActiveState: true);
     }
 
     private static void LogReject(OperatorDecisionSnapshot snapshot, DateTimeOffset now, string reason)

@@ -4,10 +4,10 @@ using System.Collections.Generic;
 using System.Globalization;
 using UnityEngine;
 
-// Responsibility: Provides Action Rally Anchor Scorer support for the movement/cohesion runtime.
-// Flow: The file encapsulates one bounded piece of the subsystem and exchanges explicit inputs/results with neighboring services instead of relying on hidden cross-system state.
-// Authority boundary: Authority remains with the owning subsystem and any external EFT/SPT/Fika/SAIN component explicitly referenced by its call path.
-// Invariant: Behavior stays scoped to the current profile/raid/process contract and preserves existing safety and compatibility boundaries.
+// Responsibility: Score and rank candidate action-rally anchors against owner distance, path cost and recent failures.
+// Flow: Evaluate path length and owner-ring penalties, apply outcome-memory penalties and choose the highest accepted score.
+// Authority boundary: The scorer reads movement doctrine and outcome evidence; a separate movement executor owns command issuance.
+// Invariant: Candidates exceeding the path hard limit or minimum-score threshold are not accepted for selection.
 namespace Vanguard.Client.Runtime.Movement;
 
 /// <summary>
@@ -19,6 +19,7 @@ internal static class VanguardActionRallyAnchorScorer
 {
     public static VanguardActionRallyAnchorCandidate Score(
         string botProfileId,
+        string ownerProfileId,
         Vector3 botPosition,
         Vector3 ownerPosition,
         Vector3 anchor,
@@ -32,10 +33,11 @@ internal static class VanguardActionRallyAnchorScorer
         DateTimeOffset now,
         bool ownerFallback = false)
     {
+        var ownerPolicy = VanguardMovementAuthorityDoctrine.ForOwner(ownerProfileId);
         float straightDistance = HorizontalDistance(botPosition, anchor);
         float expectedPath = Math.Max(45f, bubbleDistanceMeters * 1.05f);
         float softLimit = Math.Max(110f, bubbleDistanceMeters * 1.35f);
-        float hardLimit = Math.Max(VanguardMovementAuthorityDoctrine.ActionRallyAnchorHardRejectMeters, bubbleDistanceMeters * 1.85f);
+        float hardLimit = Math.Max(ownerPolicy.ActionRallyAnchorHardRejectMeters, bubbleDistanceMeters * 1.85f);
         bool excessivePath = pathDistanceMeters > hardLimit;
         string memoryReason;
         bool memoryPenalty = VanguardMovementOutcomeMemory.ShouldPenalizeAnchor(botProfileId, anchor, now, out memoryReason);
@@ -46,7 +48,7 @@ internal static class VanguardActionRallyAnchorScorer
             pathPenalty += (pathDistanceMeters - softLimit) * 0.90f;
         }
 
-        float ownerPenalty = Math.Abs(ownerDistanceMeters - VanguardMovementAuthorityDoctrine.ActionRallyPreferredMeters) * 1.35f;
+        float ownerPenalty = Math.Abs(ownerDistanceMeters - ownerPolicy.ActionRallyPreferredMeters) * 1.35f;
         float radiusPenalty = radiusIndex * 1.75f;
         float directionPenalty = directionIndex > 2 ? 2.5f : 0f;
         float fallbackPenalty = ownerFallback ? 8f : 0f;

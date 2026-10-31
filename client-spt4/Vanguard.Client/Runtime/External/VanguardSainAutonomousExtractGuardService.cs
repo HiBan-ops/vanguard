@@ -2,6 +2,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using Vanguard.Client;
@@ -50,6 +51,62 @@ internal static class VanguardSainAutonomousExtractGuardService
         ExtractTimeVetoLogged.Clear();
         VanguardClientDiagnosticsLog.Info(StatusTag,
             $"VANGUARD_SAIN_AUTONOMOUS_EXTRACT_GUARD_RESET reason={Safe(reason)}; operatorsOnly=true; keepsPmcCombatProfile=true; autonomousExtract=false; explicitVanguardExfilNotImplemented=true; tag={StatusTag}");
+    }
+
+    public static string ForgetRuntimePresence(string? botProfileId, string reason)
+    {
+        string key = string.IsNullOrWhiteSpace(botProfileId) ? string.Empty : botProfileId.Trim();
+        if (key.Length == 0)
+        {
+            return "ignored=missing_bot_profile";
+        }
+
+        int removed = 0;
+        if (SainComponentByBotProfileId.Remove(key)) removed++;
+        if (RetryAfterByBotProfileId.Remove(key)) removed++;
+        if (HardenedBotProfiles.Remove(key)) removed++;
+
+        foreach (object component in ProfileIdBySainComponent.Where(pair => string.Equals(pair.Value, key, StringComparison.OrdinalIgnoreCase)).Select(pair => pair.Key).ToArray())
+        {
+            ProfileIdBySainComponent.Remove(component);
+            removed++;
+        }
+
+        removed += RemoveProfileKeys(PermissionVetoLogged, key);
+        removed += RemoveProfileKeys(LayerVetoLogged, key);
+        removed += RemoveProfileKeys(ExtractTimeVetoLogged, key);
+        foreach (string logKey in LastLogAtByKey.Keys.Where(value => IsProfileScopedKey(value, key)).ToArray())
+        {
+            LastLogAtByKey.Remove(logKey);
+            removed++;
+        }
+
+        return $"removed={removed}; cachedSainObjectReleased=true; sainMutation=false; reason={Safe(reason)}";
+    }
+
+    private static int RemoveProfileKeys(HashSet<string> values, string botProfileId)
+    {
+        int removed = 0;
+        foreach (string value in values.Where(value => IsProfileScopedKey(value, botProfileId)).ToArray())
+        {
+            values.Remove(value);
+            removed++;
+        }
+        return removed;
+    }
+
+    private static bool IsProfileScopedKey(string value, string botProfileId)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return false;
+        }
+
+        string token = "|" + botProfileId + "|";
+        return string.Equals(value, botProfileId, StringComparison.OrdinalIgnoreCase)
+            || value.StartsWith(botProfileId + "|", StringComparison.OrdinalIgnoreCase)
+            || value.EndsWith("|" + botProfileId, StringComparison.OrdinalIgnoreCase)
+            || value.IndexOf(token, StringComparison.OrdinalIgnoreCase) >= 0;
     }
 
     public static void Tick(IReadOnlyList<OperatorDecisionSnapshot> snapshots, DateTimeOffset now)
@@ -117,8 +174,7 @@ internal static class VanguardSainAutonomousExtractGuardService
         botProfileId = ResolveProfileIdFromAny(source);
         return source != null
             && !string.IsNullOrWhiteSpace(botProfileId)
-            && (VanguardRaidOperatorRuntimeRegistry.TryGetRuntimeByBotProfileId(botProfileId, out _)
-                || VanguardRaidOperatorRuntimeRegistry.IsExpectedOperatorBotProfileId(botProfileId));
+            && TryGetExactPresentRuntime(source, botProfileId, out _);
     }
 
     public static void RecordPermissionVeto(object? source, string botProfileId, string gate, DateTimeOffset now)
@@ -232,9 +288,9 @@ internal static class VanguardSainAutonomousExtractGuardService
             return false;
         }
 
-        if (!VanguardRaidOperatorRuntimeRegistry.TryGetRuntimeByBotProfileId(botProfileId, out var runtime))
+        if (!TryGetExactPresentRuntime(sainBotComponent, botProfileId, out VanguardRaidOperatorRuntimeRecord runtime))
         {
-            summary = "veto=false;reason=not_vanguard_operator;botProfile=" + Safe(botProfileId);
+            summary = "veto=false;reason=runtime_presence_or_exact_bot_owner_mismatch;botProfile=" + Safe(botProfileId);
             return false;
         }
 
@@ -316,6 +372,69 @@ internal static class VanguardSainAutonomousExtractGuardService
     private static string ResolveProfileIdCached(object? sainBotComponent)
     {
         return ResolveProfileIdFromAny(sainBotComponent);
+    }
+
+    private static bool TryGetExactPresentRuntime(
+        object? source,
+        string botProfileId,
+        out VanguardRaidOperatorRuntimeRecord runtime)
+    {
+        runtime = null!;
+        if (source == null
+            || string.IsNullOrWhiteSpace(botProfileId)
+            || !VanguardRaidOperatorRuntimeRegistry.TryGetRuntimeByBotProfileId(botProfileId, out VanguardRaidOperatorRuntimeRecord candidate)
+            || !candidate.IsRuntimePresent
+            || candidate.BotOwner == null)
+        {
+            return false;
+        }
+
+        object? exactBotOwner = ReferenceEquals(candidate.BotOwner, source)
+            ? source
+            : ResolveBotOwnerFromAny(source);
+        if (exactBotOwner == null || !ReferenceEquals(candidate.BotOwner, exactBotOwner))
+        {
+            return false;
+        }
+
+        runtime = candidate;
+        return true;
+    }
+
+    private static object? ResolveBotOwnerFromAny(object? source)
+    {
+        return ResolveBotOwnerFromAny(source, new HashSet<object>(ReferenceObjectComparer.Instance), 0);
+    }
+
+    private static object? ResolveBotOwnerFromAny(object? source, HashSet<object> visited, int depth)
+    {
+        if (source == null || depth > 5 || !visited.Add(source))
+        {
+            return null;
+        }
+
+        object? direct = GetPropertyOrFieldDeep(source, "BotOwner", "BotOwner_0");
+        if (direct != null)
+        {
+            return direct;
+        }
+
+        object? bot = GetPropertyOrFieldDeep(source, "Bot");
+        object? resolved = ResolveBotOwnerFromAny(bot, visited, depth + 1);
+        if (resolved != null)
+        {
+            return resolved;
+        }
+
+        object? info = GetPropertyOrFieldDeep(source, "Info");
+        resolved = ResolveBotOwnerFromAny(info, visited, depth + 1);
+        if (resolved != null)
+        {
+            return resolved;
+        }
+
+        object? sain = GetPropertyOrFieldDeep(source, "SAIN", "BotComponent", "Component");
+        return ResolveBotOwnerFromAny(sain, visited, depth + 1);
     }
 
     private static string ResolveProfileIdFromAny(object? source)

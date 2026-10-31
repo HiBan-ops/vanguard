@@ -50,6 +50,28 @@ internal static class VanguardCohesionPlanningBudget
         deferralSerial = 0;
     }
 
+    public static void ForgetRuntimePresence(string? botProfileId)
+    {
+        string bot = string.IsNullOrWhiteSpace(botProfileId) ? string.Empty : botProfileId.Trim();
+        if (string.IsNullOrWhiteSpace(bot))
+        {
+            return;
+        }
+
+        foreach (string key in CandidateCursorByKey.Keys
+            .Where(value => string.Equals(BotProfileFromCursorKey(value), bot, StringComparison.OrdinalIgnoreCase))
+            .ToArray())
+        {
+            CandidateCursorByKey.Remove(key);
+        }
+
+        if (string.Equals(selectedBotProfileId, bot, StringComparison.OrdinalIgnoreCase))
+        {
+            selectedBotProfileId = string.Empty;
+            planningScope = false;
+        }
+    }
+
     public static void BeginTick(IReadOnlyList<OperatorDecisionSnapshot> snapshots, DateTimeOffset now)
     {
         usedPathCalculations = 0;

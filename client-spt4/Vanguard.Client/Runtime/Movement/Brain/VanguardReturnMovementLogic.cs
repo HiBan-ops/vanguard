@@ -1,9 +1,10 @@
-#if SPT_CLIENT
+﻿#if SPT_CLIENT
 using System;
 using DrakiaXYZ.BigBrain.Brains;
 using EFT;
 using Vanguard.Client.Runtime.Movement;
 using Vanguard.Client.Runtime.Grenades;
+using Vanguard.Client.Runtime.Movement.Diagnostics;
 using UnityEngine;
 using UnityEngine.AI;
 
@@ -15,18 +16,24 @@ namespace Vanguard.Client.Runtime.Movement.Brain;
 
 /// <summary>
 /// BigBrain action that owns the movement backend during a Vanguard movement lease. Terminal
-/// movements keep the vanilla GoToSomePointData bridge. TravelCohesionFollowThrough instead uses
-/// a continuous direct GoToPoint path with slowAtTheEnd=false, preserving one locomotion episode
-/// while the monotonic corridor advances its anchor.
+/// movements keep the vanilla GoToSomePointData bridge. TravelCohesionFollowThrough uses a
+/// continuous direct GoToPoint path with slowAtTheEnd=false. TacticalCoordinatorAltDevelop and TacticalCoordinatorDirectCommit are
+/// different: BigBrain retains the exact Vanguard command lease, but physical path execution is
+/// delegated to SAIN BotPathDataManual through the TC Search translation bridge.
 /// </summary>
 internal sealed class VanguardReturnMovementLogic : CustomLogic
 {
     private long activeGeneration;
     private Vector3 activeAnchor;
     private bool activeContinuousTravel;
+    private bool activeTacticalCoordinatorAltDevelop;
+    private bool activeTacticalCoordinatorDirectCommit;
+    private bool activeTacticalCoordinatorOpportunity;
+    private bool activeMedicSupportCombatRendezvous;
     private DateTimeOffset lastSetPointAtUtc = DateTimeOffset.MinValue;
     private DateTimeOffset lastPathCheckAtUtc = DateTimeOffset.MinValue;
     private bool activeTacticalAuthoringHold;
+    private bool activeTacticalCoordinatorAntiCongaHold;
 
     private const string TacticalAuthoringPreviewRequestKind = "TacticalAuthoringLivePreview";
     private const float TacticalAuthoringHoldEnterPaddingMeters = 0.25f;
@@ -40,6 +47,7 @@ internal sealed class VanguardReturnMovementLogic : CustomLogic
     public override void Start()
     {
         ClearLocalState();
+        VanguardTemporalSchedulingProbeService.ObserveBigBrainActionStart(BotOwner);
     }
 
     public override void Stop()
@@ -61,7 +69,7 @@ internal sealed class VanguardReturnMovementLogic : CustomLogic
                 // GoToSomePoint backend during a BigBrain handoff would resurrect the old authored
                 // target exactly when SAIN/medical/grenade is becoming sovereign. Other movement
                 // requests use the standard reset behavior.
-                if (!activeTacticalAuthoringHold)
+                if (!activeTacticalAuthoringHold && !activeTacticalCoordinatorAltDevelop && !activeTacticalCoordinatorDirectCommit && !activeTacticalCoordinatorOpportunity && !activeMedicSupportCombatRendezvous)
                 {
                     ResetMovementBackend(activeContinuousTravel);
                 }
@@ -74,6 +82,7 @@ internal sealed class VanguardReturnMovementLogic : CustomLogic
                     "grenade_emergency_bigbrain_stop_suppressed",
                     "physical_lease_owned_by_emergency_service");
             }
+            VanguardTemporalSchedulingProbeService.ObserveBigBrainActionStop(botOwner, active);
             ClearLocalState();
         }
         catch
@@ -87,9 +96,34 @@ internal sealed class VanguardReturnMovementLogic : CustomLogic
         activeGeneration = 0L;
         activeAnchor = Vector3.zero;
         activeContinuousTravel = false;
+        activeTacticalCoordinatorAltDevelop = false;
+        activeTacticalCoordinatorDirectCommit = false;
+        activeTacticalCoordinatorOpportunity = false;
+        activeMedicSupportCombatRendezvous = false;
         lastSetPointAtUtc = DateTimeOffset.MinValue;
         lastPathCheckAtUtc = DateTimeOffset.MinValue;
         activeTacticalAuthoringHold = false;
+        activeTacticalCoordinatorAntiCongaHold = false;
+    }
+
+    private void EnsureVanillaMoverOwnershipReady(VanguardReturnMovementCommand command, string phase)
+    {
+        // SAIN manual movement deliberately uses BotMover.Pause as a mutex while it
+        // drives Player.Move directly. A Vanguard command that takes ownership of the vanilla
+        // BotMover must normalize that mutex exactly once at command-generation entry. Do not
+        // Stop/restart the backend here: this is ownership normalization, not recovery churn.
+        if (BotOwner?.Mover == null)
+        {
+            return;
+        }
+
+        bool wasPaused = BotOwner.Mover.Pause;
+        BotOwner.Mover.MovementResume();
+        VanguardReturnMovementCommandStore.ReportLogicDrive(
+            BotOwner,
+            command,
+            "vanilla_mover_ownership_normalized",
+            $"phase={phase}:wasPaused={wasPaused}:pauseNow={BotOwner.Mover.Pause}:backendRestart=false");
     }
 
     private void ResetMovementBackend(bool stopContinuousPath = false)
@@ -122,14 +156,19 @@ internal sealed class VanguardReturnMovementLogic : CustomLogic
         {
             if (activeGeneration != 0L)
             {
-                if (!activeTacticalAuthoringHold)
+                if (!activeTacticalAuthoringHold && !activeTacticalCoordinatorAltDevelop && !activeTacticalCoordinatorDirectCommit && !activeTacticalCoordinatorOpportunity && !activeMedicSupportCombatRendezvous)
                 {
                     ResetMovementBackend(activeContinuousTravel);
                 }
+                // AltDevelop path lifetime is owned by SearchTranslationGateBridge. The TC lease
+                // terminal releases/disposes that exact SAIN path; this BigBrain adapter must not
+                // stop the vanilla mover and accidentally interfere with SAIN's fallback path.
                 ClearLocalState();
             }
             return;
         }
+
+        VanguardTemporalSchedulingProbeService.ObserveMovementCommandConsume(BotOwner, command);
 
         if (activeTacticalAuthoringHold && !IsTacticalAuthoringPreview(command))
         {
@@ -137,10 +176,61 @@ internal sealed class VanguardReturnMovementLogic : CustomLogic
             // into grenade/medical/cohesion/other Vanguard movement semantics.
             activeTacticalAuthoringHold = false;
         }
+        if (activeTacticalCoordinatorAntiCongaHold && !IsTacticalCoordinatorAntiCongaHold(command))
+        {
+            activeTacticalCoordinatorAntiCongaHold = false;
+        }
+        if (activeTacticalCoordinatorAltDevelop
+            && !VanguardContinuousCohesionLocomotionPolicy.IsTacticalCoordinatorAltDevelopRequest(command.RequestKind))
+        {
+            activeTacticalCoordinatorAltDevelop = false;
+        }
+        if (activeTacticalCoordinatorDirectCommit
+            && !VanguardContinuousCohesionLocomotionPolicy.IsTacticalCoordinatorDirectCommitRequest(command.RequestKind))
+        {
+            activeTacticalCoordinatorDirectCommit = false;
+        }
+        if (activeTacticalCoordinatorOpportunity
+            && !VanguardContinuousCohesionLocomotionPolicy.IsTacticalCoordinatorOpportunityRequest(command.RequestKind))
+        {
+            activeTacticalCoordinatorOpportunity = false;
+        }
+        if (activeMedicSupportCombatRendezvous
+            && !VanguardContinuousCohesionLocomotionPolicy.IsMedicSupportSainPathRequest(command.RequestKind))
+        {
+            activeMedicSupportCombatRendezvous = false;
+        }
 
         if (VanguardReturnMovementCommandStore.IsGrenadeEmergencyRequest(command.RequestKind))
         {
             DriveEmergencyGrenadeMovement(command, now);
+            return;
+        }
+
+        if (IsTacticalCoordinatorAntiCongaHold(command))
+        {
+            DriveTacticalCoordinatorAntiCongaStationaryHold(command, now);
+            return;
+        }
+
+        if (VanguardContinuousCohesionLocomotionPolicy.IsTacticalCoordinatorAltDevelopRequest(command.RequestKind))
+        {
+            DriveTacticalCoordinatorAltDevelopSainPathLease(command, now);
+            return;
+        }
+        if (VanguardContinuousCohesionLocomotionPolicy.IsTacticalCoordinatorDirectCommitRequest(command.RequestKind))
+        {
+            DriveTacticalCoordinatorAltDevelopSainPathLease(command, now);
+            return;
+        }
+        if (VanguardContinuousCohesionLocomotionPolicy.IsTacticalCoordinatorOpportunityRequest(command.RequestKind))
+        {
+            DriveTacticalCoordinatorAltDevelopSainPathLease(command, now);
+            return;
+        }
+        if (VanguardContinuousCohesionLocomotionPolicy.IsMedicSupportSainPathRequest(command.RequestKind))
+        {
+            DriveTacticalCoordinatorAltDevelopSainPathLease(command, now);
             return;
         }
 
@@ -165,8 +255,53 @@ internal sealed class VanguardReturnMovementLogic : CustomLogic
         activeGeneration = command.Generation;
         activeAnchor = command.Anchor;
         activeContinuousTravel = true;
+        activeTacticalCoordinatorAltDevelop = false;
+        activeTacticalCoordinatorDirectCommit = false;
+        activeTacticalCoordinatorOpportunity = false;
+        activeMedicSupportCombatRendezvous = false;
         lastSetPointAtUtc = now;
         VanguardReturnMovementCommandStore.ReportLogicDrive(BotOwner, command, "grenade_emergency_physical_lease", result);
+    }
+
+    private void DriveTacticalCoordinatorAltDevelopSainPathLease(VanguardReturnMovementCommand command, DateTimeOffset now)
+    {
+        bool directCommit = VanguardContinuousCohesionLocomotionPolicy.IsTacticalCoordinatorDirectCommitRequest(command.RequestKind);
+        bool tacticalOpportunity = VanguardContinuousCohesionLocomotionPolicy.IsTacticalCoordinatorOpportunityRequest(command.RequestKind);
+        bool medicSupport = VanguardContinuousCohesionLocomotionPolicy.IsMedicSupportSainPathRequest(command.RequestKind);
+        bool requestAlreadyActive = medicSupport
+            ? activeMedicSupportCombatRendezvous
+            : tacticalOpportunity
+                ? activeTacticalCoordinatorOpportunity
+                : directCommit ? activeTacticalCoordinatorDirectCommit : activeTacticalCoordinatorAltDevelop;
+        bool newCommand = command.Generation != activeGeneration || !requestAlreadyActive;
+        bool anchorChanged = (command.Anchor - activeAnchor).sqrMagnitude > 0.25f;
+
+        // Deliberately do not call BotOwner.GoToPoint, GoToSomePointData.SetPoint, Mover.Stop,
+        // Sprint or SetTargetMoveSpeed here. SAIN disables the vanilla combat-mover fixed
+        // update and owns physical combat translation through BotPathDataManual. TC owns the exact
+        // destination/path lease; SearchTranslationGateBridge binds that destination into SAIN's
+        // active manual path and lets SAIN TickPath execute it.
+        activeGeneration = command.Generation;
+        activeAnchor = command.Anchor;
+        activeContinuousTravel = false;
+        activeTacticalCoordinatorAltDevelop = !directCommit && !tacticalOpportunity && !medicSupport;
+        activeTacticalCoordinatorDirectCommit = directCommit;
+        activeTacticalCoordinatorOpportunity = tacticalOpportunity;
+        activeMedicSupportCombatRendezvous = medicSupport;
+        lastSetPointAtUtc = now;
+
+        if (newCommand || anchorChanged)
+        {
+            VanguardReturnMovementCommandStore.ReportLogicDrive(
+                BotOwner,
+                command,
+                medicSupport ? "medic_support_combat_rendezvous_sain_path_authority"
+                    : tacticalOpportunity ? "tc_tactical_opportunity_sain_path_authority"
+                    : directCommit ? "tc_direct_commit_sain_path_authority" : "tc_alt_develop_sain_path_authority",
+                (newCommand ? "new_command" : "anchor_observed")
+                    + (medicSupport ? ":destination_owned_by_medic_support" : ":destination_owned_by_tc")
+                    + ":physical_tick_owned_by_sain:vanilla_go_to_point=false");
+        }
     }
 
     private void DriveContinuousTravel(VanguardReturnMovementCommand command, DateTimeOffset now)
@@ -197,6 +332,11 @@ internal sealed class VanguardReturnMovementLogic : CustomLogic
                     "same_travel_lease_never_resets_backend");
             }
 
+            if (newCommand)
+            {
+                EnsureVanillaMoverOwnershipReady(command, "continuous_travel_new_command");
+            }
+
             NavMeshPathStatus status = BotOwner.GoToPoint(
                 command.Anchor,
                 false,
@@ -207,6 +347,9 @@ internal sealed class VanguardReturnMovementLogic : CustomLogic
             activeGeneration = command.Generation;
             activeAnchor = command.Anchor;
             activeContinuousTravel = true;
+            activeTacticalCoordinatorAltDevelop = false;
+            activeTacticalCoordinatorDirectCommit = false;
+            activeTacticalCoordinatorOpportunity = false;
             lastSetPointAtUtc = now;
             VanguardReturnMovementCommandStore.ReportLogicDrive(
                 BotOwner,
@@ -226,6 +369,10 @@ internal sealed class VanguardReturnMovementLogic : CustomLogic
 
     private void DriveTerminalMovement(VanguardReturnMovementCommand command, DateTimeOffset now)
     {
+        activeTacticalCoordinatorAltDevelop = false;
+        activeTacticalCoordinatorDirectCommit = false;
+        activeTacticalCoordinatorOpportunity = false;
+        activeMedicSupportCombatRendezvous = false;
         if (IsTacticalAuthoringPreview(command))
         {
             float anchorDistance = HorizontalDistance(BotOwner.Position, command.Anchor);
@@ -262,6 +409,11 @@ internal sealed class VanguardReturnMovementLogic : CustomLogic
 
         if (refreshSetPoint)
         {
+            if (newCommand)
+            {
+                EnsureVanillaMoverOwnershipReady(command, "terminal_movement_new_command");
+            }
+
             if (newCommand && command.ResetBackendBeforeSetPoint)
             {
                 ResetMovementBackend();
@@ -328,6 +480,47 @@ internal sealed class VanguardReturnMovementLogic : CustomLogic
                 entering ? "tactical_authoring_stationary_hold_enter" : "tactical_authoring_stationary_hold_reassert",
                 $"distance={anchorDistance:0.00}:pathWasActive={pathWasActive}:orientationOwnedByAuthoringWatch=true");
         }
+    }
+
+    private void DriveTacticalCoordinatorAntiCongaStationaryHold(VanguardReturnMovementCommand command, DateTimeOffset now)
+    {
+        bool entering = !activeTacticalCoordinatorAntiCongaHold || command.Generation != activeGeneration;
+        bool pathWasActive = BotOwner.Mover?.HasPathAndNoComplete == true;
+        if (entering || pathWasActive)
+        {
+            // anti-conga owns only the locomotion slot for a short scheduler-admitted hold. It emits no
+            // path and does not touch target/aim/fire semantics. Stop is asserted on entry and only
+            // reasserted if a path unexpectedly appears while the exact command remains owned.
+            BotOwner.Mover?.Stop();
+            BotOwner.Sprint(false, true);
+            BotOwner.Mover?.Sprint(false, false);
+            BotOwner.SetTargetMoveSpeed(0f);
+            BotOwner.Mover?.SetTargetMoveSpeed(0f);
+        }
+
+        activeTacticalCoordinatorAntiCongaHold = true;
+        activeTacticalCoordinatorAltDevelop = false;
+        activeTacticalCoordinatorDirectCommit = false;
+        activeTacticalCoordinatorOpportunity = false;
+        activeMedicSupportCombatRendezvous = false;
+        activeGeneration = command.Generation;
+        activeAnchor = command.Anchor;
+        activeContinuousTravel = false;
+        lastSetPointAtUtc = now;
+
+        if (entering || pathWasActive)
+        {
+            VanguardReturnMovementCommandStore.ReportLogicDrive(
+                BotOwner,
+                command,
+                entering ? "tc_anti_conga_anti_conga_hold_enter" : "tc_anti_conga_anti_conga_hold_reassert",
+                $"pathWasActive={pathWasActive}:movementOnly=true:targetAimFireMutation=false:pathEmitted=false");
+        }
+    }
+
+    private static bool IsTacticalCoordinatorAntiCongaHold(VanguardReturnMovementCommand command)
+    {
+        return VanguardReturnMovementCommandStore.IsTacticalCoordinatorAntiCongaHoldRequest(command.RequestKind);
     }
 
     private static bool IsTacticalAuthoringPreview(VanguardReturnMovementCommand command)

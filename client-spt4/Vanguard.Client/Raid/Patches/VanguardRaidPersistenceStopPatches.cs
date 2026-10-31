@@ -49,6 +49,11 @@ internal sealed class VanguardRaidPersistenceLocalStopPatch : ModulePatch
     [PatchPrefix]
     private static void PatchPrefix(string __0, ExitStatus __1, string __2, float __3)
     {
+        if (VanguardRaidOperatorController.IsPostPersistenceRuntimeTeardownApplied)
+        {
+            return;
+        }
+
         VanguardRaidPersistenceStopBoundaryDiagnostics.Record("eft_localgame_stop_prefix", __0, __1, __2, __3);
         try
         {
@@ -68,6 +73,10 @@ internal sealed class VanguardRaidPersistenceLocalStopPatch : ModulePatch
         {
             VanguardClientDiagnosticsLog.Warning(VanguardRaidOperatorPersistenceService.StatusTag,
                 $"VANGUARD_LOCAL_STOP_PATCH_FAILED type={exception.GetType().Name}; message={exception.Message}; failOpenGameShutdown=true");
+        }
+        finally
+        {
+            VanguardRaidOperatorController.ReleaseRuntimeAfterPersistenceAtRaidStop("eft_localgame_stop_prefix");
         }
     }
 }
@@ -95,6 +104,11 @@ internal sealed class VanguardRaidPersistenceFikaStopPatch : ModulePatch
     [PatchPrefix]
     private static void PatchPrefix(string __0, ExitStatus __1, string __2, float __3)
     {
+        if (VanguardRaidOperatorController.IsPostPersistenceRuntimeTeardownApplied)
+        {
+            return;
+        }
+
         VanguardRaidPersistenceStopBoundaryDiagnostics.Record("fika_coopgame_stop_prefix", __0, __1, __2, __3);
         try
         {
@@ -115,11 +129,15 @@ internal sealed class VanguardRaidPersistenceFikaStopPatch : ModulePatch
             VanguardClientDiagnosticsLog.Warning(VanguardRaidOperatorPersistenceService.StatusTag,
                 $"VANGUARD_FIKA_STOP_PATCH_FAILED type={exception.GetType().Name}; message={exception.Message}; failOpenGameShutdown=true");
         }
+        finally
+        {
+            VanguardRaidOperatorController.ReleaseRuntimeAfterPersistenceAtRaidStop("fika_coopgame_stop_prefix");
+        }
     }
 }
 
 /// <summary>
-/// Fika Headless 1.4.x owns a distinct IFikaGame implementation and does not execute CoopGame.Stop.
+/// Fika Headless owns a distinct IFikaGame implementation and does not execute CoopGame.Stop.
 /// Patching CoopGame alone covers ordinary Fika hosts but misses the dedicated headless raid-close boundary.
 /// The Headless assembly is loaded before Vanguard on the
 /// supported stack, so type availability is a safe optional capability probe with no compile-time
@@ -146,6 +164,11 @@ internal sealed class VanguardRaidPersistenceFikaHeadlessStopPatch : ModulePatch
     [PatchPrefix]
     private static void PatchPrefix(string __0, ExitStatus __1, string __2, float __3)
     {
+        if (VanguardRaidOperatorController.IsPostPersistenceRuntimeTeardownApplied)
+        {
+            return;
+        }
+
         VanguardRaidPersistenceStopBoundaryDiagnostics.Record("fika_headless_headlessgame_stop_prefix", __0, __1, __2, __3);
         try
         {
@@ -170,8 +193,9 @@ internal sealed class VanguardRaidPersistenceFikaHeadlessStopPatch : ModulePatch
         }
         finally
         {
-            // Once the real Headless Stop boundary has captured or attempted persistence, quiesce only the recurring
-            // background gameplay/polling work that would otherwise continue after FikaServer disposal.
+            // Cleanup must run while the old Headless raid objects are still live. Only after exact raid-scoped
+            // Vanguard runtime has been sealed do we suppress recurring plugin work through the inter-raid gap.
+            VanguardRaidOperatorController.ReleaseRuntimeAfterPersistenceAtRaidStop("fika_headless_headlessgame_stop_prefix");
             VanguardHeadlessPostRaidQuiescenceService.Begin("fika_headless_headlessgame_stop_prefix_after_persistence_attempt");
         }
     }

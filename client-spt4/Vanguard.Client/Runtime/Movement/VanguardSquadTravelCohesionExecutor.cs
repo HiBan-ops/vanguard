@@ -14,6 +14,7 @@ using Vanguard.Client.Runtime.Decision;
 using Vanguard.Client.Runtime.Execution;
 using Vanguard.Client.Runtime.External;
 using Vanguard.Client.Runtime.Movement.Brain;
+using Vanguard.Client.Runtime.SquadCohesion;
 
 // Responsibility: maintains one monotonic owner-travel lease per Operator along the owner corridor.
 // Flow: Owner motion and Operator separation select a forward corridor anchor; the executor validates and acquires a travel lease, drives toward that anchor, retargets inside the same generation as the owner moves, and ends the lease once useful cohesion is restored.
@@ -80,6 +81,12 @@ internal static class VanguardSquadTravelCohesionExecutor
             return true;
         }
 
+        if (TacticalIntentContinuityService.ShouldDeferCohesion(snapshot, now, out string tacticalIntentReason))
+        {
+            reason = "tactical_intent_continuity:" + tacticalIntentReason;
+            return false;
+        }
+
         lock (Sync)
         {
             if (CooldownByBotProfileId.TryGetValue(snapshot.BotProfileId, out var cooldownUntil) && cooldownUntil > now)
@@ -132,6 +139,54 @@ internal static class VanguardSquadTravelCohesionExecutor
             $"VANGUARD_TRAVEL_COHESION_RESET reason={Safe(reason)}; active=0; cooldowns=cleared; physicalFailureMemory=cleared; travelAuthorityHeartbeats=cleared; doctrine=travel_follow_through_and_same_volume_join_no_slot_churn; tag={StatusTag}; physicalTag={PhysicalLivenessStatusTag}; moveBridgeTag={VanguardReturnMovementCommandStore.StatusTag}");
     }
 
+    public static string ForgetRuntimePresence(string? botProfileId, DateTimeOffset now, string reason)
+    {
+        string key = string.IsNullOrWhiteSpace(botProfileId) ? string.Empty : botProfileId.Trim();
+        if (key.Length == 0)
+        {
+            return "missing_identity";
+        }
+
+        TravelLeaseState active = default;
+        bool activeRemoved;
+        bool cooldownRemoved;
+        bool failureRemoved;
+        bool heartbeatRemoved;
+        lock (Sync)
+        {
+            activeRemoved = ActiveByBotProfileId.TryGetValue(key, out active);
+            if (activeRemoved)
+            {
+                ActiveByBotProfileId.Remove(key);
+            }
+            cooldownRemoved = CooldownByBotProfileId.Remove(key);
+            failureRemoved = PhysicalFailureByBotProfileId.Remove(key);
+            heartbeatRemoved = LastTravelAuthorityHeartbeatByBotProfileId.Remove(key);
+        }
+
+        string commandCleanup = "none";
+        if (activeRemoved)
+        {
+            commandCleanup = VanguardReturnMovementCommandStore.ClearOwned(
+                active.BotProfileId,
+                active.LeaseId,
+                active.StartedAtUtc,
+                "runtime_presence_lost:" + reason);
+        }
+
+        VanguardSquadTravelCohesionAuthority.ClearHold(key, now, "runtime_presence_lost:" + reason);
+        bool routeCursorRemoved = VanguardSquadTravelRouteMemory.ForgetRuntimePresence(key);
+        string summary = "activeRemoved=" + Bool(activeRemoved)
+            + ";cooldownRemoved=" + Bool(cooldownRemoved)
+            + ";failureRemoved=" + Bool(failureRemoved)
+            + ";heartbeatRemoved=" + Bool(heartbeatRemoved)
+            + ";routeCursorRemoved=" + Bool(routeCursorRemoved)
+            + ";commandCleanup=" + Safe(commandCleanup);
+        VanguardClientDiagnosticsLog.Info(StatusTag,
+            $"VANGUARD_TRAVEL_RUNTIME_PRESENCE_FORGOTTEN botProfile={Safe(key)}; reason={Safe(reason)}; {summary}; schedulerTerminal=false; schedulerHandback=false; postReturnHoldCleared=true; externalResume=false; staleTravelResume=false; tag={StatusTag}");
+        return summary;
+    }
+
     public static void Tick()
     {
         DateTimeOffset now = DateTimeOffset.UtcNow;
@@ -146,17 +201,12 @@ internal static class VanguardSquadTravelCohesionExecutor
         {
             bootLogged = true;
             VanguardClientDiagnosticsLog.Info(StatusTag,
-                $"VANGUARD_TRAVEL_COHESION_BOOT enabled={Bool(VanguardMovementAuthorityDoctrine.TacticalRepositionActiveEnabled)}; scope=monotonic_travel_corridor_same_volume_join; noSlotRedistribution=true; routeMemory=append_only_breadcrumbs; sprint=mode_hysteresis; catchUpEnter={VanguardMovementAuthorityDoctrine.TravelCatchUpEnterMeters:0.0}; catchUpExit={VanguardMovementAuthorityDoctrine.TravelCatchUpExitMeters:0.0}; modeDwell={VanguardMovementAuthorityDoctrine.TravelModeDwellSeconds:0.00}; emergencyEnter={VanguardMovementAuthorityDoctrine.HardCorrectionMeters:0.0}; emergencyExit={VanguardMovementAuthorityDoctrine.SoftCorrectionMeters:0.0}; travelStart={VanguardMovementAuthorityDoctrine.TravelCohesionStartMeters:0.0}; postReturnHold={VanguardMovementAuthorityDoctrine.TravelCohesionPostReturnHoldSeconds:0.0}; travelTarget={VanguardMovementAuthorityDoctrine.TravelCohesionTargetMeters:0.0}; volumeTarget={VanguardMovementAuthorityDoctrine.TacticalVolumeJoinTargetMeters:0.0}; maxTravel={VanguardMovementAuthorityDoctrine.TravelCohesionMaxDurationSeconds:0.0}; maxVolume={VanguardMovementAuthorityDoctrine.TacticalVolumeJoinMaxDurationSeconds:0.0}; physicalSample={VanguardMovementAuthorityDoctrine.TravelPhysicalSampleSeconds:0.00}; physicalMeaningful={VanguardMovementAuthorityDoctrine.TravelPhysicalMeaningfulDisplacementMeters:0.00}; blockedDetect={VanguardMovementAuthorityDoctrine.TravelPhysicalBlockedDetectSeconds:0.00}; continuousBlockedConfirm={VanguardContinuousCohesionLocomotionPolicy.ContinuousBlockedConfirmationSeconds:0.00}; continuousNoProgress={VanguardContinuousCohesionLocomotionPolicy.ContinuousNoProgressSeconds:0.00}; retargetLead={VanguardMovementAuthorityDoctrine.TravelRetargetLeadDistanceMeters:0.0}; schedulerHeartbeat={VanguardMovementAuthorityDoctrine.TravelSchedulerHeartbeatSeconds:0.00}; schedulerHeartbeatTimeout={VanguardMovementAuthorityDoctrine.TravelSchedulerHeartbeatTimeoutSeconds:0.00}; recentReacquireAuthorityGap={VanguardMovementAuthorityDoctrine.TravelRecentReacquireMinimumPauseSeconds:0.00}; postInterruptionReconcileGap={VanguardMovementAuthorityDoctrine.TravelPostInterruptionReconcileMinimumPauseSeconds:0.00}; postInterruptionMaxOwnerDistance={VanguardMovementAuthorityDoctrine.TravelPostInterruptionReconcileMaximumOwnerDistanceMeters:0.0}; postInterruptionMinDebt={VanguardMovementAuthorityDoctrine.TravelPostInterruptionReconcileMinimumDebtMeters:0.0}; excludes=productiveDirectThreat_stationaryMedical_criticalLoot; continuousBackend=direct_GoToPoint_slowAtEnd_false; travelRestart=forbidden; hardReturn=fallback_only_when_route_unavailable; Tag={VanguardMovementAuthorityDoctrine.CombatCohesionAuthorityStatusTag}; physicalTag={PhysicalLivenessStatusTag}; tag={StatusTag}; moveBridgeTag={VanguardReturnMovementCommandStore.StatusTag}; build={VanguardBuildVersion.BuildLabel}");
+                $"VANGUARD_TRAVEL_COHESION_BOOT enabled=player_scoped_owner_profile_id; movementF12Scope=PLAYER_SCOPED; scope=monotonic_travel_corridor_same_volume_join; noSlotRedistribution=true; routeMemory=append_only_breadcrumbs; sprint=mode_hysteresis; excludes=productiveDirectThreat_stationaryMedical_criticalLoot; continuousBackend=direct_GoToPoint_slowAtEnd_false; travelRestart=forbidden; hardReturn=fallback_only_when_route_unavailable; Tag={VanguardMovementAuthorityDoctrine.CombatCohesionAuthorityStatusTag}; physicalTag={PhysicalLivenessStatusTag}; tag={StatusTag}; moveBridgeTag={VanguardReturnMovementCommandStore.StatusTag}; build={VanguardBuildVersion.BuildLabel}");
         }
 
         var snapshots = VanguardOperatorDecisionSnapshotService.GetLatestSnapshots();
         VanguardSquadTravelRouteMemory.Update(snapshots, now);
         TickActiveLeases(snapshots, now);
-        if (!VanguardMovementAuthorityDoctrine.TacticalRepositionActiveEnabled)
-        {
-            return;
-        }
-
         // Runtime invariant: owner travel admission is latency-sensitive and may not sit behind the
         // optional planning budget.  Expensive path work remains bounded per owner and per frame
         // inside TryStartLeases, but every eligible Operator is reconsidered on each travel tick.
@@ -272,6 +322,41 @@ internal static class VanguardSquadTravelCohesionExecutor
                 continue;
             }
 
+            // Logical-intent continuity: deliberate tactical separation is not cohesion drift.
+            // A retained flank/overwatch intention must survive short SAIN/local-authority interruptions,
+            // so Travel yields before draining any TC physical state. Material threat/close-contact changes
+            // invalidate the continuity inside the shared arbiter and then normal cohesion may proceed.
+            if (TacticalIntentContinuityService.ShouldDeferCohesion(snapshot, now, out string tacticalIntentReason))
+            {
+                LogThrottled("tacticalIntent|" + snapshot.BotProfileId + "|" + tacticalIntentReason, now,
+                    $"VANGUARD_TRAVEL_COHESION_BLOCKED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; request={Safe(snapshot.MovementAuthority.BrokerPlan.Contract.RequestKind)}; reason=tactical_intent_continuity:{Safe(tacticalIntentReason)}; deliberateSeparation=true; tcDrain=false; staleResume=false; tag={StatusTag}; intentTag={TacticalIntentContinuityService.StatusTag}");
+                continue;
+            }
+
+            // RF-06 physical-authority ordering: Travel may supersede static Tactical Coordination
+            // movement only after the exact TC physical contribution is CLEAN. Preserve the explicit
+            // AltDevelop exception: an active AltDevelop primary remains stronger than Travel and must
+            // reach TryOpenTravelCorridor unchanged so the scheduler can deny Travel without draining TC.
+            bool tcAltDevelopPrimaryProtected = VanguardMainIntentScheduler.TryGetActiveTacticalCoordinatorAltDevelopWindow(
+                snapshot.BotProfileId,
+                now,
+                out _,
+                out _,
+                out _,
+                out _);
+            if (!tcAltDevelopPrimaryProtected)
+            {
+                var tcDrain = TacticalCoordinationPhysicalAuthorityBarrier.DrainForHigherAuthority(
+                    snapshot.BotProfileId,
+                    now,
+                    "travel_corridor_acquire:" + (volumeJoin ? "tactical_volume_join" : "travel_cohesion_follow_through"));
+                if (tcDrain.AnyTcStateDrained)
+                {
+                    VanguardClientDiagnosticsLog.Info(StatusTag,
+                        $"VANGUARD_TRAVEL_TC_AUTHORITY_DRAIN operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; request={Safe(snapshot.MovementAuthority.BrokerPlan.Contract.RequestKind)}; {tcDrain.Summary}; tcCleanBeforeTravelSchedulerOpen=true; altDevelopPrimaryProtected=false; staleResume=false; tag={TacticalCoordinationPhysicalAuthorityBarrier.StatusTag}; travelTag={StatusTag}");
+                }
+            }
+
             if (!VanguardMainIntentScheduler.TryOpenTravelCorridor(snapshot, now, out var windowId, out var openReason))
             {
                 LogThrottled("open|" + snapshot.BotProfileId + "|" + openReason, now,
@@ -279,6 +364,8 @@ internal static class VanguardSquadTravelCohesionExecutor
                 continue;
             }
 
+            // The movement lease identity exists BEFORE mutating external state (transactional admission).
+            string leaseId = (volumeJoin ? "volume_join_" : "travel_corridor_") + now.ToUnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture) + "_" + Safe(snapshot.BotProfileId);
             if (NeedsExternalPreempt(snapshot))
             {
                 var preempt = VanguardExternalAuthorityAdapter.RequestOrbitAuthorityQuiesce(
@@ -286,14 +373,17 @@ internal static class VanguardSquadTravelCohesionExecutor
                     snapshot,
                     volumeJoin ? "tactical_volume_join" : "travel_cohesion_follow_through",
                     TimeSpan.FromSeconds(MaxDurationSeconds(volumeJoin) + VanguardMovementAuthorityDoctrine.OrbitQuiesceRefreshSeconds + 3.0f),
-                    now);
+                    now,
+                    ownerLeaseId: leaseId,
+                    ownerWindowId: windowId);
                 string softDriveReason = string.Empty;
                 if (!preempt.CanDriveMovement && !CanSoftDriveAfterNonCriticalPreempt(snapshot, preempt, volumeJoin, out softDriveReason))
                 {
                     SetCooldown(snapshot.BotProfileId, now, FailureCooldownSeconds(volumeJoin));
                     VanguardMainIntentScheduler.FinishPrimaryWindow(snapshot.BotProfileId, now, "Failed", "external_preempt_not_granted:" + preempt.Outcome, preempt.Summary, windowId);
+                    string externalRelease = ReleaseTravelQuiesceAfterAdmissionAbort(record.BotOwner, snapshot.BotProfileId, now, leaseId, windowId, "external_preempt_not_granted:" + preempt.Outcome);
                     VanguardClientDiagnosticsLog.Operational(StatusTag, () =>
-                        $"VANGUARD_TRAVEL_COHESION_ABORTED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; request={Safe(snapshot.MovementAuthority.BrokerPlan.Contract.RequestKind)}; reason=external_preempt_not_granted; outcome={preempt.Outcome}; fullPreemptPayload=false; fullPlanPayload=false; tag={StatusTag}");
+                        $"VANGUARD_TRAVEL_COHESION_ABORTED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; request={Safe(snapshot.MovementAuthority.BrokerPlan.Contract.RequestKind)}; reason=external_preempt_not_granted; outcome={preempt.Outcome}; externalRelease={Safe(externalRelease)}; fullPreemptPayload=false; fullPlanPayload=false; tag={StatusTag}");
                     VanguardClientDiagnosticsLog.Trace(StatusTag, () =>
                         $"VANGUARD_TRAVEL_COHESION_ABORTED_TRACE botProfile={Safe(snapshot.BotProfileId)}; preempt={Safe(preempt.Summary)}; plan={Safe(plan.Summary)}; tag={StatusTag}");
                     continue;
@@ -313,7 +403,6 @@ internal static class VanguardSquadTravelCohesionExecutor
             // rejected Travel command cannot leave the Operator without its previous movement.
             string claimYieldSummary = "claim_not_yet_yielded";
 
-            string leaseId = (volumeJoin ? "volume_join_" : "travel_corridor_") + now.ToUnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture) + "_" + Safe(snapshot.BotProfileId);
             DateTimeOffset maxUntil = now + TimeSpan.FromSeconds(MaxDurationSeconds(volumeJoin));
             float anchorRadius = volumeJoin
                 ? VanguardMovementAuthorityDoctrine.TacticalVolumeJoinAnchorRadiusMeters
@@ -337,8 +426,9 @@ internal static class VanguardSquadTravelCohesionExecutor
             {
                 SetCooldown(snapshot.BotProfileId, now, FailureCooldownSeconds(volumeJoin));
                 VanguardMainIntentScheduler.FinishPrimaryWindow(snapshot.BotProfileId, now, "Failed", "move_bridge_rejected:" + commandResult, plan.Summary, windowId);
+                string externalRelease = ReleaseTravelQuiesceAfterAdmissionAbort(record.BotOwner, snapshot.BotProfileId, now, leaseId, windowId, "move_bridge_rejected:" + commandResult);
                 VanguardClientDiagnosticsLog.Operational(StatusTag, () =>
-                    $"VANGUARD_TRAVEL_COHESION_ABORTED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; request={Safe(snapshot.MovementAuthority.BrokerPlan.Contract.RequestKind)}; reason=move_bridge_rejected:{Safe(commandResult)}; fullPlanPayload=false; tag={StatusTag}");
+                    $"VANGUARD_TRAVEL_COHESION_ABORTED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; request={Safe(snapshot.MovementAuthority.BrokerPlan.Contract.RequestKind)}; reason=move_bridge_rejected:{Safe(commandResult)}; externalRelease={Safe(externalRelease)}; fullPlanPayload=false; tag={StatusTag}");
                 VanguardClientDiagnosticsLog.Trace(StatusTag, () =>
                     $"VANGUARD_TRAVEL_COHESION_ABORTED_TRACE botProfile={Safe(snapshot.BotProfileId)}; plan={Safe(plan.Summary)}; tag={StatusTag}");
                 continue;
@@ -354,8 +444,9 @@ internal static class VanguardSquadTravelCohesionExecutor
                 VanguardReturnMovementCommandStore.ClearOwned(snapshot.BotProfileId, leaseId, now, "travel_command_identity_not_confirmed");
                 SetCooldown(snapshot.BotProfileId, now, FailureCooldownSeconds(volumeJoin));
                 VanguardMainIntentScheduler.FinishPrimaryWindow(snapshot.BotProfileId, now, "Failed", "move_bridge_identity_not_confirmed", plan.Summary, windowId);
+                string externalRelease = ReleaseTravelQuiesceAfterAdmissionAbort(record.BotOwner, snapshot.BotProfileId, now, leaseId, windowId, "move_bridge_identity_not_confirmed");
                 VanguardClientDiagnosticsLog.Warning(StatusTag,
-                    $"VANGUARD_TRAVEL_COMMAND_IDENTITY_REJECTED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; lease={Safe(leaseId)}; request={Safe(requestKind)}; commandResult={Safe(commandResult)}; doctrine=movement_lease_requires_exact_owned_command_generation; tag={VanguardMedicalCohesionStatusTags.MovementLeaseIdentity}; moveBridgeTag={VanguardReturnMovementCommandStore.StatusTag}");
+                    $"VANGUARD_TRAVEL_COMMAND_IDENTITY_REJECTED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; lease={Safe(leaseId)}; request={Safe(requestKind)}; commandResult={Safe(commandResult)}; externalRelease={Safe(externalRelease)}; doctrine=movement_lease_requires_exact_owned_command_generation; tag={VanguardMedicalCohesionStatusTags.MovementLeaseIdentity}; moveBridgeTag={VanguardReturnMovementCommandStore.StatusTag}");
                 continue;
             }
 
@@ -371,8 +462,9 @@ internal static class VanguardSquadTravelCohesionExecutor
                 VanguardReturnMovementCommandStore.ClearOwned(snapshot.BotProfileId, leaseId, now, "travel_exact_command_identity_not_confirmed");
                 SetCooldown(snapshot.BotProfileId, now, FailureCooldownSeconds(volumeJoin));
                 VanguardMainIntentScheduler.FinishPrimaryWindow(snapshot.BotProfileId, now, "Failed", "move_bridge_exact_identity_not_confirmed:" + exactCommandReason, plan.Summary, windowId);
+                string externalRelease = ReleaseTravelQuiesceAfterAdmissionAbort(record.BotOwner, snapshot.BotProfileId, now, leaseId, windowId, "move_bridge_exact_identity_not_confirmed:" + exactCommandReason);
                 VanguardClientDiagnosticsLog.Warning(StatusTag,
-                    $"VANGUARD_TRAVEL_COMMAND_IDENTITY_REJECTED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; lease={Safe(leaseId)}; request={Safe(requestKind)}; generation={ownedCommand.Generation}; commandResult={Safe(commandResult)}; reason={Safe(exactCommandReason)}; commandCleared=true; doctrine=movement_lease_requires_exact_owned_command_generation; tag={VanguardMedicalCohesionStatusTags.MovementLeaseIdentity}; moveBridgeTag={VanguardReturnMovementCommandStore.StatusTag}");
+                    $"VANGUARD_TRAVEL_COMMAND_IDENTITY_REJECTED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; lease={Safe(leaseId)}; request={Safe(requestKind)}; generation={ownedCommand.Generation}; commandResult={Safe(commandResult)}; reason={Safe(exactCommandReason)}; commandCleared=true; externalRelease={Safe(externalRelease)}; doctrine=movement_lease_requires_exact_owned_command_generation; tag={VanguardMedicalCohesionStatusTags.MovementLeaseIdentity}; moveBridgeTag={VanguardReturnMovementCommandStore.StatusTag}");
                 continue;
             }
 
@@ -409,15 +501,16 @@ internal static class VanguardSquadTravelCohesionExecutor
                 VanguardReturnMovementCommandStore.ClearOwned(snapshot.BotProfileId, leaseId, now, "admission_cursor_reconciliation_commit_rejected");
                 SetCooldown(snapshot.BotProfileId, now, FailureCooldownSeconds(volumeJoin));
                 VanguardMainIntentScheduler.FinishPrimaryWindow(snapshot.BotProfileId, now, "Failed", "admission_cursor_reconciliation_commit_rejected:" + cursorCommitReason, plan.Summary, windowId);
+                string externalRelease = ReleaseTravelQuiesceAfterAdmissionAbort(record.BotOwner, snapshot.BotProfileId, now, leaseId, windowId, "admission_cursor_reconciliation_commit_rejected:" + cursorCommitReason);
                 if (postInterruptionReconciliationCommand)
                 {
                     VanguardClientDiagnosticsLog.Warning(RecoveryTruthStatusTag,
-                        $"VANGUARD_POST_INTERRUPTION_CORRIDOR_RECONCILIATION_REJECTED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; lease={Safe(leaseId)}; target={Safe(plan.RouteTarget.Summary)}; reason={Safe(cursorCommitReason)}; commandCleared=true; cursorMutation=false; transactional=true; tag={RecoveryTruthStatusTag}; routeTag={VanguardSquadTravelRouteMemory.PostInterruptionReconciliationStatusTag}");
+                        $"VANGUARD_POST_INTERRUPTION_CORRIDOR_RECONCILIATION_REJECTED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; lease={Safe(leaseId)}; target={Safe(plan.RouteTarget.Summary)}; reason={Safe(cursorCommitReason)}; commandCleared=true; externalRelease={Safe(externalRelease)}; cursorMutation=false; transactional=true; tag={RecoveryTruthStatusTag}; routeTag={VanguardSquadTravelRouteMemory.PostInterruptionReconciliationStatusTag}");
                 }
                 else
                 {
                     VanguardClientDiagnosticsLog.Warning(RecoveryTruthStatusTag,
-                        $"VANGUARD_RECENT_CORRIDOR_REACQUIRE_REJECTED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; lease={Safe(leaseId)}; target={Safe(plan.RouteTarget.Summary)}; reason={Safe(cursorCommitReason)}; commandCleared=true; cursorMutation=false; transactional=true; tag={RecoveryTruthStatusTag}; routeTag={VanguardSquadTravelRouteMemory.ReacquireStatusTag}");
+                        $"VANGUARD_RECENT_CORRIDOR_REACQUIRE_REJECTED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; lease={Safe(leaseId)}; target={Safe(plan.RouteTarget.Summary)}; reason={Safe(cursorCommitReason)}; commandCleared=true; externalRelease={Safe(externalRelease)}; cursorMutation=false; transactional=true; tag={RecoveryTruthStatusTag}; routeTag={VanguardSquadTravelRouteMemory.ReacquireStatusTag}");
                 }
                 continue;
             }
@@ -776,6 +869,7 @@ internal static class VanguardSquadTravelCohesionExecutor
             mutable.NextWindowRefreshAtUtc = now + TimeSpan.FromSeconds(VanguardMovementAuthorityDoctrine.TravelSchedulerHeartbeatSeconds);
             VanguardReturnMovementCommandStore.RefreshLeaseWindow(
                 mutable.BotProfileId,
+                mutable.LeaseId,
                 mutable.MaxUntilUtc,
                 "monotonic_travel_corridor");
             VanguardMainIntentScheduler.RefreshTravelCorridorWindow(
@@ -1482,12 +1576,42 @@ internal static class VanguardSquadTravelCohesionExecutor
             return mutable;
         }
 
+        bool exactTravelCommandOwned = VanguardReturnMovementCommandStore.TryGetExactOwned(
+            lease.BotProfileId,
+            lease.LeaseId,
+            lease.RequestKind,
+            lease.CommandGeneration,
+            now,
+            out _,
+            out _);
+        // A stale lease cannot quiesce physical movement after its command generation has yielded.
+        if (!exactTravelCommandOwned)
+        {
+            LogThrottled("orbitRefreshStaleLease|" + lease.BotProfileId, now,
+                $"VANGUARD_ORBIT_AUTHORITY_REFRESH_SKIPPED_STALE_TRAVEL {lease.Summary}; reason={Safe(quiesceReason)}; exactTravelCommandOwned=false; mutation=false; newerOwnerPreserved=true; tag={OrbitQuiesceStatusTag}");
+            return mutable;
+        }
+
+        bool onlySelfOwnedPathObserved = exactTravelCommandOwned
+            && !snapshot.Orbit.Active
+            && snapshot.Looting.HasActiveLootable != true
+            && snapshot.Movement.HasPath == true;
+        if (onlySelfOwnedPathObserved)
+        {
+            LogThrottled("orbitRefreshSelfOwnedPath|" + lease.BotProfileId, now,
+                $"VANGUARD_ORBIT_AUTHORITY_REFRESH_SKIPPED_SELF_OWNED_PATH {lease.Summary}; reason={Safe(quiesceReason)}; exactTravelCommandOwned=true; orbit=false; loot=false; path=true; destructivePreempt=false; generationPreserved=true; doctrine=active_travel_path_is_not_external_residue; tag={OrbitQuiesceStatusTag}; travelTag={StatusTag}");
+            return mutable;
+        }
+
         var result = VanguardExternalAuthorityAdapter.RequestOrbitAuthorityQuiesce(
             botOwner,
             snapshot,
             "active_lease_refresh:" + lease.RequestKind + ":" + quiesceReason,
             TimeSpan.FromSeconds(Math.Max(2.0f, VanguardMovementAuthorityDoctrine.OrbitQuiesceRefreshSeconds + 1.50f)),
-            now);
+            now,
+            preserveVanguardMovementPath: exactTravelCommandOwned,
+            ownerLeaseId: lease.LeaseId,
+            ownerWindowId: lease.WindowId);
 
         LogThrottled("orbitRefresh|" + lease.BotProfileId + "|" + result.Outcome, now,
             $"VANGUARD_ORBIT_AUTHORITY_REFRESH {lease.Summary}; outcome={result.Outcome}; canDriveMovement={Bool(result.CanDriveMovement)}; reason={Safe(quiesceReason)}; distance={snapshot.SquadCohesion.OperatorDistanceToOwner:0.0}; orbit={Bool(snapshot.Orbit.Active)}; path={Bool(snapshot.Movement.HasPath == true)}; tag={OrbitQuiesceStatusTag}; travelTag={StatusTag}");
@@ -1524,6 +1648,11 @@ internal static class VanguardSquadTravelCohesionExecutor
 
     private static string CheckStartGate(OperatorDecisionSnapshot snapshot, DateTimeOffset now, TravelLeaseState? currentLease = null)
     {
+        var ownerPolicy = VanguardMovementAuthorityDoctrine.ForOwner(snapshot.OwnerProfileId);
+        if (!ownerPolicy.TacticalRepositionActiveEnabled)
+        {
+            return "owner_movement_disabled";
+        }
         if (VanguardMainIntentScheduler.IsSainCombatExecutionProtected(snapshot.BotProfileId, now, out var combatWindowReason))
         {
             return "sain_combat_primary_protected:" + combatWindowReason;
@@ -1547,7 +1676,7 @@ internal static class VanguardSquadTravelCohesionExecutor
 
         if (VanguardCombatAwarenessBridge.HasFreshSquadCombatContact(snapshot, now, out var contactReason)
             && combatProductive
-            && snapshot.SquadCohesion.OperatorDistanceToOwner < VanguardMovementAuthorityDoctrine.CombatCohesionForcedCatchupMeters)
+            && snapshot.SquadCohesion.OperatorDistanceToOwner < ownerPolicy.CombatCohesionForcedCatchupMeters)
         {
             return "fresh_productive_squad_contact:" + contactReason + ":" + productiveReason;
         }
@@ -1593,6 +1722,17 @@ internal static class VanguardSquadTravelCohesionExecutor
 
     private static string CheckInterrupt(OperatorDecisionSnapshot snapshot, TravelLeaseState lease, DateTimeOffset now)
     {
+        if (VanguardMainIntentScheduler.TryGetActiveTacticalCoordinatorAltDevelopWindow(
+                snapshot.BotProfileId,
+                now,
+                out _,
+                out var tcState,
+                out _,
+                out _))
+        {
+            return "tc_alt_develop_primary_handoff:" + Safe(tcState);
+        }
+
         string gate = CheckStartGate(snapshot, now, lease);
         if (!string.Equals(gate, "none", StringComparison.OrdinalIgnoreCase))
         {
@@ -1609,7 +1749,8 @@ internal static class VanguardSquadTravelCohesionExecutor
             return false;
         }
 
-        return reason.StartsWith("sain_combat_primary_protected", StringComparison.OrdinalIgnoreCase)
+        return reason.StartsWith("tc_alt_develop_primary_handoff", StringComparison.OrdinalIgnoreCase)
+            || reason.StartsWith("sain_combat_primary_protected", StringComparison.OrdinalIgnoreCase)
             || reason.StartsWith("productive_combat_awareness", StringComparison.OrdinalIgnoreCase)
             || reason.StartsWith("fresh_productive_squad_contact", StringComparison.OrdinalIgnoreCase)
             || reason.StartsWith("stationary_medical_authority", StringComparison.OrdinalIgnoreCase)
@@ -2223,15 +2364,37 @@ internal static class VanguardSquadTravelCohesionExecutor
             lease.LeaseId,
             lease.StartedAtUtc,
             "scheduler_terminal:" + reason);
+        BotOwner? terminalBotOwner = null;
+        if (VanguardRaidOperatorRuntimeRegistry.TryGetRuntimeByBotProfileId(lease.BotProfileId, out var terminalRecord)
+            && terminalRecord.BotOwner != null && !terminalRecord.BotOwner.IsDead)
+        {
+            terminalBotOwner = terminalRecord.BotOwner;
+        }
+        string externalRelease = VanguardExternalAuthorityAdapter.ReleaseTravelOrbitAuthorityQuiesce(
+            terminalBotOwner, lease.BotProfileId, now, "scheduler_atomic_terminal:" + reason, lease.LeaseId, lease.WindowId);
         SetCooldown(lease.BotProfileId, now, 0f);
         VanguardSquadTravelCohesionAuthority.ClearHold(
             lease.BotProfileId,
             now,
             "scheduler_terminal_cleanup:" + reason);
-        summary = lease.Summary + ";schedulerReason=" + Safe(reason) + ";physicalCommandCleared=true";
+        summary = lease.Summary + ";schedulerReason=" + Safe(reason) + ";physicalCommandCleared=true;externalRelease=" + Safe(externalRelease);
         VanguardClientDiagnosticsLog.Warning(RecoveryTruthStatusTag,
             $"VANGUARD_TRAVEL_SCHEDULER_ATOMIC_TERMINAL {summary}; schedulerWindowAlreadyRemoved=true; executorLeaseRemoved=true; commandCleared=true; cooldown=0; freshRescore=true; doctrine=one_primary_window_one_physical_generation_one_terminal_event; tag={RecoveryTruthStatusTag}; schedulerTag={VanguardMainIntentScheduler.StatusTag}; moveBridgeTag={VanguardReturnMovementCommandStore.StatusTag}");
         return true;
+    }
+
+    private static string ReleaseTravelQuiesceAfterAdmissionAbort(BotOwner? botOwner, string botProfileId, DateTimeOffset now, string leaseId, string windowId, string reason)
+    {
+        // RequestOrbitAuthorityQuiesce is a transactional admission side effect. If
+        // Travel fails before its lease becomes authoritative, roll back only a Travel-owned
+        // suppression state. The adapter domain guard preserves any newer medical/combat owner.
+        return VanguardExternalAuthorityAdapter.ReleaseTravelOrbitAuthorityQuiesce(
+            botOwner,
+            botProfileId,
+            now,
+            "admission_abort:" + reason,
+            leaseId,
+            windowId);
     }
 
     private static void FinishLease(
@@ -2258,6 +2421,20 @@ internal static class VanguardSquadTravelCohesionExecutor
         }
 
         VanguardReturnMovementCommandStore.ClearOwned(lease.BotProfileId, lease.LeaseId, lease.StartedAtUtc, "travel_finished:" + reason);
+        BotOwner? terminalBotOwner = null;
+        if (VanguardRaidOperatorRuntimeRegistry.TryGetRuntimeByBotProfileId(lease.BotProfileId, out var terminalRecord)
+            && terminalRecord.BotOwner != null
+            && !terminalRecord.BotOwner.IsDead)
+        {
+            terminalBotOwner = terminalRecord.BotOwner;
+        }
+        string externalRelease = VanguardExternalAuthorityAdapter.ReleaseTravelOrbitAuthorityQuiesce(
+            terminalBotOwner,
+            lease.BotProfileId,
+            now,
+            outcome + ":" + reason,
+            lease.LeaseId,
+            lease.WindowId);
         float cooldownSeconds = failureCooldown ? FailureCooldownSeconds(lease.VolumeJoin) : SuccessCooldownSeconds(lease.VolumeJoin);
         SetCooldown(lease.BotProfileId, now, cooldownSeconds);
         if (!failureCooldown && recordPostReturnHold)
@@ -2277,7 +2454,7 @@ internal static class VanguardSquadTravelCohesionExecutor
             ? "VANGUARD_TRAVEL_COHESION_COMPLETED"
             : "VANGUARD_TRAVEL_COHESION_ABORTED";
         VanguardClientDiagnosticsLog.Operational(StatusTag, () =>
-            $"{log} lease={Safe(lease.LeaseId)}; operator={Safe(lease.OperatorId)}; botProfile={Safe(lease.BotProfileId)}; request={Safe(lease.RequestKind)}; mode={Safe(lease.TravelMode)}; outcome={Safe(outcome)}; reason={Safe(reason)}; ownerDistance={lease.LastOwnerDistance:0.0}; cooldown={cooldownSeconds:0.0}; fullLeasePayload=false; snapshotPayload=false; tag={StatusTag}; moveBridgeTag={VanguardReturnMovementCommandStore.StatusTag}");
+            $"{log} lease={Safe(lease.LeaseId)}; operator={Safe(lease.OperatorId)}; botProfile={Safe(lease.BotProfileId)}; request={Safe(lease.RequestKind)}; mode={Safe(lease.TravelMode)}; outcome={Safe(outcome)}; reason={Safe(reason)}; ownerDistance={lease.LastOwnerDistance:0.0}; cooldown={cooldownSeconds:0.0}; externalRelease={Safe(externalRelease)}; fullLeasePayload=false; snapshotPayload=false; tag={StatusTag}; moveBridgeTag={VanguardReturnMovementCommandStore.StatusTag}");
         VanguardClientDiagnosticsLog.Trace(StatusTag, () =>
             $"VANGUARD_TRAVEL_COHESION_TERMINAL_TRACE leaseSummary={Safe(lease.Summary)}; snapshot={Safe(snapshotSignature)}; tag={StatusTag}");
     }

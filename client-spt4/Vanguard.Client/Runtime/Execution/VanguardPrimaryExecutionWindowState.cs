@@ -13,6 +13,7 @@ internal sealed class VanguardPrimaryExecutionWindowState
     public string WindowId = "none";
     public string OperatorId = "none";
     public string BotProfileId = "none";
+    public string OwnerProfileId = "none";
     public string WindowKind = "none";
     public string State = "none";
     public string IntentKey = "none";
@@ -64,6 +65,11 @@ internal sealed class VanguardPrimaryExecutionWindowState
     public bool IsTacticalMovement => string.Equals(WindowKind, VanguardPrimaryExecutionWindowKinds.TacticalMovement, StringComparison.OrdinalIgnoreCase);
     public bool IsAuthoringPreview => string.Equals(WindowKind, VanguardPrimaryExecutionWindowKinds.AuthoringPreviewMovement, StringComparison.OrdinalIgnoreCase);
     public bool IsCloseCohesionMovement => string.Equals(WindowKind, VanguardPrimaryExecutionWindowKinds.CloseCohesionMovement, StringComparison.OrdinalIgnoreCase);
+    public bool IsMedicSupportSupplyDrop => string.Equals(WindowKind, VanguardPrimaryExecutionWindowKinds.MedicSupportSupplyDrop, StringComparison.OrdinalIgnoreCase);
+    public bool IsMedicSupportRendezvous => string.Equals(WindowKind, VanguardPrimaryExecutionWindowKinds.MedicSupportRendezvous, StringComparison.OrdinalIgnoreCase);
+    public bool IsMedicSupportPickup => string.Equals(WindowKind, VanguardPrimaryExecutionWindowKinds.MedicSupportPickup, StringComparison.OrdinalIgnoreCase);
+    public bool IsMedicSupportDirectCare => string.Equals(WindowKind, VanguardPrimaryExecutionWindowKinds.MedicSupportDirectCare, StringComparison.OrdinalIgnoreCase);
+    public bool IsMedicSupport => IsMedicSupportSupplyDrop || IsMedicSupportRendezvous || IsMedicSupportPickup || IsMedicSupportDirectCare;
     public bool IsMedical => WindowKind.IndexOf("Medical", StringComparison.OrdinalIgnoreCase) >= 0;
     public bool IsCorpseLoot => string.Equals(WindowKind, VanguardPrimaryExecutionWindowKinds.CorpseLoot, StringComparison.OrdinalIgnoreCase);
     public bool IsWorldContainerLoot => string.Equals(WindowKind, VanguardPrimaryExecutionWindowKinds.WorldContainerLoot, StringComparison.OrdinalIgnoreCase);
@@ -72,6 +78,7 @@ internal sealed class VanguardPrimaryExecutionWindowState
     public string Summary => "window=" + Safe(WindowId)
         + ";operator=" + Safe(OperatorId)
         + ";botProfile=" + Safe(BotProfileId)
+        + ";owner=" + Safe(OwnerProfileId)
         + ";kind=" + Safe(WindowKind)
         + ";state=" + Safe(State)
         + ";intent=" + Safe(IntentKey)
@@ -125,6 +132,10 @@ internal static class VanguardPrimaryExecutionWindowKinds
     public const string CloseCohesionMovement = "CloseCohesionMovementWindow";
     public const string StationaryMedical = "StationaryMedicalWindow";
     public const string MobileMedical = "MobileMedicalWindow";
+    public const string MedicSupportSupplyDrop = "MedicSupportSupplyDropMedicalWindow";
+    public const string MedicSupportRendezvous = "MedicSupportRendezvousMedicalWindow";
+    public const string MedicSupportPickup = "MedicSupportPickupMedicalWindow";
+    public const string MedicSupportDirectCare = "MedicSupportDirectCareMedicalWindow";
     public const string SainCombatRelease = "SainCombatReleaseWindow";
     public const string Rejoin = "RejoinWindow";
     public const string CorpseLoot = "CorpseLootApproachWindow";

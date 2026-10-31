@@ -1,15 +1,18 @@
 #if SPT_CLIENT
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
+using Comfort.Common;
+using EFT;
 using Vanguard.Client.Api.Dtos;
 using Vanguard.Client.Compatibility;
 using Vanguard.Client.Diagnostics;
 using Vanguard.Client.Options;
 
-// Responsibility: Provides Runtime Settings Authority Resolver support for the runtime audit.
-// Flow: The file encapsulates one bounded piece of the subsystem and exchanges explicit inputs/results with neighboring services instead of relying on hidden cross-system state.
-// Authority boundary: Authority remains with the owning subsystem and any external EFT/SPT/Fika/SAIN component explicitly referenced by its call path.
-// Invariant: Behavior stays scoped to the current profile/raid/process contract and preserves existing safety and compatibility boundaries.
+// Responsibility: Resolve player-scoped runtime settings without sharing one owner's F12 policy with another owner or headless process.
+// Flow: Cache cloned settings by owner profile ID, reject server-default placeholders and resolve missing owners through bounded fallbacks.
+// Authority boundary: The matching player's published settings own player-scoped policy; process-local F12 values are not global authority.
+// Invariant: Server-default buckets never become player-scoped authority and local fallbacks are restricted to the exact local player owner.
 namespace Vanguard.Client.Runtime.Audit;
 
 /// <summary>
@@ -20,16 +23,16 @@ namespace Vanguard.Client.Runtime.Audit;
 /// </summary>
 internal static class VanguardRuntimeSettingsAuthorityResolver
 {
-    private static readonly object Sync = new();
-    private static readonly Dictionary<string, VanguardOperatorRuntimeAuditSettingsDto> PlayerSettingsByOwner = new(StringComparer.Ordinal);
+    private static readonly object LogSync = new();
+    private static readonly ConcurrentDictionary<string, VanguardOperatorRuntimeAuditSettingsDto> PlayerSettingsByOwner = new(StringComparer.Ordinal);
     private static readonly HashSet<string> LoggedOwners = new(StringComparer.Ordinal);
     private static readonly HashSet<string> LoggedFallbackOwners = new(StringComparer.Ordinal);
 
     public static void ResetForRaidLifecycle(string reason)
     {
-        lock (Sync)
+        PlayerSettingsByOwner.Clear();
+        lock (LogSync)
         {
-            PlayerSettingsByOwner.Clear();
             LoggedOwners.Clear();
             LoggedFallbackOwners.Clear();
         }
@@ -54,9 +57,9 @@ internal static class VanguardRuntimeSettingsAuthorityResolver
             return;
         }
 
-        lock (Sync)
+        PlayerSettingsByOwner[owner] = Clone(settings);
+        lock (LogSync)
         {
-            PlayerSettingsByOwner[owner] = Clone(settings);
             if (!LoggedOwners.Add(owner))
             {
                 return;
@@ -65,21 +68,18 @@ internal static class VanguardRuntimeSettingsAuthorityResolver
 
         VanguardClientDiagnosticsLog.Info(
             VanguardBuildVersion.F12AuthorityConvergenceStatusTag,
-            $"VANGUARD_F12_PLAYER_SCOPE_APPLIED owner={Safe(owner)}; source={Safe(source)}; playerSource={Safe(settings.PlayerScopedSource)}; lootRadius={settings.MovementOpportunisticLootMaxDistanceMeters:0.0}; lootSession={settings.LootOperationalSessionEnabled}; lootTx={settings.LootMaximumTransactionsPerCorpse}; governance={Safe(settings.GovernanceVersion)}");
+            $"VANGUARD_F12_PLAYER_SCOPE_APPLIED owner={Safe(owner)}; source={Safe(source)}; playerSource={Safe(settings.PlayerScopedSource)}; lootRadius={settings.MovementOpportunisticLootMaxDistanceMeters:0.0}; tcWeapon={settings.TacticalCoordinationDangerCloseWeaponMeters:0.0}/{settings.TacticalCoordinationProactiveWeaponMeters:0.0}/{settings.TacticalCoordinationOverwatchMinimumThreatMeters:0.0}; tcBuddy={settings.TacticalCoordinationBuddyIsolationMeters:0.0}/{settings.TacticalCoordinationBuddyHelperMaxMeters:0.0}; tcFlank={settings.TacticalCoordinationFlankLeadCloseMeters:0.0}/{settings.TacticalCoordinationFlankLeadFarMeters:0.0}; tcBoundAdvance={settings.TacticalCoordinationBoundAdvanceDistanceMeters:0.0}; lootSession={settings.LootOperationalSessionEnabled}; lootTx={settings.LootMaximumTransactionsPerCorpse}; governance={Safe(settings.GovernanceVersion)}");
     }
 
     public static bool TryGetPlayerScoped(string? ownerProfileId, out VanguardOperatorRuntimeAuditSettingsDto settings)
     {
         string owner = NormalizeOwner(ownerProfileId);
-        lock (Sync)
+        if (owner != "none" && PlayerSettingsByOwner.TryGetValue(owner, out VanguardOperatorRuntimeAuditSettingsDto? cached))
         {
-            if (owner != "none" && PlayerSettingsByOwner.TryGetValue(owner, out VanguardOperatorRuntimeAuditSettingsDto? cached))
-            {
-                // Cache entries are cloned on write and treated as immutable afterwards. Returning the
-                // stable reference avoids allocating a 60+ field DTO during each loot evaluation.
-                settings = cached;
-                return true;
-            }
+            // Cache entries are cloned on write and treated as immutable afterwards. Returning the
+            // stable reference avoids allocating a 60+ field DTO during owner-scoped gameplay evaluation.
+            settings = cached;
+            return true;
         }
 
         settings = new VanguardOperatorRuntimeAuditSettingsDto();
@@ -88,45 +88,79 @@ internal static class VanguardRuntimeSettingsAuthorityResolver
 
     public static VanguardOperatorRuntimeAuditSettingsDto ResolvePlayerScoped(string? ownerProfileId, string source)
     {
-        if (TryGetPlayerScoped(ownerProfileId, out VanguardOperatorRuntimeAuditSettingsDto cached))
+        string owner = NormalizeOwner(ownerProfileId);
+        if (owner != "none"
+            && PlayerSettingsByOwner.TryGetValue(owner, out VanguardOperatorRuntimeAuditSettingsDto? cached))
         {
             return cached;
         }
 
-        // A direct player host can safely use its own local F12 values immediately. A dedicated
-        // headless cannot: its local ConfigEntry values do not belong to any player OwnerProfileId.
-        // Fail closed for opportunistic loot until the first owner pull completes rather than risk
-        // cross-owner behavior during bootstrap or a transient server-sync failure.
-        string owner = NormalizeOwner(ownerProfileId);
+        // Local F12 may be used only for the exact MainPlayer owner. Any other owner, including on a
+        // direct host, receives independent defaults until its owner-keyed server pull arrives. A
+        // dedicated headless never projects process-local ConfigEntry values into player policy.
         bool actualHeadless = VanguardFikaCompat.IsActualHeadlessProcess;
         bool logFallback;
-        lock (Sync)
+        lock (LogSync)
         {
             logFallback = LoggedFallbackOwners.Add(owner + "|" + source);
         }
 
-        VanguardOperatorRuntimeAuditSettingsDto fallback = VanguardOperatorRuntimeAuditOptions.CurrentLocalSettings(ownerProfileId, source);
-        if (actualHeadless)
-        {
-            fallback.MovementOpportunisticLootBrokerEnabled = false;
-            fallback.LootOperationalSessionEnabled = false;
-        }
+        bool exactLocalPlayerOwner = !actualHeadless && IsExactLocalPlayerOwner(owner);
+        string fallbackAuthority = exactLocalPlayerOwner
+            ? "exact_local_player_config"
+            : actualHeadless
+                ? "headless_owner_defaults_until_sync"
+                : "remote_owner_defaults_until_sync";
+        VanguardOperatorRuntimeAuditSettingsDto fallback = exactLocalPlayerOwner
+            ? VanguardOperatorRuntimeAuditOptions.CurrentLocalSettings(ownerProfileId, source)
+            : CreateUnsyncedOwnerDefaults(owner, fallbackAuthority);
 
         if (logFallback)
         {
             VanguardClientDiagnosticsLog.Warning(
                 VanguardBuildVersion.F12AuthorityConvergenceStatusTag,
-                $"VANGUARD_F12_PLAYER_SCOPE_FALLBACK owner={Safe(owner)}; source={Safe(source)}; authority={(actualHeadless ? "headless_fail_closed_until_owner_sync" : "local_player_config")}; lootAdmission={fallback.MovementOpportunisticLootBrokerEnabled}; mutation=false");
+                $"VANGUARD_F12_PLAYER_SCOPE_FALLBACK owner={Safe(owner)}; source={Safe(source)}; authority={fallbackAuthority}; exactLocalPlayerOwner={exactLocalPlayerOwner}; lootAdmission={fallback.MovementOpportunisticLootBrokerEnabled}; mutation=false");
         }
         return fallback;
     }
 
+    private static VanguardOperatorRuntimeAuditSettingsDto CreateUnsyncedOwnerDefaults(string owner, string source)
+    {
+        return new VanguardOperatorRuntimeAuditSettingsDto
+        {
+            UpdatedByProfileId = owner == "none" ? null : owner,
+            UpdatedBySource = source,
+            PlayerScopedSource = source,
+            UpdatedAtUtc = DateTimeOffset.UtcNow,
+            BuildLabel = VanguardBuildVersion.BuildLabel,
+            GovernanceVersion = VanguardRuntimeSettingsScopeCatalog.GovernanceVersion,
+            MovementOpportunisticLootBrokerEnabled = false,
+            LootOperationalSessionEnabled = false
+        };
+    }
+
+    private static bool IsExactLocalPlayerOwner(string owner)
+    {
+        if (owner == "none")
+        {
+            return false;
+        }
+
+        try
+        {
+            string? localProfileId = Singleton<GameWorld>.Instance?.MainPlayer?.ProfileId;
+            return !string.IsNullOrWhiteSpace(localProfileId)
+                && string.Equals(localProfileId.Trim(), owner, StringComparison.Ordinal);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     public static IReadOnlyList<string> GetCachedOwnerProfileIds()
     {
-        lock (Sync)
-        {
-            return new List<string>(PlayerSettingsByOwner.Keys);
-        }
+        return new List<string>(PlayerSettingsByOwner.Keys);
     }
 
     private static VanguardOperatorRuntimeAuditSettingsDto Clone(VanguardOperatorRuntimeAuditSettingsDto source)
@@ -163,6 +197,7 @@ internal static class VanguardRuntimeSettingsAuthorityResolver
             MovementTacticalBubbleMeters = source.MovementTacticalBubbleMeters,
             MovementSoftCorrectionMeters = source.MovementSoftCorrectionMeters,
             MovementHardCorrectionMeters = source.MovementHardCorrectionMeters,
+            MovementCombatCohesionForcedCatchupMeters = source.MovementCombatCohesionForcedCatchupMeters,
             MovementTravelCatchUpEnterMeters = source.MovementTravelCatchUpEnterMeters,
             MovementTravelCatchUpExitMeters = source.MovementTravelCatchUpExitMeters,
             MovementTravelModeDwellSeconds = source.MovementTravelModeDwellSeconds,
@@ -178,6 +213,21 @@ internal static class VanguardRuntimeSettingsAuthorityResolver
             MovementOpportunisticLootMaxDistanceMeters = source.MovementOpportunisticLootMaxDistanceMeters,
             MovementOpportunisticLootScanCooldownSeconds = source.MovementOpportunisticLootScanCooldownSeconds,
             MovementOpportunisticLootGrantSeconds = source.MovementOpportunisticLootGrantSeconds,
+            TacticalCoordinationDangerCloseWeaponMeters = source.TacticalCoordinationDangerCloseWeaponMeters,
+            TacticalCoordinationProactiveWeaponMeters = source.TacticalCoordinationProactiveWeaponMeters,
+            TacticalCoordinationOverwatchMinimumThreatMeters = source.TacticalCoordinationOverwatchMinimumThreatMeters,
+            TacticalCoordinationOverwatchStandoffMeters = source.TacticalCoordinationOverwatchStandoffMeters,
+            TacticalCoordinationBuddyIsolationMeters = source.TacticalCoordinationBuddyIsolationMeters,
+            TacticalCoordinationBuddyHelperMaxMeters = source.TacticalCoordinationBuddyHelperMaxMeters,
+            TacticalCoordinationFlankLeadCloseMeters = source.TacticalCoordinationFlankLeadCloseMeters,
+            TacticalCoordinationFlankLeadFarMeters = source.TacticalCoordinationFlankLeadFarMeters,
+            TacticalCoordinationBoundAdvanceDistanceMeters = source.TacticalCoordinationBoundAdvanceDistanceMeters,
+            TacticalSearchShadowComparisonEnabled = source.TacticalSearchShadowComparisonEnabled,
+            TacticalSearchShadowOwnerLimitMeters = source.TacticalSearchShadowOwnerLimitMeters,
+            TacticalSearchShadowRequireOwnerDistanceImprovement = source.TacticalSearchShadowRequireOwnerDistanceImprovement,
+            TacticalSearchShadowRetreatStepMeters = source.TacticalSearchShadowRetreatStepMeters,
+            TacticalSearchShadowLateralOffsetMeters = source.TacticalSearchShadowLateralOffsetMeters,
+            TacticalSearchShadowMaxPathMeters = source.TacticalSearchShadowMaxPathMeters,
             LootOperationalSessionEnabled = source.LootOperationalSessionEnabled,
             LootBackupLongWeaponEnabled = source.LootBackupLongWeaponEnabled,
             LootBackupPistolEnabled = source.LootBackupPistolEnabled,

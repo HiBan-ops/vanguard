@@ -86,7 +86,7 @@ internal static class VanguardTacticalAuthoringOptions
         captureFloorMax = BindShortcut(config, "Capture floor maximum", KeyCode.RightBracket, KeyCode.LeftControl,
             "Capture selected-zone MaxY from the local player standing Y plus the configured upper offset.");
         addSlot = BindShortcut(config, "Add tactical slot", KeyCode.Insert, KeyCode.LeftControl,
-            "Add a tactical slot at the local player's current position and capture gaze as WatchDirection.");
+            "Add a tactical slot at the local player's current position and capture gaze, physical posture and ADS state as durable authored intent.");
         cycleSlotType = BindShortcut(config, "Cycle slot type", KeyCode.PageUp, KeyCode.LeftControl,
             "Cycle the slot type used by the next created slot.");
         addAccess = BindShortcut(config, "Add access", KeyCode.End, KeyCode.LeftControl,
@@ -98,7 +98,7 @@ internal static class VanguardTacticalAuthoringOptions
         applyNearestSlotSettings = BindShortcut(config, "Apply slot settings to nearest slot", KeyCode.U, KeyCode.LeftControl,
             "Apply the current F12 slot type/priority/constraints/watch-arc settings to the nearest authored slot without changing its position, access link or enabled state.");
         recaptureNearestSlot = BindShortcut(config, "Recapture nearest slot position and watch", KeyCode.P, KeyCode.LeftControl,
-            "Move the nearest authored slot to the local player's current position and recapture gaze as WatchDirection while preserving its tactical settings and access link.");
+            "Move the nearest authored slot to the local player's current position and recapture gaze, physical posture and ADS state while preserving its identity, tactical settings and access link.");
         updateSelectedAccess = BindShortcut(config, "Recapture selected access", KeyCode.UpArrow, KeyCode.LeftControl,
             "Move the selected access marker to the local player's current position and recapture gaze as ApproachDirection.");
         toggleNearestSlotEnabled = BindShortcut(config, "Toggle nearest slot enabled", KeyCode.Delete, KeyCode.LeftControl,

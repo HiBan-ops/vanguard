@@ -8,6 +8,8 @@ using UnityEngine.AI;
 using Vanguard.Client.Diagnostics;
 using Vanguard.Client.Runtime.Movement;
 using Vanguard.Client.Runtime.Movement.Brain;
+using Vanguard.Client.Raid.Runtime;
+using Vanguard.Client.Runtime.Execution;
 
 // Responsibility: performs the physical escape movement for a grenade emergency after grenade policy has already selected an escape command.
 // Flow: The approved escape anchor/path is revalidated, conflicting movement is suspended, EFT movement is driven away from the danger area, and path/anchor progress plus ignition timing are monitored until the Operator reaches safety or the emergency is cancelled.
@@ -756,6 +758,53 @@ internal static class VanguardGrenadeEmergencyPhysicalDriver
                 + ";pending=" + Bool(pending);
             return pending;
         }
+    }
+
+    // SAIN suppresses BotMover.ManualFixedUpdate while its layer state is active.
+    // Only the already-owned priority-97 grenade command can temporarily restore that EFT tick.
+    // This read-only receipt is shared by the SAIN fixed-tick prefix and SAIN manual-path gate;
+    // no second executor, unrelated SAIN action or stale command gains locomotion authority.
+    public static bool TryGetExclusiveGrenadeEftTickLease(BotOwner? owner, DateTimeOffset now, out string leaseId, out long generation)
+    {
+        leaseId = string.Empty;
+        generation = 0;
+        if (owner == null || owner.IsDead || string.IsNullOrWhiteSpace(owner.ProfileId) || owner.Mover == null)
+        {
+            return false;
+        }
+        if (!VanguardRaidOperatorRuntimeRegistry.TryGetRuntimeByBotProfileId(owner.ProfileId, out var runtime)
+            || !ReferenceEquals(runtime.BotOwner, owner))
+        {
+            return false;
+        }
+        if (!VanguardReturnMovementCommandStore.TryGetActive(owner.ProfileId, now, out var command)
+            || !VanguardReturnMovementCommandStore.IsGrenadeEmergencyRequest(command.RequestKind)
+            || !VanguardMainIntentScheduler.TryGetActiveEmergencyWindow(owner.ProfileId, now, out string primaryWindow, out _, out _)
+            || !string.Equals(primaryWindow, command.LeaseId, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+        lock (Sync)
+        {
+            if (!States.TryGetValue(owner.ProfileId, out DriveState state)
+                || !string.Equals(state.LeaseId, command.LeaseId, StringComparison.OrdinalIgnoreCase)
+                || state.Generation != command.Generation
+                || state.Holding
+                || !state.MovementAuthorityAcquired
+                || state.LastBigBrainDriveAtUtc == DateTimeOffset.MinValue
+                || now < state.LastBigBrainDriveAtUtc
+                || now - state.LastBigBrainDriveAtUtc > BigBrainOwnershipMemory)
+            {
+                return false;
+            }
+        }
+        if (owner.Mover.HasPathAndNoComplete != true)
+        {
+            return false;
+        }
+        leaseId = command.LeaseId;
+        generation = command.Generation;
+        return true;
     }
 
     public static bool IsPhysicalPathProgressRecent(string botProfileId, long generation, DateTimeOffset now, TimeSpan maximumAge, out string summary)

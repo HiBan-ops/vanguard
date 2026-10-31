@@ -246,6 +246,23 @@ internal static class VanguardNearMissSuppressionService
             state.ThreatenedOperator,
             state.ThreatenedOwner);
 
+    public static string ForgetRuntimePresence(string? botProfileId, string reason)
+    {
+        string key = string.IsNullOrWhiteSpace(botProfileId) ? string.Empty : botProfileId.Trim();
+        if (key.Length == 0)
+        {
+            return "ignored=missing_bot_profile";
+        }
+
+        bool removed;
+        lock (Sync)
+        {
+            removed = StateByBotAndShooter.Remove(key);
+        }
+
+        return $"stateRemoved={(removed ? "true" : "false")}; reason={Safe(reason)}";
+    }
+
     public static void Reset(string reason)
     {
         lock (Sync)

@@ -27,7 +27,7 @@ public sealed class VanguardServerModule(
     {
         VanguardServerDiagnosticsLog.Startup(
             logger,
-            $"Vanguard server loaded; version={VanguardBuildVersion.Value}");
+            $"Vanguard server loaded; developmentLine={VanguardBuildVersion.DevelopmentLine}; runtimeVersion={VanguardBuildVersion.Value}");
 
         bool eftExperienceCurveResolved = experienceCurveService.EnsureResolved();
 

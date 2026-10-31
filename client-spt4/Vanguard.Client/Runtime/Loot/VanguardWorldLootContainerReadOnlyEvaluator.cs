@@ -11,10 +11,10 @@ using Vanguard.Client.Runtime.Decision;
 using Vanguard.Client.Runtime.Medical;
 using Vanguard.Client.Runtime.TacticalAuthoring;
 
-// Responsibility: Provides World Loot Container Read Only Evaluator support for the loot runtime.
-// Flow: The file encapsulates one bounded piece of the subsystem and exchanges explicit inputs/results with neighboring services instead of relying on hidden cross-system state.
-// Authority boundary: Authority remains with the owning subsystem and any external EFT/SPT/Fika/SAIN component explicitly referenced by its call path.
-// Invariant: Behavior stays scoped to the current profile/raid/process contract and preserves existing safety and compatibility boundaries.
+// Responsibility: Evaluate assigned world containers and expose short-lived approach candidates for Operator loot planning.
+// Flow: Observe snapshot assignments, assess candidate utility and retain permission-gated approach projections.
+// Authority boundary: The evaluator reads central world-loot state; physical approach and item transfer belong to separate execution.
+// Invariant: Candidates have bounded lifetime and cannot themselves commit an inventory or movement action.
 namespace Vanguard.Client.Runtime.Loot;
 
 /// <summary>
@@ -49,6 +49,24 @@ internal static class VanguardWorldLootContainerReadOnlyEvaluator
         VanguardClientDiagnosticsLog.Info(
             VanguardBuildVersion.ContainerScoringAndSquadAllocationIntegrationStatusTag,
             $"VANGUARD_CONTAINER_SCORING_RESET source={Safe(source)}; physicalClaim=false; movement=false; opening=false; transaction=false");
+    }
+
+    public static int ForgetRuntimePresence(string? botProfileId, string reason)
+    {
+        string key = Normalize(botProfileId);
+        if (string.Equals(key, "none", StringComparison.OrdinalIgnoreCase))
+        {
+            return 0;
+        }
+
+        lock (LogSync)
+        {
+            int removed = 0;
+            if (LastSummaryByBot.Remove(key)) removed++;
+            if (LastSummaryAtByBot.Remove(key)) removed++;
+            if (ApproachCandidateByBot.Remove(key)) removed++;
+            return removed;
+        }
     }
 
     public static void ObserveAssignments(

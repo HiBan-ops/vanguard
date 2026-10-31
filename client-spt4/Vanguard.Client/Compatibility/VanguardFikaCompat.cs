@@ -27,7 +27,7 @@ internal static class VanguardFikaCompat
     // used when code needs to know whether this executable itself is the headless process.
     public static bool IsHeadless => GetStaticBool("IsHeadless") || GetStaticBool("IsHeadlessGame");
 
-    // Fika 2.3.9 explicitly distinguishes these two concepts:
+    // Fika explicitly distinguishes these two concepts:
     // - IsHeadless: this client process is the headless client.
     // - IsHeadlessGame: the raid host is a headless client.
     // Tactical Authoring live sync must use the process-local semantic or the player author gets
@@ -36,7 +36,7 @@ internal static class VanguardFikaCompat
 
     public static bool IsRaidHostedByHeadless => GetStaticBool("IsHeadlessGame");
 
-    // Fika 2.3.9 exposes a native requester flag on the player client that requested a dedicated Headless raid.
+    // Fika exposes a native requester flag on the player client that requested a dedicated Headless raid.
     // That flag remains the first-class signal. After raid topology becomes known, a connected
     // HeadlessRequesterWebSocket plus IsHeadlessGame is accepted as bounded secondary evidence.
     // This closes the bootstrap race without ever promoting the actual Headless process or an ordinary client.

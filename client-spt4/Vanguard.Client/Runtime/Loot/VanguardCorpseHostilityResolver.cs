@@ -7,10 +7,10 @@ using Vanguard.Client.Runtime.Alliance;
 using Vanguard.Client.Runtime.Awareness;
 using Vanguard.Client.Runtime.Decision;
 
-// Responsibility: Provides Corpse Hostility Resolver support for the loot runtime.
-// Flow: The file encapsulates one bounded piece of the subsystem and exchanges explicit inputs/results with neighboring services instead of relying on hidden cross-system state.
-// Authority boundary: Authority remains with the owning subsystem and any external EFT/SPT/Fika/SAIN component explicitly referenced by its call path.
-// Invariant: Behavior stays scoped to the current profile/raid/process contract and preserves existing safety and compatibility boundaries.
+// Responsibility: Collect and resolve hostility evidence between registered Operators and potential corpse loot targets.
+// Flow: Capture relevant Operator-victim evidence at corpse registration and combine it with available runtime policy probes.
+// Authority boundary: Existing faction, alliance and EFT group information is read as evidence; loot execution is decided elsewhere.
+// Invariant: Evidence is keyed to the actual Operator and victim context rather than treating every corpse as hostile.
 namespace Vanguard.Client.Runtime.Loot;
 
 internal static class VanguardCorpseHostilityResolver

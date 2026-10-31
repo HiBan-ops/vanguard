@@ -46,6 +46,28 @@ internal static class VanguardStaleSainExitService
             $"VANGUARD_SAIN_STALE_EXIT_RESET reason={Safe(reason)}; state=cleared; policy=general_not_medical_only; tag={StatusTag}");
     }
 
+    public static string ForgetRuntimePresence(string? botProfileId, string reason)
+    {
+        string key = string.IsNullOrWhiteSpace(botProfileId) ? string.Empty : botProfileId.Trim();
+        if (key.Length == 0)
+        {
+            return "ignored=missing_bot_profile";
+        }
+
+        int removed = 0;
+        lock (Sync)
+        {
+            if (States.Remove(key)) removed++;
+            foreach (string logKey in LastLogAtByKey.Keys.Where(value => value.IndexOf(key, StringComparison.OrdinalIgnoreCase) >= 0).ToArray())
+            {
+                LastLogAtByKey.Remove(logKey);
+                removed++;
+            }
+        }
+
+        return $"removed={removed}; normalStaleExitMutation=false; reason={Safe(reason)}";
+    }
+
     public static void Tick()
     {
         DateTimeOffset now = DateTimeOffset.UtcNow;

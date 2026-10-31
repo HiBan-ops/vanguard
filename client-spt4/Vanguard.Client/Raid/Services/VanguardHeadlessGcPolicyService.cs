@@ -15,7 +15,7 @@ using EFT;
 namespace Vanguard.Client.Raid.Services;
 
 /// <summary>
-/// Qualified optional dedicated-Headless GC memory mitigation. Fika Headless 1.4.15 disables managed GC
+/// Qualified optional dedicated-Headless GC memory mitigation. Fika Headless disables managed GC
 /// after its pre-raid cleanup; this service can keep it enabled while a raid GameWorld exists
 /// without introducing a second forced-collection timer. The setting is raid-scoped and comes
 /// from the player raid authority through Vanguard F12 synchronization.

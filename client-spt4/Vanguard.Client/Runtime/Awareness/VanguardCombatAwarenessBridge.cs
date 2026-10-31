@@ -98,6 +98,62 @@ internal static partial class VanguardCombatAwarenessBridge
             $"VANGUARD_AWARENESS_BRIDGE_RESET reason={Safe(reason)}; targetMutationCooldown=cleared; dropCooldown=cleared; pendingClear=cleared; quarantine=cleared; targetApplyCircuit=cleared; verifiedGoalHandoff=cleared; scanAssignmentTag={ScanAssignmentStatusTag}; staleReleaseTag={StaleTargetReleaseStatusTag}; clearConfirmTag={TargetClearConfirmStatusTag}; quarantineTag={StaleTargetQuarantineStatusTag}; isolatedReleaseTag={IsolatedCombatReleaseStatusTag}; emergencyScanTag={EmergencyScanContactStatusTag}; squadCombatTag={SquadTravelCombatAuthorityStatusTag}; handoffTag={VerifiedGoalHandoffStatusTag}; tag={StatusTag}");
     }
 
+    public static string ForgetRuntimePresence(string? botProfileId, string reason)
+    {
+        string bot = Normalize(botProfileId);
+        if (string.Equals(bot, "none", StringComparison.OrdinalIgnoreCase))
+        {
+            return "ignored=missing_bot_profile";
+        }
+
+        int removed = 0;
+        lock (Sync)
+        {
+            removed += DropCooldownUntilByBotProfileId.Remove(bot) ? 1 : 0;
+            removed += PendingTargetClearByBotProfileId.Remove(bot) ? 1 : 0;
+            removed += TargetApplyGenerationByBotProfileId.Remove(bot) ? 1 : 0;
+            removed += VerifiedGoalHandoffByBotProfileId.Remove(bot) ? 1 : 0;
+            removed += UnifiedAssignmentByBotProfileId.Remove(bot) ? 1 : 0;
+
+            string botPrefix = bot + "|";
+            foreach (string key in QuarantinedTargetByBotAndTarget.Keys.Where(key => key.StartsWith(botPrefix, StringComparison.OrdinalIgnoreCase)).ToArray())
+            {
+                QuarantinedTargetByBotAndTarget.Remove(key);
+                removed++;
+            }
+            foreach (string key in TargetApplyCircuitByBotAndTarget.Keys.Where(key => key.StartsWith(botPrefix, StringComparison.OrdinalIgnoreCase)).ToArray())
+            {
+                TargetApplyCircuitByBotAndTarget.Remove(key);
+                removed++;
+            }
+            foreach (string key in UnifiedNavCacheByBotAndTarget.Keys.Where(key => key.StartsWith(botPrefix, StringComparison.OrdinalIgnoreCase)).ToArray())
+            {
+                UnifiedNavCacheByBotAndTarget.Remove(key);
+                removed++;
+            }
+            foreach (string key in LastLogAtByKey.Keys.Where(key => IsRuntimePresenceLogKeyForBot(key, bot)).ToArray())
+            {
+                LastLogAtByKey.Remove(key);
+                removed++;
+            }
+        }
+
+        return $"removed={removed}; sharedSquadContactsPreserved=true; sainTargetMutation=false; reason={Safe(reason)}";
+    }
+
+    private static bool IsRuntimePresenceLogKeyForBot(string key, string botProfileId)
+    {
+        if (string.IsNullOrWhiteSpace(key))
+        {
+            return false;
+        }
+
+        string token = "|" + botProfileId + "|";
+        return key.StartsWith(botProfileId + "|", StringComparison.OrdinalIgnoreCase)
+            || key.EndsWith("|" + botProfileId, StringComparison.OrdinalIgnoreCase)
+            || key.IndexOf(token, StringComparison.OrdinalIgnoreCase) >= 0;
+    }
+
     /// <summary>
     /// Refreshes only the bounded squad-contact read model. This method performs no SAIN, hands,
     /// movement or target mutation and is safe for the scheduler to call before arbitration.
@@ -465,7 +521,7 @@ internal static partial class VanguardCombatAwarenessBridge
             && snapshot.SquadCohesion.OwnerReliableForActiveMovement
             && snapshot.SquadCohesion.OwnerPosition.HasValue;
         float cohesionDistance = snapshot.SquadCohesion.OperatorDistanceToOwner;
-        float cohesionThreshold = VanguardMovementAuthorityDoctrine.CombatCohesionForcedCatchupMeters;
+        float cohesionThreshold = VanguardMovementAuthorityDoctrine.ForOwner(snapshot.OwnerProfileId).CombatCohesionForcedCatchupMeters;
         bool formationDetached = ownerAnchorReliable && cohesionDistance >= cohesionThreshold;
         if (formationDetached)
         {
@@ -488,7 +544,7 @@ internal static partial class VanguardCombatAwarenessBridge
             return false;
         }
 
-        float threshold = VanguardMovementAuthorityDoctrine.StaleSearchDistanceMeters;
+        float threshold = VanguardMovementAuthorityDoctrine.ForOwner(snapshot.OwnerProfileId).StaleSearchDistanceMeters;
         if (distance < threshold)
         {
             reason = "inside_tactical_pursuit_bubble:distance=" + distance.ToString("0.0", CultureInfo.InvariantCulture)
@@ -1506,14 +1562,14 @@ internal static partial class VanguardCombatAwarenessBridge
             return true;
         }
 
-        if (searchOrKnown && bubble > Vanguard.Client.Runtime.SquadCohesion.VanguardSquadCohesionDoctrine.TacticalBubbleRadiusMeters)
+        if (searchOrKnown && bubble > VanguardMovementAuthorityDoctrine.ForOwner(snapshot.OwnerProfileId).TacticalBubbleMeters)
         {
             reason = "sain_search_outside_tactical_bubble_no_direct_proof;bubble=" + bubble.ToString("0.00", CultureInfo.InvariantCulture);
             dropKind = "sain_search_released_for_formation";
             return true;
         }
 
-        if (searchOrKnown && bubble > Vanguard.Client.Runtime.Movement.VanguardMovementAuthorityDoctrine.SoftCorrectionMeters && IsOldOrUnknownSeen(snapshot.Threat.TimeSinceSeen, 8.0f))
+        if (searchOrKnown && bubble > Vanguard.Client.Runtime.Movement.VanguardMovementAuthorityDoctrine.ForOwner(snapshot.OwnerProfileId).SoftCorrectionMeters && IsOldOrUnknownSeen(snapshot.Threat.TimeSinceSeen, 8.0f))
         {
             reason = "sain_search_soft_out_of_envelope_stale_seen;bubble=" + bubble.ToString("0.00", CultureInfo.InvariantCulture);
             dropKind = "target_dropped_out_of_envelope";

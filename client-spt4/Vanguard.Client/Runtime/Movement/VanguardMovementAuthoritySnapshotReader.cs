@@ -60,8 +60,9 @@ internal sealed partial class VanguardOperatorDecisionSnapshotBuilder
         bool sainViolation = Vanguard.Client.Runtime.Movement.VanguardMovementAuthorityDoctrine.IsSainEnvelopeViolation(partial, out string sainViolationReason);
         bool medicalBlocks = Vanguard.Client.Runtime.Movement.VanguardMovementAuthorityDoctrine.IsStationaryMedicalAuthority(partial);
         bool trueDirectThreat = Vanguard.Client.Runtime.Movement.VanguardMovementAuthorityDoctrine.IsTrueDirectThreat(partial);
-        bool softOutside = cohesion.OwnerKnown && cohesion.OperatorDistanceToOwner > Vanguard.Client.Runtime.Movement.VanguardMovementAuthorityDoctrine.TacticalBubbleMeters;
-        bool hardOutside = cohesion.OwnerKnown && cohesion.OperatorDistanceToOwner >= Vanguard.Client.Runtime.Movement.VanguardMovementAuthorityDoctrine.HardCorrectionMeters;
+        var ownerPolicy = Vanguard.Client.Runtime.Movement.VanguardMovementAuthorityDoctrine.ForOwner(partial.OwnerProfileId);
+        bool softOutside = cohesion.OwnerKnown && cohesion.OperatorDistanceToOwner > ownerPolicy.TacticalBubbleMeters;
+        bool hardOutside = cohesion.OwnerKnown && cohesion.OperatorDistanceToOwner >= ownerPolicy.HardCorrectionMeters;
         bool eftPathActive = movement.HasPath == true;
         bool lootingActive = loot.BotLooting == true || loot.LootTaskRunning == true || loot.HasActiveLootable == true;
         bool orbitActive = orbit.Active;

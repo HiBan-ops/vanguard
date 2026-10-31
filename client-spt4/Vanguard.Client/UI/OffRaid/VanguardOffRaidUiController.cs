@@ -2681,7 +2681,7 @@ internal sealed class VanguardOffRaidUiController : MonoBehaviour
             LogOffRaidBackgroundStatusOnce($"configured=false; mode=procedural_fallback; reason=resource_exception; resource={OffRaidBackgroundResourceName}");
         }
 
-        // UI-1G deterministic fallback retained for resilience only.
+        // Deterministic procedural fallback retained for resilience only.
         const int width = 256;
         const int height = 256;
         var texture = new Texture2D(width, height, TextureFormat.RGBA32, false)

@@ -1,9 +1,9 @@
 #if SPT_CLIENT
 
-// Responsibility: Provides Medical Action Outcome support for the medical runtime.
-// Flow: The file encapsulates one bounded piece of the subsystem and exchanges explicit inputs/results with neighboring services instead of relying on hidden cross-system state.
-// Authority boundary: Authority remains with the owning subsystem and any external EFT/SPT/Fika/SAIN component explicitly referenced by its call path.
-// Invariant: Behavior stays scoped to the current profile/raid/process contract and preserves existing safety and compatibility boundaries.
+// Responsibility: Define medical native-action outcome kinds and read-only progress evidence fields.
+// Flow: Carry start, progress, completion or failure classifications alongside observed health and item effects.
+// Authority boundary: These outcome models describe executor observations; they do not initiate or authorize a medical action.
+// Invariant: A reported outcome retains its distinct classification rather than conflating progress with completion.
 namespace Vanguard.Client.Runtime.Medical.Execution;
 
 internal enum VanguardMedicalActionOutcomeKind

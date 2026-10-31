@@ -4,10 +4,10 @@ using System.Collections.Generic;
 using System.Linq;
 using Vanguard.Client.Diagnostics;
 
-// Responsibility: Provides Alliance Hostility Log Gate support for the Operator allegiance runtime.
-// Flow: The file encapsulates one bounded piece of the subsystem and exchanges explicit inputs/results with neighboring services instead of relying on hidden cross-system state.
-// Authority boundary: Authority remains with the owning subsystem and any external EFT/SPT/Fika/SAIN component explicitly referenced by its call path.
-// Invariant: Behavior stays scoped to the current profile/raid/process contract and preserves existing safety and compatibility boundaries.
+// Responsibility: Bound logging volume for blocked Operator-alliance hostility checks.
+// Flow: Count blocked checks by relation and actor-target pair, permit occasional detail, and periodically write aggregated summaries.
+// Authority boundary: Hostility protection is decided outside this class; this gate controls diagnostic emission only.
+// Invariant: Repeated pair detail is throttled for 30 seconds and summary emission is bounded by a 15-second interval.
 namespace Vanguard.Client.Runtime.Alliance;
 
 /// <summary>

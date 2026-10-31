@@ -20,7 +20,7 @@ namespace Vanguard.Client.Raid.Services;
 /// <summary>
 /// Repairs the narrow input leak observed after direct Operator inventory use.
 ///
-/// Runtime evidence on SPT 4.0.13/Fika showed the failed transition with both
+/// Runtime evidence on SPT/Fika showed the failed transition with both
 /// RootScreenType and CurrentScreenController on BattleUI while an active
 /// EFT.UI.ProfileLoadingScreen remained under UIInputRoot and returned ShowCursor.
 /// Because InputNode cursor results are max-aggregated, that stale node wins over
@@ -812,7 +812,7 @@ internal static class VanguardBattleInputNodeReleaseService
             return;
         }
 
-        // Exact SPT 4.0.13 field name is uiinputRoot_0. Keep a non-scanning structural
+        // Exact SPT field name is uiinputRoot_0. Keep a non-scanning structural
         // fallback for nearby obfuscation changes: inspect TarkovApplication's own
         // fields and select the one whose declared type is UIInputRoot.
         cachedTarkovApplicationUiInputRootField = type.GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)

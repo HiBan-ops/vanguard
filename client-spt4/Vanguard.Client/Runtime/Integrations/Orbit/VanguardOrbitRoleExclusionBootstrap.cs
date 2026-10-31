@@ -5,10 +5,10 @@ using Vanguard.Client.Runtime.Audit;
 using Vanguard.Client.Runtime.Integrations.MoreBots;
 using Vanguard.Client.Runtime.Movement;
 
-// Responsibility: Provides Orbit Role Exclusion Bootstrap support for the external AI integration.
-// Flow: The file encapsulates one bounded piece of the subsystem and exchanges explicit inputs/results with neighboring services instead of relying on hidden cross-system state.
-// Authority boundary: Authority remains with the owning subsystem and any external EFT/SPT/Fika/SAIN component explicitly referenced by its call path.
-// Invariant: Behavior stays scoped to the current profile/raid/process contract and preserves existing safety and compatibility boundaries.
+// Responsibility: Register Vanguard Operator roles with the optional ORBIT role-exclusion integration.
+// Flow: Attempt registration at startup and on deferred ticks, with throttling and bounded retries when ORBIT is absent.
+// Authority boundary: The bridge requests exclusions via ORBIT integration points; ORBIT remains owner of its own Agents.
+// Invariant: Successful registration is not repeated, and missing optional ORBIT types do not become mandatory dependencies.
 namespace Vanguard.Client.Runtime.Integrations.Orbit;
 
 /// <summary>

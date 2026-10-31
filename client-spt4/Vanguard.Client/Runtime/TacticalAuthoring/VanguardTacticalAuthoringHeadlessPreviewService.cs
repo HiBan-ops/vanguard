@@ -15,8 +15,10 @@ using Vanguard.Client.Runtime.Audit;
 using Vanguard.Client.Runtime.Combat;
 using Vanguard.Client.Runtime.Decision;
 using Vanguard.Client.Runtime.Execution;
+using Vanguard.Client.Runtime.Loot;
 using Vanguard.Client.Runtime.Movement;
 using Vanguard.Client.Runtime.Movement.Brain;
+using Vanguard.Client.Runtime.SquadCohesion;
 
 // Responsibility: Builds the temporary runtime-authority preview of player-authored tactical slots so the author can see placement before committing it.
 // Flow: Player-authored preview data is read from the live transport, validated against raid/world constraints, projected into transient preview objects, and removed when the preview expires or the raid resets.
@@ -35,7 +37,8 @@ internal static class VanguardTacticalAuthoringHeadlessPreviewService
     private static readonly TimeSpan SessionFreshness = TimeSpan.FromSeconds(3.25d);
     private static readonly TimeSpan EvaluationInterval = TimeSpan.FromSeconds(0.30d);
     private static readonly TimeSpan CommandLifetime = TimeSpan.FromSeconds(2.0d);
-    private static readonly TimeSpan WatchApplyInterval = TimeSpan.FromSeconds(0.75d);
+    private static readonly TimeSpan WatchApplyInterval = TimeSpan.FromSeconds(0.15d);
+    private static readonly TimeSpan NativeSainAutoHoldQuietPeriod = TimeSpan.FromSeconds(6.0d);
     private const float ArrivalRadiusMeters = 1.20f;
     private const float HoldEntryRadiusMeters = ArrivalRadiusMeters + 0.25f;
     private const float HoldExitRadiusMeters = ArrivalRadiusMeters + 1.05f;
@@ -286,6 +289,67 @@ internal static class VanguardTacticalAuthoringHeadlessPreviewService
         out string reason)
         => TryGetLootExcursionContext(botProfileId, now, out context, out reason);
 
+    // Suspend an exact manual OR automatic HOLD preview for a committed
+    // Medical pair. The authoring session and slot map remain untouched; on
+    // handback the normal authoring evaluator must freshly reacquire a window.
+    internal static bool TryYieldPreviewForMedicPair(
+        string botProfileId, string expectedWindowId, DateTimeOffset now, out string summary)
+    {
+        summary = "none";
+        if (!OwnedByBot.TryGetValue(botProfileId, out var owned)
+            || !string.Equals(owned.WindowId, expectedWindowId, StringComparison.OrdinalIgnoreCase))
+        {
+            summary = "preview_exact_owner_not_current";
+            return false;
+        }
+        string session = owned.LiveSessionId;
+        string slot = owned.SlotId;
+        ReleaseOperator(botProfileId, now, "medical_pair_suspension",
+            finishWindow: false, preserveWatchTelemetry: true);
+        summary = "preview_suspended:session=" + Safe(session) + ":slot=" + Safe(slot);
+        return true;
+    }
+
+    internal static bool TryYieldAutomaticPreviewForMedicSupport(
+        string botProfileId,
+        string expectedWindowId,
+        DateTimeOffset now,
+        out string summary)
+    {
+        summary = "none";
+        if (!OwnedByBot.TryGetValue(botProfileId, out var owned))
+        {
+            summary = "automatic_authoring_preview_not_owned";
+            return false;
+        }
+
+        if (!string.Equals(owned.WindowId, expectedWindowId, StringComparison.OrdinalIgnoreCase))
+        {
+            summary = "automatic_authoring_preview_window_mismatch";
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(owned.LiveSessionId)
+            || !owned.LiveSessionId.StartsWith("auto-", StringComparison.OrdinalIgnoreCase))
+        {
+            summary = "manual_authoring_preview_preserved";
+            return false;
+        }
+
+        string session = owned.LiveSessionId;
+        string slot = owned.SlotId;
+        ReleaseOperator(
+            botProfileId,
+            now,
+            "urgent_medic_supply_drop_preempt",
+            finishWindow: false,
+            preserveWatchTelemetry: true);
+        summary = "automatic_authoring_preview_yielded:session=" + Safe(session) + ":slot=" + Safe(slot);
+        VanguardClientDiagnosticsLog.Info(StatusTag,
+            $"TACTICAL_AUTHORING_MEDIC_SUPPORT_YIELD bot={Safe(botProfileId)}; window={Safe(expectedWindowId)}; session={Safe(session)}; slot={Safe(slot)}; manualPreviewProtected=true; movementCommandCleared=true; schedulerFinishDeferredToMedicReplacement=true");
+        return true;
+    }
+
     public static void Reset(string reason)
     {
         var now = DateTimeOffset.UtcNow;
@@ -299,8 +363,46 @@ internal static class VanguardTacticalAuthoringHeadlessPreviewService
         LastResultSignatureByOwner.Clear();
         LastWatchApplyAtByBot.Clear();
         WatchTelemetryByBot.Clear();
+        VanguardAuthoredStationaryPresentationBridge.Reset("hold_preview:" + reason);
         nextEvaluationAtUtc = DateTimeOffset.MinValue;
         bootLogged = false;
+    }
+
+    public static string ForgetRuntimePresence(string? botProfileId, BotOwner? exactBotOwner, DateTimeOffset now, string reason)
+    {
+        string key = string.IsNullOrWhiteSpace(botProfileId) ? string.Empty : botProfileId.Trim();
+        if (key.Length == 0)
+        {
+            return "missing_identity";
+        }
+
+        bool owned = OwnedByBot.TryGetValue(key, out OwnedPreview? preview);
+        string commandCleanup = "none";
+        if (owned && preview != null)
+        {
+            commandCleanup = VanguardReturnMovementCommandStore.ClearOwned(
+                key,
+                preview.WindowId,
+                preview.StartedAtUtc,
+                "runtime_presence_lost:" + reason);
+        }
+
+        bool ownedRemoved = OwnedByBot.Remove(key);
+        bool watchApplyRemoved = LastWatchApplyAtByBot.Remove(key);
+        bool telemetryRemoved = WatchTelemetryByBot.Remove(key);
+        string presentation = VanguardAuthoredStationaryPresentationBridge.ForgetRuntimePresence(
+            key,
+            exactBotOwner,
+            "authoring_runtime_presence_lost:" + reason);
+
+        string summary = "ownedRemoved=" + Bool(ownedRemoved)
+            + ";watchApplyRemoved=" + Bool(watchApplyRemoved)
+            + ";telemetryRemoved=" + Bool(telemetryRemoved)
+            + ";commandCleanup=" + Safe(commandCleanup)
+            + ";presentation=" + Safe(presentation);
+        VanguardClientDiagnosticsLog.Info(StatusTag,
+            $"TACTICAL_AUTHORING_RUNTIME_PRESENCE_FORGOTTEN bot={Safe(key)}; reason={Safe(reason)}; {summary}; schedulerTerminal=false; schedulerHandback=false; ownerSessionRetained=true; globalAuthoringReset=false; stalePreviewResume=false; tag={StatusTag}");
+        return summary;
     }
 
     private static void EvaluateOwner(AuthorState state, DateTimeOffset now)
@@ -348,6 +450,12 @@ internal static class VanguardTacticalAuthoringHeadlessPreviewService
             return;
         }
 
+        if (VanguardTacticalAuthoringLiveValidationContract.IsPortalValidationZone(state.SelectedZoneId))
+        {
+            EvaluatePortalValidationOnly(state, zone, operators, now, result);
+            return;
+        }
+
         var ownerAnchor = VanguardOwnerAnchorResolver.Resolve(state.OwnerProfileId, now);
 
         // Validation and assignment are deliberately separate. Every authoring-valid slot is
@@ -383,24 +491,25 @@ internal static class VanguardTacticalAuthoringHeadlessPreviewService
         foreach (var evaluation in assignmentCandidates)
         {
             OperatorPath? reservedPath = null;
-            bool hasProtectedLootReservation = TryGetProtectedCorpseLootStickyAssignment(
+            bool hasProtectedExcursionReservation = TryGetProtectedBoundedExcursionStickyAssignment(
                 state,
                 evaluation.Slot,
                 availableBotIds,
                 now,
-                out var reservedRecord);
-            if (hasProtectedLootReservation
+                out var reservedRecord,
+                out var protectedExcursionKind);
+            if (hasProtectedExcursionReservation
                 && !evaluation.PathsByBotProfileId.TryGetValue(reservedRecord.BotProfileId, out reservedPath))
             {
-                // A looting Operator keeps its authored slot reserved even if its temporary corpse position
-                // makes the return-path probe unavailable for one preview cycle. Do not
+                // A bounded excursion keeps its authored slot reserved even if the temporary
+                // position makes the return-path probe unavailable for one preview cycle. Do not
                 // hand the slot to a squadmate and do not issue an unvalidated return command.
                 availableBotIds.Remove(reservedRecord.BotProfileId);
                 assignedBotIds.Add(reservedRecord.BotProfileId);
                 evaluation.Result.AssignedOperatorId = reservedRecord.OperatorId;
                 evaluation.Result.AssignedBotProfileId = reservedRecord.BotProfileId;
                 evaluation.Result.AssignedCallsign = reservedRecord.BotNickname;
-                evaluation.Result.MovementState = "reserved_yield:corpse_loot";
+                evaluation.Result.MovementState = "reserved_yield:" + protectedExcursionKind;
                 result.AssignedOperatorCount++;
                 continue;
             }
@@ -435,7 +544,7 @@ internal static class VanguardTacticalAuthoringHeadlessPreviewService
             if (!assignedBotIds.Contains(record.BotProfileId))
             {
                 if (OwnedByBot.TryGetValue(record.BotProfileId, out var owned)
-                    && IsProtectedCorpseLootAssignment(state, owned, record.BotProfileId, now))
+                    && IsProtectedBoundedExcursionAssignment(state, owned, record.BotProfileId, now, out _))
                 {
                     continue;
                 }
@@ -445,6 +554,41 @@ internal static class VanguardTacticalAuthoringHeadlessPreviewService
 
         result.State = result.HeadlessValidSlotCount > 0 ? "ACTIVE" : "NO_VALID_SLOTS";
         result.Reason = $"zone={zone.ZoneId}; candidates={result.CandidateSlotCount}; valid={result.HeadlessValidSlotCount}; assigned={result.AssignedOperatorCount}";
+        PublishResult(state.OwnerProfileId, result);
+    }
+
+    private static void EvaluatePortalValidationOnly(
+        AuthorState state,
+        VanguardTacticalAuthoringZone zone,
+        IReadOnlyList<VanguardRaidOperatorRuntimeRecord> operators,
+        DateTimeOffset now,
+        VanguardTacticalAuthoringHeadlessPreviewResult result)
+    {
+        // Portal authoring asks the same runtime navigation authority for projection, capsule and
+        // path evidence as HOLD, but it must never own a movement lease or assign an Operator.
+        // Releasing prior HOLD ownership here makes the mode boundary explicit before evaluation.
+        ReleaseOwner(state.OwnerProfileId, now, "tc_portal_validation_only");
+
+        var ownerAnchor = VanguardOwnerAnchorResolver.Resolve(state.OwnerProfileId, now);
+        var candidates = zone.Slots
+            .Where(slot => slot.Enabled && slot.AuthoringValid)
+            .ToList();
+        result.CandidateSlotCount = candidates.Count;
+
+        foreach (var slot in candidates)
+        {
+            var evaluation = ValidateSlot(slot, operators.Count, operators, ownerAnchor);
+            evaluation.Result.MovementState = "validation_only:no_assignment";
+            result.Slots.Add(evaluation.Result);
+            if (string.Equals(evaluation.Result.State, "HEADLESS_OK", StringComparison.Ordinal))
+            {
+                result.HeadlessValidSlotCount++;
+            }
+        }
+
+        result.AssignedOperatorCount = 0;
+        result.State = result.HeadlessValidSlotCount > 0 ? "PORTAL_VALIDATION_ACTIVE" : "PORTAL_NO_VALID_POINTS";
+        result.Reason = $"validationOnly=true; portals={result.CandidateSlotCount}; valid={result.HeadlessValidSlotCount}; assigned=0";
         PublishResult(state.OwnerProfileId, result);
     }
 
@@ -572,6 +716,26 @@ internal static class VanguardTacticalAuthoringHeadlessPreviewService
             return sticky;
         }
 
+        // Preserve the previous slot after a TC or loot excursion without letting an old yield
+        // marker grant movement authority. The scheduler still
+        // decides whether HOLD can reacquire the movement lease.
+        var returningBotProfileId = WatchTelemetryByBot
+            .Where(pair => pair.Value.Yielded
+                && (string.Equals(pair.Value.LastYieldReason, "tc_alt_develop", StringComparison.Ordinal)
+                    || string.Equals(pair.Value.LastYieldReason, "tc_direct_commit", StringComparison.Ordinal)
+                    || string.Equals(pair.Value.LastYieldReason, "loot", StringComparison.Ordinal))
+                && string.Equals(pair.Value.OwnerProfileId, state.OwnerProfileId, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(pair.Value.LiveSessionId, state.LiveSessionId, StringComparison.Ordinal)
+                && string.Equals(pair.Value.SlotId, evaluation.Slot.SlotId, StringComparison.Ordinal)
+                && availableBotIds.Contains(pair.Key))
+            .Select(pair => pair.Key)
+            .FirstOrDefault(botId => evaluation.PathsByBotProfileId.ContainsKey(botId));
+        if (!string.IsNullOrWhiteSpace(returningBotProfileId)
+            && evaluation.PathsByBotProfileId.TryGetValue(returningBotProfileId, out var returningPath))
+        {
+            return returningPath;
+        }
+
         return evaluation.PathsByBotProfileId.Values
             .Where(path => availableBotIds.Contains(path.Record.BotProfileId))
             .OrderBy(path => path.DistanceMeters)
@@ -579,14 +743,22 @@ internal static class VanguardTacticalAuthoringHeadlessPreviewService
             .FirstOrDefault();
     }
 
-    private static bool TryGetProtectedCorpseLootStickyAssignment(
+    // Observe native loot ownership without retaining a second transaction state.
+    // The transaction executors remain authoritative through readback.
+    private static bool HasNativeLootTransactionInFlight(string botProfileId)
+        => VanguardCorpseLootSessionExecutor.HasInFlightNativeTransaction(botProfileId)
+            || VanguardWorldLootContainerSessionExecutor.HasInFlightNativeTransaction(botProfileId);
+
+    private static bool TryGetProtectedBoundedExcursionStickyAssignment(
         AuthorState state,
         VanguardTacticalAuthoringSlot slot,
         HashSet<string> availableBotIds,
         DateTimeOffset now,
-        out VanguardRaidOperatorRuntimeRecord record)
+        out VanguardRaidOperatorRuntimeRecord record,
+        out string excursionKind)
     {
         record = null!;
+        excursionKind = "none";
         var sticky = OwnedByBot.FirstOrDefault(pair =>
             string.Equals(pair.Value.OwnerProfileId, state.OwnerProfileId, StringComparison.OrdinalIgnoreCase)
             && string.Equals(pair.Value.LiveSessionId, state.LiveSessionId, StringComparison.Ordinal)
@@ -594,24 +766,27 @@ internal static class VanguardTacticalAuthoringHeadlessPreviewService
             && string.Equals(pair.Value.SlotId, slot.SlotId, StringComparison.Ordinal)
             && availableBotIds.Contains(pair.Key));
         if (string.IsNullOrWhiteSpace(sticky.Key)
-            || !IsProtectedCorpseLootAssignment(state, sticky.Value, sticky.Key, now)
+            || !IsProtectedBoundedExcursionAssignment(state, sticky.Value, sticky.Key, now, out excursionKind)
             || !VanguardRaidOperatorRuntimeRegistry.TryGetRuntimeByBotProfileId(sticky.Key, out record)
             || record.BotOwner == null
             || record.BotOwner.IsDead)
         {
             record = null!;
+            excursionKind = "none";
             return false;
         }
 
         return true;
     }
 
-    private static bool IsProtectedCorpseLootAssignment(
+    private static bool IsProtectedBoundedExcursionAssignment(
         AuthorState state,
         OwnedPreview owned,
         string botProfileId,
-        DateTimeOffset now)
+        DateTimeOffset now,
+        out string excursionKind)
     {
+        excursionKind = "none";
         if (!IsOwnedAssignmentCurrent(state, owned))
         {
             return false;
@@ -621,23 +796,43 @@ internal static class VanguardTacticalAuthoringHeadlessPreviewService
             botProfileId,
             now,
             out var kind,
-            out _,
+            out var intentKey,
             out _,
             out _);
         if (hasPrimaryWindow
             && (string.Equals(kind, VanguardPrimaryExecutionWindowKinds.CorpseLoot, StringComparison.OrdinalIgnoreCase)
                 || string.Equals(kind, VanguardPrimaryExecutionWindowKinds.WorldContainerLoot, StringComparison.OrdinalIgnoreCase)))
         {
+            excursionKind = "loot";
+            return true;
+        }
+        if (hasPrimaryWindow
+            && IsAutomaticOccupancySession(state.LiveSessionId)
+            && string.Equals(kind, VanguardPrimaryExecutionWindowKinds.TacticalMovement, StringComparison.OrdinalIgnoreCase)
+            && (string.Equals(intentKey, "TacticalCoordinatorAltDevelop", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(intentKey, "TacticalCoordinatorDirectCommit", StringComparison.OrdinalIgnoreCase)))
+        {
+            excursionKind = string.Equals(intentKey, "TacticalCoordinatorDirectCommit", StringComparison.OrdinalIgnoreCase)
+                ? "tc_direct_commit"
+                : "tc_alt_develop";
             return true;
         }
 
-        // CorpseLoot can reach its terminal later in the frame than the authoring tick. Preserve
-        // the sticky assignment across that one scheduler-empty handoff so the next evaluation
-        // reopens AuthoringPreview for the same slot instead of redistributing the squad.
-        return !hasPrimaryWindow
+        // A submitted loot transaction can outlive its primary window while EFT/Fika reconciles
+        // the inventory mutation. Reserve the authored slot only while the exact Operator's
+        // native session still reports a submitted transaction, not merely because a past yield
+        // reason remains in watch telemetry. TC has no corresponding inventory transaction.
+        if (!hasPrimaryWindow
             && TryGetMatchingWatchTelemetry(botProfileId, owned, out var telemetry)
             && telemetry.Yielded
-            && string.Equals(telemetry.LastYieldReason, "loot", StringComparison.Ordinal);
+            && string.Equals(telemetry.LastYieldReason, "loot", StringComparison.Ordinal)
+            && HasNativeLootTransactionInFlight(botProfileId))
+        {
+            excursionKind = telemetry.LastYieldReason;
+            return true;
+        }
+
+        return false;
     }
 
     private static bool IsOwnedAssignmentCurrent(AuthorState state, OwnedPreview owned)
@@ -684,6 +879,48 @@ internal static class VanguardTacticalAuthoringHeadlessPreviewService
 
         var watchTelemetry = GetOrResetWatchTelemetry(record.BotProfileId, state, slot, record.OperatorId);
 
+        if (prior != null
+            && IsProtectedBoundedExcursionAssignment(state, prior, record.BotProfileId, now, out var activeExcursionKind))
+        {
+            MarkWatchYield(record.BotProfileId, watchTelemetry, activeExcursionKind);
+            result.MovementState = "yield:" + activeExcursionKind + "_excursion";
+            return;
+        }
+
+        // A native SAIN combat layer with a known enemy owns its combat posture even when the
+        // scheduler's short Vanguard combat window has closed. A SeekCover decision alone can
+        // briefly change to another combat action; that must not immediately reacquire an
+        // automatic authored HOLD and interrupt SAIN again. Never affect manual editor previews.
+        if (IsAutomaticOccupancySession(state.LiveSessionId))
+        {
+            bool hasFreshNativeCombat = VanguardOperatorDecisionSnapshotService.TryGetLatestSnapshot(
+                    record.BotProfileId, out var nativeCombatSnapshot)
+                && HasFreshNativeSainCombat(nativeCombatSnapshot, now);
+
+            if (hasFreshNativeCombat)
+            {
+                // Refresh only from fresh positive native evidence. An expired or missing
+                // snapshot cannot extend the suppression indefinitely.
+                watchTelemetry.NativeSainYieldUntilUtc = now + NativeSainAutoHoldQuietPeriod;
+                MarkWatchYield(record.BotProfileId, watchTelemetry, "native_sain_combat");
+                ReleaseOperator(record.BotProfileId, now, "native_sain_combat_auto_hold_yield", preserveWatchTelemetry: true);
+                result.MovementState = "yield:native_sain_combat";
+                return;
+            }
+
+            if (now < watchTelemetry.NativeSainYieldUntilUtc)
+            {
+                // Bounded handback settling is keyed to the exact owner/session/slot telemetry.
+                // Do not open a fresh TA lease on a single transient SAIN decision gap.
+                MarkWatchYield(record.BotProfileId, watchTelemetry, "native_sain_settling");
+                ReleaseOperator(record.BotProfileId, now, "native_sain_settling_auto_hold_yield", preserveWatchTelemetry: true);
+                result.MovementState = "yield:native_sain_settling";
+                return;
+            }
+
+            watchTelemetry.NativeSainYieldUntilUtc = DateTimeOffset.MinValue;
+        }
+
         if (VanguardMainIntentScheduler.IsSainCombatExecutionProtected(record.BotProfileId, now, out var combatProtectedReason))
         {
             MarkWatchYield(record.BotProfileId, watchTelemetry, "combat");
@@ -700,6 +937,38 @@ internal static class VanguardTacticalAuthoringHeadlessPreviewService
             return;
         }
 
+        // An EFT/Fika inventory transaction can outlive its primary movement window.
+        // Preserve the authored destination without acquiring HOLD while that native
+        // operation is still owned by the exact Operator.
+        if (HasNativeLootTransactionInFlight(record.BotProfileId))
+        {
+            MarkWatchYield(record.BotProfileId, watchTelemetry, "loot");
+            result.MovementState = "yield:loot_native_transaction_inflight";
+            return;
+        }
+
+        // Contract TA/HOLD: an owner-local automatic zone selection already proves the player
+        // is inside the authored zone. Its HOLD takes precedence over ordinary travel/close
+        // cohesion, including a corridor that was admitted before zone entry.
+        // Do not downgrade automatic occupancy to a weaker movement claim than manual editor
+        // preview. The authoritative scheduler below arbitrates medical, grenade, combat,
+        // bounded loot and protected TC excursions before any movement lease is opened.
+        // Leaving the zone closes the automatic session in the local occupancy publisher and
+        // normal travel/formation cohesion resumes through fresh scheduling.
+
+        if (VanguardMainIntentScheduler.CanAuthoringPreviewAcquirePrimary(record.BotProfileId, now, out var authoringAdmissionReason))
+        {
+            var tcDrain = TacticalCoordinationPhysicalAuthorityBarrier.DrainForHigherAuthority(
+                record.BotProfileId,
+                now,
+                "tactical_authoring_preview_acquire:" + state.LiveSessionId + ":" + slot.SlotId);
+            if (tcDrain.AnyTcStateDrained)
+            {
+                VanguardClientDiagnosticsLog.Info(StatusTag,
+                    $"TACTICAL_AUTHORING_TC_AUTHORITY_DRAIN owner={state.OwnerProfileId}; operator={record.OperatorId}; bot={record.BotProfileId}; slot={slot.SlotId}; session={state.LiveSessionId}; admission={authoringAdmissionReason}; {tcDrain.Summary}; tcCleanBeforeAuthoringSchedulerOpen=true; altDevelopProtectedBySchedulerPreflight=true; staleResume=false; tag={TacticalCoordinationPhysicalAuthorityBarrier.StatusTag}; authoringTag={StatusTag}");
+            }
+        }
+
         if (!VanguardMainIntentScheduler.TryOpenOrRefreshAuthoringPreview(
             record.OperatorId,
             record.BotProfileId,
@@ -711,13 +980,18 @@ internal static class VanguardTacticalAuthoringHeadlessPreviewService
         {
             string yieldReason = MapPreviewPreemptionToWatchYield(openReason);
             MarkWatchYield(record.BotProfileId, watchTelemetry, yieldReason);
-            if (prior != null && string.Equals(yieldReason, "loot", StringComparison.Ordinal))
+            if (prior != null
+                && (string.Equals(yieldReason, "loot", StringComparison.Ordinal)
+                    || string.Equals(yieldReason, "tc_alt_develop", StringComparison.Ordinal)
+                    || string.Equals(yieldReason, "tc_direct_commit", StringComparison.Ordinal)))
             {
-                // CorpseLoot may temporarily own execution while the authored assignment remains sticky.
-                // Do not release OwnedByBot here: the preserved assignment is the canonical
-                // return target once the bounded loot window reaches a terminal. The corpse movement
-                // command has a different lease, so Tactical Authoring must neither clear nor replace it.
-                result.MovementState = "yield:corpse_loot_excursion";
+                // Bounded excursions may temporarily own execution while the authored assignment
+                // remains sticky. Do not release OwnedByBot here: the preserved slot is the canonical
+                // return target after the excursion reaches a real terminal, and Authoring must not
+                // clear or replace the excursion's independent movement lease.
+                result.MovementState = string.Equals(yieldReason, "loot", StringComparison.Ordinal)
+                    ? "yield:corpse_loot_excursion"
+                    : "yield:" + yieldReason + "_excursion";
                 return;
             }
 
@@ -726,11 +1000,12 @@ internal static class VanguardTacticalAuthoringHeadlessPreviewService
             return;
         }
 
+        // Preserve the authored 3D gaze all the way to the stationary presentation bridge.
+        // Movement toward the slot remains horizontal elsewhere; watch intent must retain pitch.
         var watch = slot.WatchDirection.ToVector3();
-        watch.y = 0f;
-        var watchPoint = watch.sqrMagnitude > 0.01f
-            ? anchor + watch.normalized * WatchPointDistanceMeters + Vector3.up * 1.1f
-            : anchor + Vector3.forward * WatchPointDistanceMeters + Vector3.up * 1.1f;
+        watch = watch.sqrMagnitude > 0.01f ? watch.normalized : Vector3.forward;
+        var watchOrigin = anchor + Vector3.up * 1.1f;
+        var watchPoint = watchOrigin + watch * WatchPointDistanceMeters;
 
         var owned = new OwnedPreview
         {
@@ -743,7 +1018,8 @@ internal static class VanguardTacticalAuthoringHeadlessPreviewService
             StartedAtUtc = prior?.StartedAtUtc ?? now,
             Anchor = anchor,
             WatchPoint = watchPoint,
-            WatchDirection = watch.sqrMagnitude > 0.01f ? watch.normalized : Vector3.forward
+            WatchDirection = watch.sqrMagnitude > 0.01f ? watch.normalized : Vector3.forward,
+            PhysicalPoseSnapshot = slot.PhysicalPoseSnapshot
         };
         OwnedByBot[record.BotProfileId] = owned;
 
@@ -784,7 +1060,7 @@ internal static class VanguardTacticalAuthoringHeadlessPreviewService
             }
 
             result.MovementState = "arrived_stationary_hold";
-            if (TryApplyOwnedWatchOrientation(record.BotProfileId, record.BotOwner, owned, now))
+            if (TryApplyOwnedPresentation(record.BotProfileId, record.BotOwner, owned, now, applyFullPresentation: true))
             {
                 MarkWatchApplied(record.BotProfileId, owned);
             }
@@ -896,11 +1172,24 @@ internal static class VanguardTacticalAuthoringHeadlessPreviewService
                 continue;
             }
 
-            if (TryApplyOwnedWatchOrientation(pair.Key, runtime.BotOwner, pair.Value, now))
+            bool inStationaryHold = TryGetMatchingWatchTelemetry(pair.Key, pair.Value, out var telemetry) && telemetry.InHold;
+            if (TryApplyOwnedPresentation(pair.Key, runtime.BotOwner, pair.Value, now, inStationaryHold))
             {
                 MarkWatchApplied(pair.Key, pair.Value);
             }
         }
+    }
+
+    private static bool HasFreshNativeSainCombat(OperatorDecisionSnapshot snapshot, DateTimeOffset now)
+    {
+        return snapshot.Alive
+            && VanguardOperatorDecisionSnapshotService.IsFresh(snapshot, now, out _)
+            && snapshot.Sain.IsInCombat == true
+            && snapshot.Sain.HasEnemy == true
+            && (string.Equals(snapshot.Sain.CombatDecision, "SeekCover", StringComparison.OrdinalIgnoreCase)
+                || (snapshot.Sain.Active == true
+                    && snapshot.Sain.LayersActive == true
+                    && string.Equals(snapshot.Sain.ActiveLayer, "Combat", StringComparison.OrdinalIgnoreCase)));
     }
 
     private static string GetWatchYieldReason(OperatorDecisionSnapshot snapshot, OwnedPreview owned, DateTimeOffset now)
@@ -913,6 +1202,21 @@ internal static class VanguardTacticalAuthoringHeadlessPreviewService
         {
             return "medical";
         }
+        if (VanguardMainIntentScheduler.TryGetActivePrimaryWindow(snapshot.BotProfileId, now, out var tcKind, out var tcIntent, out _, out _)
+            && IsAutomaticOccupancySession(owned.LiveSessionId)
+            && string.Equals(tcKind, VanguardPrimaryExecutionWindowKinds.TacticalMovement, StringComparison.OrdinalIgnoreCase)
+            && (string.Equals(tcIntent, "TacticalCoordinatorAltDevelop", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(tcIntent, "TacticalCoordinatorDirectCommit", StringComparison.OrdinalIgnoreCase)))
+        {
+            return string.Equals(tcIntent, "TacticalCoordinatorDirectCommit", StringComparison.OrdinalIgnoreCase)
+                ? "tc_direct_commit"
+                : "tc_alt_develop";
+        }
+        if (IsAutomaticOccupancySession(owned.LiveSessionId)
+            && HasFreshNativeSainCombat(snapshot, now))
+        {
+            return "native_sain_combat";
+        }
         if (VanguardMovementAuthorityDoctrine.IsTrueDirectThreat(snapshot)
             || VanguardMovementAuthorityDoctrine.HasImmediateCombatAwareness(snapshot))
         {
@@ -923,11 +1227,22 @@ internal static class VanguardTacticalAuthoringHeadlessPreviewService
         {
             return "sain";
         }
-        if (VanguardMainIntentScheduler.TryGetActivePrimaryWindow(snapshot.BotProfileId, now, out var activeKind, out _, out _, out _)
-            && (string.Equals(activeKind, VanguardPrimaryExecutionWindowKinds.CorpseLoot, StringComparison.OrdinalIgnoreCase)
-                || string.Equals(activeKind, VanguardPrimaryExecutionWindowKinds.WorldContainerLoot, StringComparison.OrdinalIgnoreCase)))
+        if (VanguardMainIntentScheduler.TryGetActivePrimaryWindow(snapshot.BotProfileId, now, out var activeKind, out var activeIntent, out _, out _))
         {
-            return "loot";
+            if (IsAutomaticOccupancySession(owned.LiveSessionId)
+                && string.Equals(activeKind, VanguardPrimaryExecutionWindowKinds.TacticalMovement, StringComparison.OrdinalIgnoreCase)
+                && (string.Equals(activeIntent, "TacticalCoordinatorAltDevelop", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(activeIntent, "TacticalCoordinatorDirectCommit", StringComparison.OrdinalIgnoreCase)))
+            {
+                return string.Equals(activeIntent, "TacticalCoordinatorDirectCommit", StringComparison.OrdinalIgnoreCase)
+                    ? "tc_direct_commit"
+                    : "tc_alt_develop";
+            }
+            if (string.Equals(activeKind, VanguardPrimaryExecutionWindowKinds.CorpseLoot, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(activeKind, VanguardPrimaryExecutionWindowKinds.WorldContainerLoot, StringComparison.OrdinalIgnoreCase))
+            {
+                return "loot";
+            }
         }
         if (HorizontalDistance(snapshot.Position, owned.Anchor) > WatchApplyRadiusMeters
             || snapshot.RealSpeed > WatchMovementYieldSpeedMetersPerSecond)
@@ -937,7 +1252,7 @@ internal static class VanguardTacticalAuthoringHeadlessPreviewService
         return string.Empty;
     }
 
-    private static bool TryApplyOwnedWatchOrientation(string botProfileId, BotOwner botOwner, OwnedPreview owned, DateTimeOffset now)
+    private static bool TryApplyOwnedPresentation(string botProfileId, BotOwner botOwner, OwnedPreview owned, DateTimeOffset now, bool applyFullPresentation)
     {
         if (LastWatchApplyAtByBot.TryGetValue(botProfileId, out var lastApply)
             && now - lastApply < WatchApplyInterval)
@@ -945,23 +1260,28 @@ internal static class VanguardTacticalAuthoringHeadlessPreviewService
             return false;
         }
 
-        var applied = false;
-        try
+        bool applied = VanguardAuthoredStationaryPresentationBridge.TryApplyAuthoringSnapshot(
+            botProfileId,
+            botOwner,
+            applyFullPresentation ? owned.PhysicalPoseSnapshot : null,
+            owned.WatchDirection,
+            applyLeanState: applyFullPresentation,
+            applyWeaponPresentationState: applyFullPresentation,
+            applyAimState: applyFullPresentation,
+            source: "hold_slot:" + owned.SlotId,
+            now,
+            out var poseApplied,
+            out var orientationApplied,
+            out var aimApplied,
+            out var presentationResult);
+
+        LastWatchApplyAtByBot[botProfileId] = now;
+        if (applied
+            && (presentationResult.StartsWith("mode=apply", StringComparison.Ordinal)
+                || presentationResult.StartsWith("mode=repair", StringComparison.Ordinal)))
         {
-            var steering = botOwner.Steering;
-            if (steering != null)
-            {
-                steering.LookToPoint(owned.WatchPoint);
-                applied = true;
-            }
-        }
-        catch
-        {
-            // Best-effort orientation only. Movement/SAIN/combat authority is never changed here.
-        }
-        finally
-        {
-            LastWatchApplyAtByBot[botProfileId] = now;
+            VanguardClientDiagnosticsLog.Info(StatusTag,
+                $"TACTICAL_AUTHORING_SLOT_PRESENTATION_APPLIED owner={owned.OwnerProfileId}; operator={owned.OperatorId}; bot={botProfileId}; slot={owned.SlotId}; stationaryHold={applyFullPresentation}; poseApplied={poseApplied}; orientationApplied={orientationApplied}; aimApplied={aimApplied}; authored={VanguardTacticalAuthoringPhysicalPoseCapture.Describe(owned.PhysicalPoseSnapshot)}; result={presentationResult}; movementAuthority=existing_authoring_preview_only; destinationAuthority=false");
         }
         return applied;
     }
@@ -1016,9 +1336,15 @@ internal static class VanguardTacticalAuthoringHeadlessPreviewService
             $"TACTICAL_AUTHORING_WATCH_YIELD owner={telemetry.OwnerProfileId}; operator={telemetry.OperatorId}; bot={botProfileId}; slot={telemetry.SlotId}; reason={reason}");
     }
 
+    private static bool IsAutomaticOccupancySession(string? liveSessionId)
+        => !string.IsNullOrWhiteSpace(liveSessionId)
+            && liveSessionId.Trim().StartsWith("auto-", StringComparison.OrdinalIgnoreCase);
+
     private static string MapPreviewPreemptionToWatchYield(string openReason)
     {
         var normalized = openReason?.ToLowerInvariant() ?? string.Empty;
+        if (normalized.Contains("tc_direct_commit") || normalized.Contains("directcommit")) return "tc_direct_commit";
+        if (normalized.Contains("tc_alt_develop")) return "tc_alt_develop";
         if (normalized.Contains("grenade")) return "grenade";
         if (normalized.Contains("medical") || normalized.Contains("medicine") || normalized.Contains("heal")) return "medical";
         if (normalized.Contains("sain")) return "sain";
@@ -1096,9 +1422,9 @@ internal static class VanguardTacticalAuthoringHeadlessPreviewService
             bool hasPrimaryWindow = VanguardMainIntentScheduler.TryGetActivePrimaryWindow(pair.Key, now, out var kind, out _, out _, out _);
             bool windowOwned = hasPrimaryWindow
                 && string.Equals(kind, VanguardPrimaryExecutionWindowKinds.AuthoringPreviewMovement, StringComparison.OrdinalIgnoreCase);
-            bool corpseLootAssignmentProtected = assignmentCurrent
-                && IsProtectedCorpseLootAssignment(author!, owned, pair.Key, now);
-            if (!sessionFresh || !assignmentCurrent || (!windowOwned && !corpseLootAssignmentProtected))
+            bool boundedExcursionAssignmentProtected = assignmentCurrent
+                && IsProtectedBoundedExcursionAssignment(author!, owned, pair.Key, now, out _);
+            if (!sessionFresh || !assignmentCurrent || (!windowOwned && !boundedExcursionAssignmentProtected))
             {
                 string releaseReason = !sessionFresh
                     ? "author_session_stale"
@@ -1227,6 +1553,13 @@ internal static class VanguardTacticalAuthoringHeadlessPreviewService
         HeadlessBuild = VanguardBuildVersion.BuildLabel
     };
 
+    private static string Safe(string? value)
+        => string.IsNullOrWhiteSpace(value)
+            ? "none"
+            : value.Trim().Replace(' ', '_').Replace(';', '_').Replace('|', '_').Replace('\r', '_').Replace('\n', '_');
+
+    private static string Bool(bool value) => value ? "true" : "false";
+
     private sealed class SlotEvaluation
     {
         public SlotEvaluation(VanguardTacticalAuthoringSlot slot)
@@ -1280,6 +1613,7 @@ internal static class VanguardTacticalAuthoringHeadlessPreviewService
         public Vector3 Anchor;
         public Vector3 WatchPoint;
         public Vector3 WatchDirection;
+        public VanguardTacticalAuthoringPhysicalPoseSnapshot? PhysicalPoseSnapshot;
     }
 
     private sealed class WatchTelemetryState
@@ -1290,6 +1624,7 @@ internal static class VanguardTacticalAuthoringHeadlessPreviewService
         public string SlotId = string.Empty;
         public bool InHold;
         public bool FirstWatchApplied;
+        public DateTimeOffset NativeSainYieldUntilUtc = DateTimeOffset.MinValue;
         public bool Yielded;
         public string LastYieldReason = string.Empty;
     }

@@ -66,6 +66,8 @@ internal sealed class VanguardCorpseLootTransactionPreflightResult
     public string AssignmentTier { get; init; } = "none";
     public float AssignmentScore { get; init; }
     public bool SecondarySwap { get; init; }
+    public bool MagazineReplacementSwap { get; init; }
+    public string MagazineReplacementWeaponId { get; init; } = "none";
     public string DisplacedItemId { get; init; } = "none";
     public bool CanExecute { get; init; }
     public bool ItemsDestroyRequired { get; init; }
@@ -76,7 +78,7 @@ internal sealed class VanguardCorpseLootTransactionPreflightResult
     public int FreshFeasibleItemCount { get; init; }
     public string NeedSignature { get; init; } = "none";
 
-    public string Summary => $"ready={Bool(Ready)}; reason={Safe(Reason)}; item={Safe(ItemId)}; template={Safe(TemplateId)}; category={Safe(Category)}; selection={Safe(SelectionReason)}; sourcePath={Safe(SourcePath)}; sourceAddress={Safe(SourceAddressFingerprint)}; destination={Safe(DestinationFingerprint)}; operation={Safe(OperationType)}; itemClaim={Safe(ItemClaimId)}; manifestRevision={ManifestRevision}; interestRevision={InterestRevision}; assignmentTier={Safe(AssignmentTier)}; assignmentScore={AssignmentScore:0.0}; secondarySwap={Bool(SecondarySwap)}; displacedItem={Safe(DisplacedItemId)}; quantity={Quantity}; canExecute={Bool(CanExecute)}; destroyRequired={Bool(ItemsDestroyRequired)}; useful={FreshUsefulItemCount}; feasible={FreshFeasibleItemCount}; need={Safe(NeedSignature)}; mutationAttempted={Bool(MutationAttempted)}; networkTransactionSubmitted={Bool(NetworkTransactionSubmitted)}";
+    public string Summary => $"ready={Bool(Ready)}; reason={Safe(Reason)}; item={Safe(ItemId)}; template={Safe(TemplateId)}; category={Safe(Category)}; selection={Safe(SelectionReason)}; sourcePath={Safe(SourcePath)}; sourceAddress={Safe(SourceAddressFingerprint)}; destination={Safe(DestinationFingerprint)}; operation={Safe(OperationType)}; itemClaim={Safe(ItemClaimId)}; manifestRevision={ManifestRevision}; interestRevision={InterestRevision}; assignmentTier={Safe(AssignmentTier)}; assignmentScore={AssignmentScore:0.0}; secondarySwap={Bool(SecondarySwap)}; magazineReplacementSwap={Bool(MagazineReplacementSwap)}; magazineReplacementWeapon={Safe(MagazineReplacementWeaponId)}; displacedItem={Safe(DisplacedItemId)}; quantity={Quantity}; canExecute={Bool(CanExecute)}; destroyRequired={Bool(ItemsDestroyRequired)}; useful={FreshUsefulItemCount}; feasible={FreshFeasibleItemCount}; need={Safe(NeedSignature)}; mutationAttempted={Bool(MutationAttempted)}; networkTransactionSubmitted={Bool(NetworkTransactionSubmitted)}";
 
     private static string Bool(bool value) => value ? "true" : "false";
     private static string Safe(string? value) => string.IsNullOrWhiteSpace(value)
@@ -211,8 +213,11 @@ internal sealed class VanguardCorpseLootPostCommitReadBackResult
     public bool LooseAmmunitionCompatible { get; init; }
     public bool SecondarySwapDisplacedItemObserved { get; init; }
     public bool SecondarySwapSourceRestored { get; init; }
+    public bool MagazineReplacementSwap { get; init; }
+    public bool MagazineReplacementDisplacedItemObserved { get; init; }
+    public bool MagazineReplacementSourceRestored { get; init; }
 
-    public string Summary => $"success={Bool(Success)}; reason={Safe(Reason)}; itemInInventory={Bool(ItemInOperatorInventory)}; weaponManagerRecognized={Bool(WeaponManagerRecognized)}; eftMedicalRecognized={Bool(EftMedicalRecognized)}; vanguardMedicalRecognized={Bool(VanguardMedicalRecognized)}; medicalTemplateKnownToVanguard={Bool(MedicalTemplateKnownToVanguard)}; eftNativeMedicalFallbackUsed={Bool(EftNativeMedicalFallbackUsed)}; medicalReadBackMode={Safe(MedicalReadBackMode)}; magazineCompatible={Bool(MagazineCompatible)}; looseAmmunitionCompatible={Bool(LooseAmmunitionCompatible)}; secondarySwapDisplacedObserved={Bool(SecondarySwapDisplacedItemObserved)}; secondarySwapSourceRestored={Bool(SecondarySwapSourceRestored)}";
+    public string Summary => $"success={Bool(Success)}; reason={Safe(Reason)}; itemInInventory={Bool(ItemInOperatorInventory)}; weaponManagerRecognized={Bool(WeaponManagerRecognized)}; eftMedicalRecognized={Bool(EftMedicalRecognized)}; vanguardMedicalRecognized={Bool(VanguardMedicalRecognized)}; medicalTemplateKnownToVanguard={Bool(MedicalTemplateKnownToVanguard)}; eftNativeMedicalFallbackUsed={Bool(EftNativeMedicalFallbackUsed)}; medicalReadBackMode={Safe(MedicalReadBackMode)}; magazineCompatible={Bool(MagazineCompatible)}; looseAmmunitionCompatible={Bool(LooseAmmunitionCompatible)}; secondarySwapDisplacedObserved={Bool(SecondarySwapDisplacedItemObserved)}; secondarySwapSourceRestored={Bool(SecondarySwapSourceRestored)}; magazineReplacementSwap={Bool(MagazineReplacementSwap)}; magazineReplacementDisplacedObserved={Bool(MagazineReplacementDisplacedItemObserved)}; magazineReplacementSourceRestored={Bool(MagazineReplacementSourceRestored)}";
 
     private static string Bool(bool value) => value ? "true" : "false";
     private static string Safe(string? value) => string.IsNullOrWhiteSpace(value)

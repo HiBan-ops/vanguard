@@ -3,10 +3,10 @@
 
 #if NETSTANDARD2_1
 
-// Responsibility: Provides Is External Init support for the compatibility layer.
-// Flow: The file encapsulates one bounded piece of the subsystem and exchanges explicit inputs/results with neighboring services instead of relying on hidden cross-system state.
-// Authority boundary: Authority remains with the owning subsystem and any external EFT/SPT/Fika/SAIN component explicitly referenced by its call path.
-// Invariant: Behavior stays scoped to the current profile/raid/process contract and preserves existing safety and compatibility boundaries.
+// Responsibility: Provide the IsExternalInit compiler compatibility marker for the netstandard2.1 target.
+// Flow: The NETSTANDARD2_1 branch declares the empty System.Runtime.CompilerServices marker consumed by init-only language features.
+// Authority boundary: The C# compiler uses this compatibility type; it does not invoke EFT, SPT or runtime services.
+// Invariant: The shim stays conditional on NETSTANDARD2_1 and exposes no executable behavior.
 namespace System.Runtime.CompilerServices
 {
     /// <summary>

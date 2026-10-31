@@ -61,6 +61,25 @@ internal static class VanguardOperatorFriendlyTargetGuard
             () => $"VANGUARD_FRIENDLY_TARGET_EVENT_DRIVEN_RESET reason={Safe(reason)}; periodicMutationSweep=false; dirtyRepair=true; queryVetoMutation=false; tag={StallGuardStatusTag}");
     }
 
+    public static string ForgetRuntimePresence(string? botProfileId, string reason)
+    {
+        string key = Normalize(botProfileId);
+        if (key.Length == 0)
+        {
+            return "ignored=missing_bot_profile";
+        }
+
+        bool dirtyRemoved;
+        bool repairRemoved;
+        lock (Sync)
+        {
+            dirtyRemoved = DirtyBotProfileIds.Remove(key);
+            repairRemoved = LastRepairUtcByBotProfileId.Remove(key);
+        }
+
+        return $"dirtyRemoved={(dirtyRemoved ? "true" : "false")}; repairThrottleRemoved={(repairRemoved ? "true" : "false")}; friendlyIdentityPreserved=true; reason={Safe(reason)}";
+    }
+
     public static void Tick()
     {
         VanguardFriendlyIdentityRegistry.Tick();

@@ -1,4 +1,4 @@
-#if SPT_CLIENT
+﻿#if SPT_CLIENT
 using System;
 
 // Responsibility: Encodes the deterministic rules for Continuous Cohesion Locomotion Policy within the movement/cohesion runtime.
@@ -19,11 +19,55 @@ internal static class VanguardContinuousCohesionLocomotionPolicy
     public const string AtomicDeploymentStatusTag = "VANGUARD_CONTINUOUS_PURSUIT_ATOMIC_DEPLOYMENT_STATUS";
     public const string SeamlessAuthorityContinuityStatusTag = "VANGUARD_SEAMLESS_AUTHORITY_CONTINUITY_STATUS";
 
+    private const string TacticalCoordinatorAltDevelopRequest = "TacticalCoordinatorAltDevelop";
+    private const string TacticalCoordinatorDirectCommitRequest = "TacticalCoordinatorDirectCommit";
+    private const string TacticalCoordinatorOpportunityRequest = "TacticalCoordinatorOpportunityPosition";
+    private const string MedicSupportCombatRendezvousRequest = "MedicSupportCombatRendezvous";
+
     public static bool IsContinuousTravelRequest(string? requestKind)
-        => string.Equals(
-            requestKind?.Trim(),
+    {
+        string normalized = requestKind?.Trim() ?? string.Empty;
+        return string.Equals(
+            normalized,
             VanguardMovementContractPolicy.TravelCohesionFollowThrough,
             StringComparison.OrdinalIgnoreCase);
+    }
+
+    public static bool IsTacticalCoordinatorAltDevelopRequest(string? requestKind)
+    {
+        string normalized = requestKind?.Trim() ?? string.Empty;
+        return string.Equals(
+            normalized,
+            TacticalCoordinatorAltDevelopRequest,
+            StringComparison.OrdinalIgnoreCase);
+    }
+
+    public static bool IsTacticalCoordinatorDirectCommitRequest(string? requestKind)
+    {
+        string normalized = requestKind?.Trim() ?? string.Empty;
+        return string.Equals(
+            normalized,
+            TacticalCoordinatorDirectCommitRequest,
+            StringComparison.OrdinalIgnoreCase);
+    }
+
+    public static bool IsTacticalCoordinatorOpportunityRequest(string? requestKind)
+    {
+        string normalized = requestKind?.Trim() ?? string.Empty;
+        return string.Equals(normalized, TacticalCoordinatorOpportunityRequest, StringComparison.OrdinalIgnoreCase);
+    }
+
+    public static bool IsMedicSupportSainPathRequest(string? requestKind)
+    {
+        string normalized = requestKind?.Trim() ?? string.Empty;
+        return string.Equals(normalized, MedicSupportCombatRendezvousRequest, StringComparison.OrdinalIgnoreCase);
+    }
+
+    public static bool IsTacticalCoordinatorSainPathRequest(string? requestKind)
+        => IsTacticalCoordinatorAltDevelopRequest(requestKind)
+            || IsTacticalCoordinatorDirectCommitRequest(requestKind)
+            || IsTacticalCoordinatorOpportunityRequest(requestKind)
+            || IsMedicSupportSainPathRequest(requestKind);
 
     public static float ResolveTravelReachDistance(float anchorRadiusMeters)
     {

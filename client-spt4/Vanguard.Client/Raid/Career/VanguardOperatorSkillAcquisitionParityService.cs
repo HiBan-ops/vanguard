@@ -47,7 +47,10 @@ internal static class VanguardOperatorSkillAcquisitionParityService
 
         string botProfileId = Clean(player.ProfileId);
         if (string.IsNullOrWhiteSpace(botProfileId)
-            || !VanguardRaidOperatorRuntimeRegistry.TryGetRuntimeByBotProfileId(botProfileId, out VanguardRaidOperatorRuntimeRecord runtime))
+            || !VanguardRaidOperatorRuntimeRegistry.TryGetRuntimeByBotProfileId(botProfileId, out VanguardRaidOperatorRuntimeRecord runtime)
+            || !runtime.IsRuntimePresent
+            || runtime.BotOwner == null
+            || !ReferenceEquals(runtime.BotOwner.GetPlayer, player))
         {
             return true;
         }
@@ -90,6 +93,41 @@ internal static class VanguardOperatorSkillAcquisitionParityService
                 WeaponAcquisitionStatusTag,
                 $"VANGUARD_WEAPON_ACQUISITION_FAILED operator={Safe(runtime.OperatorId)}; botProfile={Safe(botProfileId)}; weaponTemplate={Safe(weapon.TemplateId)}; type={Safe(exception.GetType().Name)}; message={Safe(exception.Message)}; originalSkipped=true; acquisitionFailClosed=true; gameplayUnaffected=true; directSkillMutation=false; directMasteringMutation=false");
             return false;
+        }
+    }
+
+    public static string ForgetRuntimePresence(
+        VanguardRaidOperatorRuntimeRecord runtime,
+        Player? exactPlayer,
+        string reason)
+    {
+        if (runtime == null || string.IsNullOrWhiteSpace(runtime.BotProfileId))
+        {
+            return "ignored=runtime_or_bot_profile_missing";
+        }
+
+        string botProfileId = Clean(runtime.BotProfileId);
+        lock (Sync)
+        {
+            bool subscriptionRemoved = false;
+            if (PhysicalSubscriptions.TryGetValue(botProfileId, out PhysicalActionSubscription? subscription))
+            {
+                if (exactPlayer == null || !ReferenceEquals(subscription.Player, exactPlayer))
+                {
+                    throw new InvalidOperationException(
+                        "career physical subscription exact Player mismatch during runtime presence seal; botProfile=" + Safe(botProfileId));
+                }
+
+                subscription.Active = false;
+                DetachSubscription(subscription, "runtime_presence_lost:" + reason);
+                PhysicalSubscriptions.Remove(botProfileId);
+                subscriptionRemoved = true;
+            }
+
+            bool weaponDispatchRemoved = WeaponDispatchCounts.Remove(botProfileId);
+            return "subscriptionRemoved=" + subscriptionRemoved.ToString().ToLowerInvariant()
+                + ";weaponDispatchRemoved=" + weaponDispatchRemoved.ToString().ToLowerInvariant()
+                + ";exactPlayerRequired=true;callbacksDisabled=true;reason=" + Safe(reason);
         }
     }
 
@@ -200,6 +238,11 @@ internal static class VanguardOperatorSkillAcquisitionParityService
         float distance,
         SkillManager.GStruct279 movement)
     {
+        if (!subscription.Active)
+        {
+            return;
+        }
+
         Player player = subscription.Player;
         SkillManager skills = subscription.Skills;
         float physicalOverweight = player.Physical != null ? player.Physical.Overweight : float.NaN;
@@ -320,6 +363,7 @@ internal static class VanguardOperatorSkillAcquisitionParityService
 
     private static void DetachSubscription(PhysicalActionSubscription subscription, string reason)
     {
+        subscription.Active = false;
         try
         {
             if (subscription.SprintHandler != null)
@@ -361,6 +405,7 @@ internal static class VanguardOperatorSkillAcquisitionParityService
         public VanguardRaidOperatorRuntimeRecord Runtime { get; }
         public Player Player { get; }
         public SkillManager Skills { get; }
+        public volatile bool Active = true;
         public Action<float, SkillManager.GStruct279>? SprintHandler { get; set; }
         public Action<float, SkillManager.GStruct279>? MovementHandler { get; set; }
         public float BaselineEnduranceCurrent { get; set; }

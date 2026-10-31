@@ -44,6 +44,29 @@ internal static class VanguardLootTargetClaimStore
         }
     }
 
+    public static bool ReleaseByBot(string? botProfileId, string reason, out VanguardLootTargetClaim released)
+    {
+        released = new VanguardLootTargetClaim();
+        string bot = Normalize(botProfileId);
+        if (string.Equals(bot, "none", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        lock (Sync)
+        {
+            if (!OwnerByBot.TryGetValue(bot, out string? owner)
+                || !ByOwner.TryGetValue(owner, out VanguardLootTargetClaim? claim))
+            {
+                return false;
+            }
+
+            released = claim;
+            RemoveLocked(owner, claim);
+            return true;
+        }
+    }
+
     public static bool TryAcquire(string ownerProfileId, string operatorId, string botProfileId,
         VanguardLootTargetKind targetKind, string targetId, float score, DateTimeOffset now,
         out VanguardLootTargetClaim claim, out string reason)

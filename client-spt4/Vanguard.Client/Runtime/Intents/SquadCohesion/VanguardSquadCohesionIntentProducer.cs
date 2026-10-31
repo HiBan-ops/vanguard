@@ -2,10 +2,10 @@
 using System.Collections.Generic;
 using Vanguard.Client.Runtime.Decision;
 
-// Responsibility: Provides Squad Cohesion Intent Producer support for the intent production pipeline.
-// Flow: The file encapsulates one bounded piece of the subsystem and exchanges explicit inputs/results with neighboring services instead of relying on hidden cross-system state.
-// Authority boundary: Authority remains with the owning subsystem and any external EFT/SPT/Fika/SAIN component explicitly referenced by its call path.
-// Invariant: Behavior stays scoped to the current profile/raid/process contract and preserves existing safety and compatibility boundaries.
+// Responsibility: Represent squad-cohesion state as read-only candidate intents.
+// Flow: Evaluate missing owner, bubble distance, direct threat, sector distribution and useful holding position from the snapshot.
+// Authority boundary: Cohesion arbitration and external combat control retain command authority; this producer emits observations only.
+// Invariant: Dead or cohesion-disabled Operators emit no candidate, and an unknown owner never authorizes a blind regrouping move.
 namespace Vanguard.Client.Runtime.Intents;
 
 internal sealed class VanguardSquadCohesionIntentProducer : IVanguardIntentProducer

@@ -111,7 +111,8 @@ internal static class VanguardRuntimeLogPresentation
                 .Replace("__", "_")
                 .Replace("--", "-")
                 .Replace("=_", "=")
-                .Replace("=-", "=")
+                // Payload values are diagnostic evidence. Preserve a leading minus sign after '=' so
+                // negative sentinels and measurements remain truthful in the presented runtime log.
                 .Replace("_;", ";")
                 .Replace("-;", ";")
                 .Replace(";;", ";")

@@ -125,6 +125,55 @@ internal static class VanguardSquadCohesionClaimExecutor
     }
 
 
+    public static string ForgetRuntimePresence(string? botProfileId, DateTimeOffset now, string reason)
+    {
+        string key = Safe(botProfileId);
+        bool claimRemoved;
+        bool activeRemoved;
+        bool pendingRemoved;
+        bool handoffRemoved;
+        CohesionClaimLeaseState forgottenLease = default;
+        lock (Sync)
+        {
+            claimRemoved = ClaimsByBotProfileId.Remove(key);
+            ActiveByBotProfileId.TryGetValue(key, out forgottenLease);
+            activeRemoved = ActiveByBotProfileId.Remove(key);
+            pendingRemoved = PendingPlanByBotProfileId.Remove(key);
+            CooldownByBotProfileId.Remove(key);
+            handoffRemoved = AtomicHandoffByBotProfileId.Remove(key);
+            foreach (string pairKey in PhysicalStackSinceByPair.Keys
+                .Where(value => PairContainsBot(value, key))
+                .ToArray())
+            {
+                PhysicalStackSinceByPair.Remove(pairKey);
+            }
+            foreach (string pairKey in PhysicalStackCooldownByPair.Keys
+                .Where(value => PairContainsBot(value, key))
+                .ToArray())
+            {
+                PhysicalStackCooldownByPair.Remove(pairKey);
+            }
+            foreach (string logKey in LastLogByKey.Keys.Where(value => value.IndexOf(key, StringComparison.OrdinalIgnoreCase) >= 0).ToArray())
+            {
+                LastLogByKey.Remove(logKey);
+            }
+        }
+
+        if (activeRemoved)
+        {
+            _ = ReleaseCohesionQuiesce(null, key, now, forgottenLease.LeaseId, forgottenLease.WindowId, "presence_seal:" + reason);
+        }
+        VanguardCohesionPlanningBudget.ForgetRuntimePresence(key);
+        bool interiorAssignmentRemoved = VanguardInteriorSecurityPlanner.ForgetRuntimePresence(key);
+        VanguardInteriorSecurityOrientationExecutor.ForgetRuntimePresence(key);
+        return "cohesionClaimForgotten=true;claimRemoved=" + Bool(claimRemoved)
+            + ";activeRemoved=" + Bool(activeRemoved)
+            + ";pendingRemoved=" + Bool(pendingRemoved)
+            + ";handoffRemoved=" + Bool(handoffRemoved)
+            + ";interiorAssignmentRemoved=" + Bool(interiorAssignmentRemoved)
+            + ";normalFinish=false;cooldownRetained=false;reason=" + Safe(reason);
+    }
+
     /// <summary>
     /// Returns true only after the owner has remained physically still long enough to switch from
     /// corridor travel to observation deployment. This is read-only and never opens a claim lease.
@@ -468,15 +517,14 @@ internal static class VanguardSquadCohesionClaimExecutor
         {
             bootLogged = true;
             VanguardClientDiagnosticsLog.Info(StatusTag,
-                $"VANGUARD_COHESION_CLAIMS_BOOT enabled={Bool(VanguardMovementAuthorityDoctrine.TacticalRepositionActiveEnabled)}; scope=stable_claim_distribution; lanes=full_bubble_front_flank_rear_entry; activeWindow=CloseCohesionMovement; maxActive=dynamic; claimRefresh=owner_significant_move_or_rotate_or_stale; runDistance={VanguardMovementAuthorityDoctrine.ClaimedCohesionRunDistanceMeters:0.0}; sprintDistance={VanguardMovementAuthorityDoctrine.ClaimedCohesionSprintDistanceMeters:0.0}; noLootForceScan=true; contextualSpeed=true; freshThreatHold=true; medicalResidualRelease=replaced_by_general_sain_stale_exit; movementPlanQueue=true; hardReturnFallbackOnReject=true; stationaryHysteresis=canonical_travel_route_memory_plus_direct_resume_preemption; stableHoldRequiresReachedDistinctClaim=true; CanonicalAdmissionTag={VanguardPrimaryExecutionContract.CanonicalStationaryAdmissionStatusTag}; indoorSectorHold=verified_navmesh_access_only; DynamicLeadViability=true; StationaryCompact=true; PersistentInteriorOrientationExecutor=true; MovementContract=true; FormationLanes=true; AnchorFailureThrottle=true; LanePreservingFallback=true; AntiStack=true; FinalAntiStack=true; IncrementalPlanning=true; OneOperatorPerTick=true; MaxPathCalculations={VanguardCohesionPlanningBudget.MaxPathCalculationsPerTick}; MaxCandidateEvaluations={VanguardCohesionPlanningBudget.MaxCandidateEvaluationsPerTick}; Tag={VanguardRuntimeConvergenceStatusTags.IncrementalCohesionPlanning}; BudgetTag={VanguardRuntimeConvergenceStatusTags.BoundedCohesionPathBudget}; tag={StatusTag}; Tag={CohesionAnchorsRunStatusTag}; Tag={CombatHoldMedicalCatchupStatusTag}; Tag={HostileIndoorMovementPlanStatusTag}; Tag={PathAlertRecoveryStatusTag}; Tag={HardReturnAlertStatusTag}; Tag={OrchestratorAuthorityStatusTag}; Tag={ExclusiveAuthorityStatusTag}; Tag={VanguardMovementAuthorityDoctrine.FormationLanesStatusTag}; build={VanguardBuildVersion.BuildLabel}; finalAntiStackTag={VanguardMovementAuthorityDoctrine.FinalAntiStackStatusTag}");
+                $"VANGUARD_COHESION_CLAIMS_BOOT enabled=player_scoped_owner_profile_id; movementF12Scope=PLAYER_SCOPED; scope=stable_claim_distribution; lanes=full_bubble_front_flank_rear_entry; activeWindow=CloseCohesionMovement; noLootForceScan=true; contextualSpeed=true; freshThreatHold=true; movementPlanQueue=true; hardReturnFallbackOnReject=true; stableHoldRequiresReachedDistinctClaim=true; CanonicalAdmissionTag={VanguardPrimaryExecutionContract.CanonicalStationaryAdmissionStatusTag}; FormationLanes=true; IncrementalPlanning=true; OneOperatorPerTick=true; MaxPathCalculations={VanguardCohesionPlanningBudget.MaxPathCalculationsPerTick}; MaxCandidateEvaluations={VanguardCohesionPlanningBudget.MaxCandidateEvaluationsPerTick}; tag={StatusTag}; build={VanguardBuildVersion.BuildLabel}; finalAntiStackTag={VanguardMovementAuthorityDoctrine.FinalAntiStackStatusTag}");
         }
 
         var snapshots = VanguardOperatorDecisionSnapshotService.GetLatestSnapshots();
         bool planningAllowed = VanguardRuntimeFrameBudgetGuard.ShouldRunOptional(
             "CohesionClaimPlanning",
             now,
-            TimeSpan.FromSeconds(1.25d),
-            out _);
+            TimeSpan.FromSeconds(1.25d));
         if (planningAllowed)
         {
             VanguardCohesionPlanningBudget.BeginTick(snapshots, now);
@@ -493,11 +541,6 @@ internal static class VanguardSquadCohesionClaimExecutor
 
         TickActiveLeases(snapshots, now);
         TickPersistentPhysicalDestack(snapshots, now);
-        if (!VanguardMovementAuthorityDoctrine.TacticalRepositionActiveEnabled)
-        {
-            return;
-        }
-
         // Atomic handoff tickets were path-validated by the Travel executor earlier in the same
         // frame and may start even when optional claim planning is deferred. Uncached claims still
         // obey the normal planning budget.
@@ -584,6 +627,7 @@ internal static class VanguardSquadCohesionClaimExecutor
                 "atomic_interior_deployment_supersedes_previous_claim:" + reason,
                 retired.Summary,
                 retired.WindowId);
+            _ = ReleaseOwnedCohesionQuiesce(retired, now, "atomic_interior_superseded:" + reason);
         }
 
         VanguardClientDiagnosticsLog.Info(VanguardPrimaryExecutionContract.StableEnvironmentAtomicInteriorDeploymentStatusTag,
@@ -622,6 +666,7 @@ internal static class VanguardSquadCohesionClaimExecutor
             // window.  Only retire the claim executor and its lease-safe command here; finishing
             // the old scheduler window again would be a foreign-generation no-op and log noise.
             VanguardReturnMovementCommandStore.ClearOwned(active.BotProfileId, active.LeaseId, active.StartedAtUtc, "owner_travel_supersedes_static_claim:" + reason);
+            _ = ReleaseOwnedCohesionQuiesce(active, now, "owner_travel_supersedes_claim:" + reason);
         }
 
         summary = "claimYielded=" + Bool(hadActive || hadClaim || hadPending)
@@ -643,6 +688,13 @@ internal static class VanguardSquadCohesionClaimExecutor
         if (snapshot == null || !snapshot.Alive)
         {
             reason = "operator_dead_or_missing";
+            return false;
+        }
+
+        var ownerPolicy = VanguardMovementAuthorityDoctrine.ForOwner(snapshot.OwnerProfileId);
+        if (!ownerPolicy.TacticalRepositionActiveEnabled)
+        {
+            reason = "owner_movement_disabled";
             return false;
         }
 
@@ -696,7 +748,7 @@ internal static class VanguardSquadCohesionClaimExecutor
             return false;
         }
 
-        if (snapshot.MovementAuthority.HardOutsideBubble || snapshot.SquadCohesion.OperatorDistanceToOwner >= VanguardMovementAuthorityDoctrine.HardCorrectionMeters)
+        if (snapshot.MovementAuthority.HardOutsideBubble || snapshot.SquadCohesion.OperatorDistanceToOwner >= ownerPolicy.HardCorrectionMeters)
         {
             reason = "hard_return_higher_priority";
             return false;
@@ -958,7 +1010,7 @@ internal static class VanguardSquadCohesionClaimExecutor
                     && ownerStationary
                     && !hasInteriorAssignment
                     && !snapshot.MovementAuthority.HardOutsideBubble
-                    && snapshot.SquadCohesion.OperatorDistanceToOwner <= VanguardMovementAuthorityDoctrine.TacticalBubbleMeters)
+                    && snapshot.SquadCohesion.OperatorDistanceToOwner <= VanguardMovementAuthorityDoctrine.ForOwner(snapshot.OwnerProfileId).TacticalBubbleMeters)
                 {
                     lock (Sync)
                     {
@@ -1495,6 +1547,7 @@ internal static class VanguardSquadCohesionClaimExecutor
                 continue;
             }
 
+            string leaseId = "claim_cohesion_" + now.ToUnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture) + "_" + Safe(snapshot.BotProfileId);
             if (NeedsExternalPreempt(snapshot))
             {
                 var preempt = VanguardExternalAuthorityAdapter.RequestOrbitAuthorityQuiesce(
@@ -1502,12 +1555,13 @@ internal static class VanguardSquadCohesionClaimExecutor
                     snapshot,
                     "claimed_cohesion:" + claim.Lane,
                     TimeSpan.FromSeconds(VanguardMovementAuthorityDoctrine.ClaimedCohesionMaxDurationSeconds + VanguardMovementAuthorityDoctrine.OrbitQuiesceRefreshSeconds + 3.0f),
-                    now);
+                    now, ownerLeaseId: leaseId, ownerWindowId: windowId);
                 string softDriveReason = "not_evaluated";
                 if (!preempt.CanDriveMovement && !CanSoftDriveAfterNonCriticalPreempt(snapshot, preempt, claim, out softDriveReason))
                 {
                     SetCooldown(snapshot.BotProfileId, now, VanguardMovementAuthorityDoctrine.ClaimedCohesionFailureCooldownSeconds);
                     VanguardMainIntentScheduler.FinishPrimaryWindow(snapshot.BotProfileId, now, "Failed", "external_preempt_not_granted:" + preempt.Outcome, preempt.Summary, windowId);
+                    _ = ReleaseCohesionQuiesce(record.BotOwner, snapshot.BotProfileId, now, leaseId, windowId, "external_preempt_not_granted");
                     VanguardClientDiagnosticsLog.Info(StatusTag,
                         $"VANGUARD_CLAIM_LEASE_ABORTED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; reason=external_preempt_not_granted; outcome={preempt.Outcome}; claim={Safe(claim.ClaimId)}; preempt={Safe(preempt.Summary)}; tag={StatusTag}");
                     continue;
@@ -1520,7 +1574,6 @@ internal static class VanguardSquadCohesionClaimExecutor
                 }
             }
 
-            string leaseId = "claim_cohesion_" + now.ToUnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture) + "_" + Safe(snapshot.BotProfileId);
             bool sprint = ResolveSprintForClaim(snapshot, claim, anchorDistance, pathDistance, out var paceReason);
             DateTimeOffset maxUntil = now + TimeSpan.FromSeconds(VanguardMovementAuthorityDoctrine.ClaimedCohesionMaxDurationSeconds);
             bool issued = VanguardReturnMovementCommandStore.Issue(
@@ -1540,8 +1593,20 @@ internal static class VanguardSquadCohesionClaimExecutor
             {
                 SetCooldown(snapshot.BotProfileId, now, VanguardMovementAuthorityDoctrine.ClaimedCohesionFailureCooldownSeconds);
                 VanguardMainIntentScheduler.FinishPrimaryWindow(snapshot.BotProfileId, now, "Failed", "move_bridge_rejected:" + commandResult, claim.Summary, windowId);
+                _ = ReleaseCohesionQuiesce(record.BotOwner, snapshot.BotProfileId, now, leaseId, windowId, "move_bridge_rejected");
                 VanguardClientDiagnosticsLog.Info(StatusTag,
                     $"VANGUARD_CLAIM_LEASE_ABORTED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; reason=move_bridge_rejected:{Safe(commandResult)}; claim={Safe(claim.ClaimId)}; tag={StatusTag}");
+                continue;
+            }
+
+            if (!VanguardReturnMovementCommandStore.TryGetActive(snapshot.BotProfileId, now, out var ownedClaimCommand)
+                || !string.Equals(ownedClaimCommand.LeaseId, leaseId, StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(ownedClaimCommand.RequestKind, VanguardMovementContractPolicy.ClaimedCohesionSlot, StringComparison.OrdinalIgnoreCase))
+            {
+                VanguardReturnMovementCommandStore.ClearOwned(snapshot.BotProfileId, leaseId, now, "claim_command_identity_not_confirmed");
+                SetCooldown(snapshot.BotProfileId, now, VanguardMovementAuthorityDoctrine.ClaimedCohesionFailureCooldownSeconds);
+                VanguardMainIntentScheduler.FinishPrimaryWindow(snapshot.BotProfileId, now, "Failed", "move_bridge_identity_not_confirmed", claim.Summary, windowId);
+                _ = ReleaseCohesionQuiesce(record.BotOwner, snapshot.BotProfileId, now, leaseId, windowId, "move_bridge_identity_not_confirmed");
                 continue;
             }
 
@@ -2562,6 +2627,7 @@ internal static class VanguardSquadCohesionClaimExecutor
 
     private static bool TryScoreRallyFallbackAnchor(OperatorDecisionSnapshot snapshot, Vector3 owner, Vector3 bot, Vector3 rawAnchor, float desiredDistance, out ClaimAnchorScore score)
     {
+        var ownerPolicy = VanguardMovementAuthorityDoctrine.ForOwner(snapshot.OwnerProfileId);
         score = ClaimAnchorScore.Invalid("rally_not_scored");
         bool indoor = IsIndoor(snapshot);
         if (!TrySample(rawAnchor, indoor ? 3.6f : 5.0f, out var sampled))
@@ -2612,14 +2678,14 @@ internal static class VanguardSquadCohesionClaimExecutor
             return false;
         }
 
-        if (snapshot.SquadCohesion.OperatorDistanceToOwner <= VanguardMovementAuthorityDoctrine.TacticalBubbleMeters
+        if (snapshot.SquadCohesion.OperatorDistanceToOwner <= ownerPolicy.TacticalBubbleMeters
             && botPathDistance > snapshot.SquadCohesion.OperatorDistanceToOwner + VanguardMovementAuthorityDoctrine.ClaimPathHardCloseSupportExtraMeters)
         {
             score = ClaimAnchorScore.Invalid("rally_reject_false_support_path_owner_" + snapshot.SquadCohesion.OperatorDistanceToOwner.ToString("0.0", CultureInfo.InvariantCulture) + "_botPath_" + botPathDistance.ToString("0.0", CultureInfo.InvariantCulture));
             return false;
         }
 
-        if (snapshot.SquadCohesion.OperatorDistanceToOwner <= VanguardMovementAuthorityDoctrine.TacticalBubbleMeters
+        if (snapshot.SquadCohesion.OperatorDistanceToOwner <= ownerPolicy.TacticalBubbleMeters
             && rallyBotRatioPre > VanguardMovementAuthorityDoctrine.ClaimPathHardCloseSupportRatio
             && botPathDistance > (indoor ? 28.0f : 38.0f))
         {
@@ -2656,6 +2722,7 @@ internal static class VanguardSquadCohesionClaimExecutor
 
     private static bool TryScoreClaimAnchor(OperatorDecisionSnapshot snapshot, Vector3 owner, Vector3 bot, Vector3 rawAnchor, float desiredDistance, Vector3 desiredDirection, string lane, out ClaimAnchorScore score)
     {
+        var ownerPolicy = VanguardMovementAuthorityDoctrine.ForOwner(snapshot.OwnerProfileId);
         score = ClaimAnchorScore.Invalid("not_scored");
         bool indoor = IsIndoor(snapshot);
         if (!TrySample(rawAnchor, indoor ? 3.2f : 4.2f, out var sampled))
@@ -2721,14 +2788,14 @@ internal static class VanguardSquadCohesionClaimExecutor
             return false;
         }
 
-        if (snapshot.SquadCohesion.OperatorDistanceToOwner <= VanguardMovementAuthorityDoctrine.TacticalBubbleMeters
+        if (snapshot.SquadCohesion.OperatorDistanceToOwner <= ownerPolicy.TacticalBubbleMeters
             && botPathDistance > snapshot.SquadCohesion.OperatorDistanceToOwner + VanguardMovementAuthorityDoctrine.ClaimPathHardCloseSupportExtraMeters)
         {
             score = ClaimAnchorScore.Invalid("reject_direct_close_path_huge_owner_" + snapshot.SquadCohesion.OperatorDistanceToOwner.ToString("0.0", CultureInfo.InvariantCulture) + "_botPath_" + botPathDistance.ToString("0.0", CultureInfo.InvariantCulture));
             return false;
         }
 
-        if (snapshot.SquadCohesion.OperatorDistanceToOwner <= VanguardMovementAuthorityDoctrine.TacticalBubbleMeters
+        if (snapshot.SquadCohesion.OperatorDistanceToOwner <= ownerPolicy.TacticalBubbleMeters
             && botRatio > VanguardMovementAuthorityDoctrine.ClaimPathHardCloseSupportRatio
             && botPathDistance > 44.0f)
         {
@@ -2881,12 +2948,29 @@ internal static class VanguardSquadCohesionClaimExecutor
             return mutable;
         }
 
+        bool exactClaimCommandOwned = VanguardReturnMovementCommandStore.TryGetActive(lease.BotProfileId, now, out var currentCommand)
+            && string.Equals(currentCommand.LeaseId, lease.LeaseId, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(currentCommand.RequestKind, VanguardMovementContractPolicy.ClaimedCohesionSlot, StringComparison.OrdinalIgnoreCase);
+        if (!exactClaimCommandOwned)
+        {
+            LogThrottled("claimRefreshStaleCommand|" + lease.BotProfileId, now,
+                $"VANGUARD_CLAIM_AUTHORITY_REFRESH_SKIPPED_STALE_COMMAND {lease.Summary}; mutation=false; reason={Safe(quiesceReason)}; tag={StatusTag}");
+            return mutable;
+        }
+        if (!snapshot.Orbit.Active && snapshot.Looting.HasActiveLootable != true && snapshot.Movement.HasPath == true)
+        {
+            LogThrottled("claimRefreshOwnedPath|" + lease.BotProfileId, now,
+                $"VANGUARD_CLAIM_AUTHORITY_REFRESH_SKIPPED_SELF_OWNED_PATH {lease.Summary}; mutation=false; pathPreserved=true; tag={StatusTag}");
+            return mutable;
+        }
+
         var result = VanguardExternalAuthorityAdapter.RequestOrbitAuthorityQuiesce(
             botOwner,
             snapshot,
             "active_claim_refresh:" + lease.Lane + ":" + quiesceReason,
             TimeSpan.FromSeconds(Math.Max(2.0f, VanguardMovementAuthorityDoctrine.OrbitQuiesceRefreshSeconds + 1.50f)),
-            now);
+            now, preserveVanguardMovementPath: true,
+            ownerLeaseId: lease.LeaseId, ownerWindowId: lease.WindowId);
         LogThrottled("orbitRefresh|" + lease.BotProfileId + "|" + result.Outcome, now,
             $"VANGUARD_CLAIM_AUTHORITY_REFRESH {lease.Summary}; outcome={result.Outcome}; canDriveMovement={Bool(result.CanDriveMovement)}; reason={Safe(quiesceReason)}; tag={StatusTag}; orbitTag={VanguardMovementAuthorityDoctrine.OrbitAuthorityQuiesceStatusTag}");
         return mutable;
@@ -2930,6 +3014,7 @@ internal static class VanguardSquadCohesionClaimExecutor
 
     private static bool ResolveSprintForClaim(OperatorDecisionSnapshot snapshot, CohesionClaimState claim, float anchorDistance, float pathDistance, out string reason)
     {
+        var ownerPolicy = VanguardMovementAuthorityDoctrine.ForOwner(snapshot.OwnerProfileId);
         float ownerDistance = snapshot.SquadCohesion.OperatorDistanceToOwner;
         if (!claim.SprintAllowed)
         {
@@ -2937,7 +3022,7 @@ internal static class VanguardSquadCohesionClaimExecutor
             return false;
         }
 
-        if (ownerDistance >= VanguardMovementAuthorityDoctrine.HardCorrectionMeters || ownerDistance >= VanguardMovementAuthorityDoctrine.ClaimedCohesionRallyFallbackDistanceMeters + 20.0f)
+        if (ownerDistance >= ownerPolicy.HardCorrectionMeters || ownerDistance >= VanguardMovementAuthorityDoctrine.ClaimedCohesionRallyFallbackDistanceMeters + 20.0f)
         {
             reason = "sprint:hard_catchup_owner_distance=" + ownerDistance.ToString("0.0", CultureInfo.InvariantCulture);
             return true;
@@ -3316,6 +3401,17 @@ internal static class VanguardSquadCohesionClaimExecutor
             >= VanguardContinuousCohesionLocomotionPolicy.StationaryClaimOwnerResumeConfirmSeconds;
     }
 
+    private static BotOwner? ResolveRuntimeBotOwner(string botProfileId)
+        => VanguardRaidOperatorRuntimeRegistry.TryGetRuntimeByBotProfileId(botProfileId, out var record)
+            && record.BotOwner != null && !record.BotOwner.IsDead ? record.BotOwner : null;
+
+    private static string ReleaseCohesionQuiesce(BotOwner? botOwner, string botProfileId, DateTimeOffset now, string leaseId, string windowId, string reason)
+        => VanguardExternalAuthorityAdapter.ReleaseCohesionOrbitAuthorityQuiesce(
+            botOwner, botProfileId, now, reason, "CohesionClaim", leaseId, windowId);
+
+    private static string ReleaseOwnedCohesionQuiesce(CohesionClaimLeaseState lease, DateTimeOffset now, string reason)
+        => ReleaseCohesionQuiesce(ResolveRuntimeBotOwner(lease.BotProfileId), lease.BotProfileId, now, lease.LeaseId, lease.WindowId, reason);
+
     private static void FinishStationaryClaimForOwnerResume(
         CohesionClaimLeaseState lease,
         DateTimeOffset now,
@@ -3343,6 +3439,7 @@ internal static class VanguardSquadCohesionClaimExecutor
             "owner_resume_travel_priority:" + reason,
             lease.Summary,
             lease.WindowId);
+        _ = ReleaseOwnedCohesionQuiesce(lease, now, "stationary_claim_terminal:" + reason);
         VanguardClientDiagnosticsLog.Info(VanguardContinuousCohesionLocomotionPolicy.SeamlessAuthorityContinuityStatusTag,
             $"VANGUARD_STATIONARY_CLAIM_YIELDED_ON_OWNER_RESUME {lease.Summary}; reason={Safe(reason)}; clear={Safe(clearResult)}; snapshot={Safe(snapshotSignature)}; pendingPromotion=false; cooldownWritten=false; postReturnHold=false; doctrine=owner_motion_immediately_returns_authority_to_travel; tag={VanguardContinuousCohesionLocomotionPolicy.SeamlessAuthorityContinuityStatusTag}");
     }
@@ -3375,6 +3472,7 @@ internal static class VanguardSquadCohesionClaimExecutor
             "stationary_claim_replan_after_observed_stall:" + reason,
             lease.Summary,
             lease.WindowId);
+        _ = ReleaseOwnedCohesionQuiesce(lease, now, "stationary_claim_terminal:" + reason);
         VanguardClientDiagnosticsLog.Info(VanguardContinuousCohesionLocomotionPolicy.SeamlessAuthorityContinuityStatusTag,
             $"VANGUARD_STATIONARY_CLAIM_REPLAN {lease.Summary}; reason={Safe(reason)}; clear={Safe(clearResult)}; snapshot={Safe(snapshotSignature)}; cooldown={VanguardContinuousCohesionLocomotionPolicy.ClaimReplanCooldownSeconds:0.00}; pendingPromotion=false; hardReturnFallback=false; doctrine=one_claim_failure_replans_locally_without_poisoning_travel; tag={VanguardContinuousCohesionLocomotionPolicy.SeamlessAuthorityContinuityStatusTag}");
     }
@@ -3398,13 +3496,14 @@ internal static class VanguardSquadCohesionClaimExecutor
         }
 
         VanguardMainIntentScheduler.FinishPrimaryWindow(lease.BotProfileId, now, outcome, reason, lease.Summary, lease.WindowId);
+        string externalRelease = ReleaseOwnedCohesionQuiesce(lease, now, "terminal:" + reason);
         string log = string.Equals(outcome, "Completed", StringComparison.OrdinalIgnoreCase)
             ? "VANGUARD_CLAIM_LEASE_COMPLETED"
             : string.Equals(outcome, "Timeout", StringComparison.OrdinalIgnoreCase)
                 ? "VANGUARD_CLAIM_LEASE_TIMEOUT"
                 : "VANGUARD_CLAIM_LEASE_ABORTED";
         VanguardClientDiagnosticsLog.Info(StatusTag,
-            $"{log} {lease.Summary}; outcome={Safe(outcome)}; reason={Safe(reason)}; snapshot={Safe(snapshotSignature)}; cooldown={cooldownSeconds:0.0}; tag={StatusTag}; moveBridgeTag={VanguardReturnMovementCommandStore.StatusTag}");
+            $"{log} {lease.Summary}; outcome={Safe(outcome)}; reason={Safe(reason)}; snapshot={Safe(snapshotSignature)}; cooldown={cooldownSeconds:0.0}; externalRelease={Safe(externalRelease)}; tag={StatusTag}; moveBridgeTag={VanguardReturnMovementCommandStore.StatusTag}");
     }
 
 
@@ -3426,6 +3525,18 @@ internal static class VanguardSquadCohesionClaimExecutor
         if (!VanguardReturnMovementCommandStore.TryGetActive(snapshot.BotProfileId, now, out var command))
         {
             reason = "no_active_return_command";
+            return false;
+        }
+
+        // A live monotonic travel command may keep physical movement authority while the owner has
+        // already settled into observation deployment.  Claim planning must be allowed to publish
+        // the stationary destination in that handoff state; TryStartClaimLeases keeps it observation-only
+        // while travel still owns movement, so no competing path writer is introduced.
+        if (string.Equals(ownerMode, "stationary_hold", StringComparison.OrdinalIgnoreCase)
+            && string.Equals(command.RequestKind, VanguardMovementContractPolicy.TravelCohesionFollowThrough, StringComparison.OrdinalIgnoreCase)
+            && VanguardSquadTravelCohesionExecutor.HasActiveTravelAuthority(snapshot.BotProfileId))
+        {
+            reason = "stationary_travel_allows_observation_claim_planning";
             return false;
         }
 
@@ -3760,6 +3871,7 @@ internal static class VanguardSquadCohesionClaimExecutor
 
     private static string CheckActiveLeaseInterruptGate(OperatorDecisionSnapshot snapshot, CohesionClaimLeaseState lease, DateTimeOffset now)
     {
+        var ownerPolicy = VanguardMovementAuthorityDoctrine.ForOwner(snapshot.OwnerProfileId);
         if (snapshot != null && VanguardMainIntentScheduler.IsSainCombatExecutionProtected(snapshot.BotProfileId, now, out var combatWindowReason))
         {
             return "sain_combat_primary_protected:" + combatWindowReason;
@@ -3790,7 +3902,7 @@ internal static class VanguardSquadCohesionClaimExecutor
             return "stationary_medical_authority";
         }
 
-        if (snapshot.MovementAuthority.HardOutsideBubble || snapshot.SquadCohesion.OperatorDistanceToOwner >= VanguardMovementAuthorityDoctrine.HardCorrectionMeters)
+        if (snapshot.MovementAuthority.HardOutsideBubble || snapshot.SquadCohesion.OperatorDistanceToOwner >= ownerPolicy.HardCorrectionMeters)
         {
             return "hard_return_higher_priority";
         }
@@ -3817,6 +3929,7 @@ internal static class VanguardSquadCohesionClaimExecutor
 
     private static string CheckStartGate(OperatorDecisionSnapshot snapshot, DateTimeOffset now)
     {
+        var ownerPolicy = VanguardMovementAuthorityDoctrine.ForOwner(snapshot.OwnerProfileId);
         if (snapshot != null && VanguardMainIntentScheduler.IsSainCombatExecutionProtected(snapshot.BotProfileId, now, out var combatWindowReason))
         {
             return "sain_combat_primary_protected:" + combatWindowReason;
@@ -3853,7 +3966,7 @@ internal static class VanguardSquadCohesionClaimExecutor
             return "stationary_medical_authority";
         }
 
-        if (snapshot.MovementAuthority.HardOutsideBubble || snapshot.SquadCohesion.OperatorDistanceToOwner >= VanguardMovementAuthorityDoctrine.HardCorrectionMeters)
+        if (snapshot.MovementAuthority.HardOutsideBubble || snapshot.SquadCohesion.OperatorDistanceToOwner >= ownerPolicy.HardCorrectionMeters)
         {
             return "hard_return_higher_priority";
         }
@@ -4248,6 +4361,7 @@ internal static class VanguardSquadCohesionClaimExecutor
 
     public static bool TryIssuePathSafeHardReturnFallback(OperatorDecisionSnapshot snapshot, BotOwner? botOwner, Vector3 botPosition, DateTimeOffset now, string reason, out string result)
     {
+        var ownerPolicy = VanguardMovementAuthorityDoctrine.ForOwner(snapshot.OwnerProfileId);
         result = "none";
         if (snapshot == null || botOwner == null || string.IsNullOrWhiteSpace(snapshot.BotProfileId) || !snapshot.Alive)
         {
@@ -4329,7 +4443,7 @@ internal static class VanguardSquadCohesionClaimExecutor
             float botDirect = HorizontalDistance(botPosition, sampled);
             float ratio = botDirect <= 0.25f ? 1.0f : pathDistance / botDirect;
             bool strict = ownerDirect <= (indoor ? 18.0f : 24.0f)
-                && pathDistance <= (snapshot.SquadCohesion.OperatorDistanceToOwner <= VanguardMovementAuthorityDoctrine.TacticalBubbleMeters ? (indoor ? 34.0f : 48.0f) : (indoor ? 82.0f : 110.0f))
+                && pathDistance <= (snapshot.SquadCohesion.OperatorDistanceToOwner <= ownerPolicy.TacticalBubbleMeters ? (indoor ? 34.0f : 48.0f) : (indoor ? 82.0f : 110.0f))
                 && ratio <= Math.Max(3.0f, VanguardMovementAuthorityDoctrine.ClaimPathHardCloseSupportRatio + 1.0f);
             if ((strict && !bestStrict) || (strict == bestStrict && pathDistance < bestPath))
             {
@@ -4418,6 +4532,7 @@ internal static class VanguardSquadCohesionClaimExecutor
 
     private static bool TryValidateClaimPath(OperatorDecisionSnapshot snapshot, CohesionClaimState claim, Vector3 start, Vector3 end, out string summary, out float distance, out string rejectReason)
     {
+        var ownerPolicy = VanguardMovementAuthorityDoctrine.ForOwner(snapshot.OwnerProfileId);
         rejectReason = "none";
         if (!TryPath(start, end, out distance, out var corners, out summary))
         {
@@ -4451,7 +4566,7 @@ internal static class VanguardSquadCohesionClaimExecutor
         }
 
         if (!claim.UsesInteriorPathContract
-            && snapshot.SquadCohesion.OperatorDistanceToOwner <= VanguardMovementAuthorityDoctrine.TacticalBubbleMeters
+            && snapshot.SquadCohesion.OperatorDistanceToOwner <= ownerPolicy.TacticalBubbleMeters
             && distance > snapshot.SquadCohesion.OperatorDistanceToOwner + VanguardMovementAuthorityDoctrine.ClaimPathHardCloseSupportExtraMeters)
         {
             rejectReason = "support_path_too_long_for_direct_bubble";
@@ -4459,7 +4574,7 @@ internal static class VanguardSquadCohesionClaimExecutor
         }
 
         if (!claim.UsesInteriorPathContract
-            && snapshot.SquadCohesion.OperatorDistanceToOwner <= VanguardMovementAuthorityDoctrine.TacticalBubbleMeters
+            && snapshot.SquadCohesion.OperatorDistanceToOwner <= ownerPolicy.TacticalBubbleMeters
             && ratio > VanguardMovementAuthorityDoctrine.ClaimPathHardCloseSupportRatio
             && distance > 44.0f)
         {
@@ -4472,18 +4587,19 @@ internal static class VanguardSquadCohesionClaimExecutor
 
     private static float ResolveClaimBotPathCeiling(OperatorDecisionSnapshot snapshot, bool indoor)
     {
+        var ownerPolicy = VanguardMovementAuthorityDoctrine.ForOwner(snapshot.OwnerProfileId);
         float ownerDistance = snapshot.SquadCohesion.OperatorDistanceToOwner;
         if (ownerDistance <= VanguardMovementAuthorityDoctrine.ClaimedCohesionMicroHoldOwnerMeters + 4.0f)
         {
             return indoor ? 22.0f : 30.0f;
         }
 
-        if (ownerDistance <= VanguardMovementAuthorityDoctrine.TacticalBubbleMeters)
+        if (ownerDistance <= ownerPolicy.TacticalBubbleMeters)
         {
             return indoor ? 28.0f : 42.0f;
         }
 
-        if (ownerDistance <= VanguardMovementAuthorityDoctrine.HardCorrectionMeters)
+        if (ownerDistance <= ownerPolicy.HardCorrectionMeters)
         {
             return indoor ? 55.0f : 74.0f;
         }
@@ -4493,18 +4609,19 @@ internal static class VanguardSquadCohesionClaimExecutor
 
     private static float ResolveRallyBotPathCeiling(OperatorDecisionSnapshot snapshot, bool indoor)
     {
+        var ownerPolicy = VanguardMovementAuthorityDoctrine.ForOwner(snapshot.OwnerProfileId);
         float ownerDistance = snapshot.SquadCohesion.OperatorDistanceToOwner;
         if (ownerDistance <= VanguardMovementAuthorityDoctrine.ClaimedCohesionMicroHoldOwnerMeters + 4.0f)
         {
             return indoor ? 24.0f : 34.0f;
         }
 
-        if (ownerDistance <= VanguardMovementAuthorityDoctrine.TacticalBubbleMeters)
+        if (ownerDistance <= ownerPolicy.TacticalBubbleMeters)
         {
             return indoor ? 30.0f : 44.0f;
         }
 
-        if (ownerDistance <= VanguardMovementAuthorityDoctrine.HardCorrectionMeters)
+        if (ownerDistance <= ownerPolicy.HardCorrectionMeters)
         {
             return indoor ? 58.0f : 78.0f;
         }
@@ -4514,6 +4631,7 @@ internal static class VanguardSquadCohesionClaimExecutor
 
     private static bool IsActiveClaimPathDivergent(OperatorDecisionSnapshot snapshot, CohesionClaimLeaseState lease, Vector3 botPosition, out string reason)
     {
+        var ownerPolicy = VanguardMovementAuthorityDoctrine.ForOwner(snapshot.OwnerProfileId);
         reason = "none";
         if (VanguardMovementAuthorityDoctrine.IsTrueDirectThreat(snapshot))
         {
@@ -4551,7 +4669,7 @@ internal static class VanguardSquadCohesionClaimExecutor
         }
 
         if (!lease.UsesInteriorPathContract
-            && snapshot.SquadCohesion.OperatorDistanceToOwner <= VanguardMovementAuthorityDoctrine.TacticalBubbleMeters
+            && snapshot.SquadCohesion.OperatorDistanceToOwner <= ownerPolicy.TacticalBubbleMeters
             && pathDistance > snapshot.SquadCohesion.OperatorDistanceToOwner + VanguardMovementAuthorityDoctrine.ClaimPathHardCloseSupportExtraMeters)
         {
             reason = "active_support_path_too_long:path=" + pathDistance.ToString("0.0", CultureInfo.InvariantCulture) + ":owner=" + snapshot.SquadCohesion.OperatorDistanceToOwner.ToString("0.0", CultureInfo.InvariantCulture);
@@ -4559,7 +4677,7 @@ internal static class VanguardSquadCohesionClaimExecutor
         }
 
         if (!lease.UsesInteriorPathContract
-            && snapshot.SquadCohesion.OperatorDistanceToOwner <= VanguardMovementAuthorityDoctrine.TacticalBubbleMeters
+            && snapshot.SquadCohesion.OperatorDistanceToOwner <= ownerPolicy.TacticalBubbleMeters
             && ratio > VanguardMovementAuthorityDoctrine.ClaimPathHardCloseSupportRatio
             && pathDistance > 44.0f)
         {
@@ -4799,6 +4917,17 @@ internal static class VanguardSquadCohesionClaimExecutor
     private static string FormatVector(Vector3 value)
     {
         return value.x.ToString("0.0", CultureInfo.InvariantCulture) + "," + value.y.ToString("0.0", CultureInfo.InvariantCulture) + "," + value.z.ToString("0.0", CultureInfo.InvariantCulture);
+    }
+
+    private static bool PairContainsBot(string? pairKey, string botProfileId)
+    {
+        if (string.IsNullOrWhiteSpace(pairKey) || string.IsNullOrWhiteSpace(botProfileId))
+        {
+            return false;
+        }
+
+        string[] parts = pairKey.Split('|');
+        return parts.Any(part => string.Equals(part, botProfileId, StringComparison.OrdinalIgnoreCase));
     }
 
     private static string Safe(string? value)

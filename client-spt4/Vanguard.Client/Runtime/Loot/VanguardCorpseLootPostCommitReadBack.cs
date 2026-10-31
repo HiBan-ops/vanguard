@@ -7,10 +7,10 @@ using EftWeapon = global::EFT.InventoryLogic.Weapon;
 using Vanguard.Client.Runtime.Decision;
 using Vanguard.Client.Runtime.Medical;
 
-// Responsibility: Provides Corpse Loot Post Commit Read Back support for the loot runtime.
-// Flow: The file encapsulates one bounded piece of the subsystem and exchanges explicit inputs/results with neighboring services instead of relying on hidden cross-system state.
-// Authority boundary: Authority remains with the owning subsystem and any external EFT/SPT/Fika/SAIN component explicitly referenced by its call path.
-// Invariant: Behavior stays scoped to the current profile/raid/process contract and preserves existing safety and compatibility boundaries.
+// Responsibility: Verify a committed corpse-loot item is observable in the Operator inventory and, when needed, its EFT subsystem.
+// Flow: Refresh post-commit inventory evidence and check medical or weapon selection visibility for applicable item kinds.
+// Authority boundary: Inventory/controller state is observed only; this read-back never issues an additional inventory operation.
+// Invariant: Generic items need inventory presence; typed medical or combat cases receive the applicable stronger read-back.
 namespace Vanguard.Client.Runtime.Loot;
 
 /// <summary>
@@ -98,16 +98,17 @@ internal static class VanguardCorpseLootPostCommitReadBack
 
             botOwner.GetPlayer.UpdateInteractionCast();
 
-            bool secondarySwapDisplacedObserved = !prepared.Preflight.SecondarySwap;
-            bool secondarySwapSourceRestored = !prepared.Preflight.SecondarySwap;
-            if (prepared.Preflight.SecondarySwap)
+            bool atomicSwap = prepared.Preflight.SecondarySwap || prepared.Preflight.MagazineReplacementSwap;
+            bool displacedObserved = !atomicSwap;
+            bool sourceRestored = !atomicSwap;
+            if (atomicSwap)
             {
                 Item? displaced = prepared.DisplacedItem;
                 if (displaced?.CurrentAddress != null)
                 {
-                    secondarySwapDisplacedObserved = true;
+                    displacedObserved = true;
                     string displacedAddress = VanguardCorpseLootLiveItemResolver.Fingerprint(displaced.CurrentAddress);
-                    secondarySwapSourceRestored = string.Equals(
+                    sourceRestored = string.Equals(
                         displacedAddress,
                         prepared.Preflight.SourceAddressFingerprint,
                         StringComparison.OrdinalIgnoreCase);
@@ -127,10 +128,11 @@ internal static class VanguardCorpseLootPostCommitReadBack
                 "generic" or "weapon_mod" => itemInInventory,
                 _ => false
             };
-            bool swapReadBackSatisfied = !prepared.Preflight.SecondarySwap
-                || (secondarySwapDisplacedObserved && secondarySwapSourceRestored);
+            bool swapReadBackSatisfied = !atomicSwap || (displacedObserved && sourceRestored);
             string reason = !swapReadBackSatisfied
-                ? "secondary_swap_displaced_item_not_at_candidate_source"
+                ? prepared.Preflight.MagazineReplacementSwap
+                    ? "magazine_replacement_displaced_item_not_at_candidate_source"
+                    : "secondary_swap_displaced_item_not_at_candidate_source"
                 : categoryRecognized
                     ? eftNativeMedicalFallbackUsed
                         ? "eft_native_medical_fallback_recognized"
@@ -150,8 +152,11 @@ internal static class VanguardCorpseLootPostCommitReadBack
                 MedicalReadBackMode = medicalReadBackMode,
                 MagazineCompatible = magazineCompatible,
                 LooseAmmunitionCompatible = looseAmmunitionCompatible,
-                SecondarySwapDisplacedItemObserved = secondarySwapDisplacedObserved,
-                SecondarySwapSourceRestored = secondarySwapSourceRestored
+                SecondarySwapDisplacedItemObserved = prepared.Preflight.SecondarySwap && displacedObserved,
+                SecondarySwapSourceRestored = !prepared.Preflight.SecondarySwap || sourceRestored,
+                MagazineReplacementSwap = prepared.Preflight.MagazineReplacementSwap,
+                MagazineReplacementDisplacedItemObserved = prepared.Preflight.MagazineReplacementSwap && displacedObserved,
+                MagazineReplacementSourceRestored = !prepared.Preflight.MagazineReplacementSwap || sourceRestored
             };
         }
         catch (Exception exception)

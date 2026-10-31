@@ -89,6 +89,8 @@ internal static class VanguardDiagnosticsPolicy
                 "VANGUARD_FRAME_BUDGET_SUMMARY",
                 "MEDICAL_CANONICAL_TYPED_DIVERGENCE",
                 "VANGUARD_WEAPON_HANDS_STATE_SUSPECT",
+                "VANGUARD_WEAPON_HANDS_STATE_RECOVERED",
+                "VANGUARD_WEAPON_HANDS_STATE_CENSORED",
                 "VANGUARD_BURST_TRIGGER_RELEASED",
                 "VANGUARD_RUNTIME_BIND_PENDING_SCAN",
                 "VANGUARD_TARGET_CLEAR_REACQUIRED",

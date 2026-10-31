@@ -525,7 +525,7 @@ internal sealed class VanguardSquadPreviewBodyLoader : IVanguardSquadPreviewBody
 
             if (parameterType == typeof(Vector3))
             {
-                // Native 4.0.13 PlayerModelLoader call uses Vector3.zero; Vanguard positions the
+                // Native PlayerModelLoader call uses Vector3.zero; Vanguard positions the
                 // completed model only after it is parented under the squad host.
                 args[index] = Vector3.zero;
                 continue;
@@ -547,7 +547,7 @@ internal sealed class VanguardSquadPreviewBodyLoader : IVanguardSquadPreviewBody
 
             if (index == 3 && TryResolvePlayerModelViewFilter(parameterType, out object? viewFilter))
             {
-                // EFT 0.16.9 / SPT 4.0.13 native call passes GClass1856.Default while the
+                // EFT / SPT native call passes GClass1856.Default while the
                 // PlayerModelLoader parameter is declared as its abstract GClass1854 base. Resolving
                 // Default on the declared base type returns null and causes PlayerModelLoader to NRE.
                 args[index] = viewFilter;
@@ -556,7 +556,7 @@ internal sealed class VanguardSquadPreviewBodyLoader : IVanguardSquadPreviewBody
 
             if (index == 8 && TryResolveDefaultLayerMask(parameterType, out object? defaultLayerMask))
             {
-                // EFT 0.16.9 / SPT 4.0.13 PlayerModelLoader.Load uses LayerMaskClass.DefaultLayerMask
+                // EFT / SPT PlayerModelLoader.Load uses LayerMaskClass.DefaultLayerMask
                 // at this position. Resolve it dynamically so the adapter remains isolated from the obfuscated type.
                 args[index] = defaultLayerMask;
                 continue;

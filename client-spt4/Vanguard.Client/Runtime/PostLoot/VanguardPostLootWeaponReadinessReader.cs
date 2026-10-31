@@ -12,9 +12,17 @@ internal static class VanguardPostLootWeaponReadinessReader
 {
     public static VanguardPostLootWeaponReadinessSnapshot Capture(BotOwner botOwner)
     {
+        // Tactical-fitness provenance hardening: successful execution alone is not evidence that the readiness
+        // surface was actually observed. Existing defensive reflection still owns access; the returned player
+        // and weapon-manager surfaces establish the minimum proof for this snapshot.
         object? player = VanguardOperatorRuntimeAuditReflection.GetMember(botOwner, "GetPlayer", "Player");
-        object? handsController = VanguardOperatorRuntimeAuditReflection.GetMember(player, "HandsController", "_handsController", "handsController");
         object? weaponManager = VanguardOperatorRuntimeAuditReflection.GetMember(botOwner, "WeaponManager", "WeaponManagerClass", "BotWeaponManager");
+        bool observed = player != null && weaponManager != null;
+        string observationReason = !observed
+            ? (player == null ? "player_missing" : "weapon_manager_missing")
+            : "runtime_weapon_surface_observed";
+
+        object? handsController = VanguardOperatorRuntimeAuditReflection.GetMember(player, "HandsController", "_handsController", "handsController");
         object? currentWeapon = VanguardOperatorRuntimeAuditReflection.GetMember(weaponManager, "CurrentWeapon", "SelectedWeapon", "Weapon", "CurrentItem");
         object? primaryWeapon = VanguardOperatorRuntimeAuditReflection.GetMember(weaponManager, "PrimaryWeapon", "Primary", "Primary1", "PrimaryOne");
         object? secondaryWeapon = VanguardOperatorRuntimeAuditReflection.GetMember(weaponManager, "SecondaryWeapon", "Secondary", "Primary2", "PrimaryTwo");
@@ -26,9 +34,12 @@ internal static class VanguardPostLootWeaponReadinessReader
 
         return new VanguardPostLootWeaponReadinessSnapshot
         {
+            Observed = observed,
+            ObservationReason = observationReason,
             HandsControllerType = handsType,
             CurrentWeaponKnown = currentWeapon != null,
             CurrentWeaponType = VanguardOperatorRuntimeAuditReflection.TypeName(currentWeapon),
+            CurrentWeaponItemId = ItemId(currentWeapon),
             CurrentWeaponTpl = TemplateId(currentWeapon),
             PrimaryWeaponTpl = TemplateId(primaryWeapon),
             SecondaryWeaponTpl = TemplateId(secondaryWeapon),
@@ -47,11 +58,36 @@ internal static class VanguardPostLootWeaponReadinessReader
         }
 
         string normalized = handsType.ToLowerInvariant();
-        return normalized.Contains("empty") || normalized.Contains("medicine") || normalized.Contains("inventory") || normalized.Contains("item");
+        // EFT reports a typed Player.MedsController as "MedsController", not
+        // "MedicineController". A cached/current weapon in WeaponManager is not proof
+        // that the native hands controller has actually returned to that weapon.
+        return normalized.Contains("empty") || normalized.Contains("medicine") || normalized.Contains("meds") || normalized.Contains("inventory") || normalized.Contains("item");
+    }
+
+    private static string ItemId(object? item)
+    {
+        if (item is EFT.InventoryLogic.Item typedItem)
+        {
+            return Safe(typedItem.Id);
+        }
+
+        object? id = VanguardOperatorRuntimeAuditReflection.GetMember(item, "Id", "ItemId", "_id");
+        if (id == null)
+        {
+            object? nestedItem = VanguardOperatorRuntimeAuditReflection.GetMember(item, "Item", "Weapon", "CurrentItem");
+            id = VanguardOperatorRuntimeAuditReflection.GetMember(nestedItem, "Id", "ItemId", "_id");
+        }
+
+        return Safe(VanguardOperatorRuntimeAuditReflection.Text(id));
     }
 
     private static string TemplateId(object? item)
     {
+        if (item is EFT.InventoryLogic.Item typedItem)
+        {
+            return Safe(typedItem.StringTemplateId);
+        }
+
         object? template = VanguardOperatorRuntimeAuditReflection.GetMember(item, "Template", "TemplateId", "Tpl", "_template");
         object? id = VanguardOperatorRuntimeAuditReflection.GetMember(template, "Id", "_id", "TemplateId");
         return Safe(VanguardOperatorRuntimeAuditReflection.FirstNonEmpty(VanguardOperatorRuntimeAuditReflection.Text(id), VanguardOperatorRuntimeAuditReflection.Text(template), VanguardOperatorRuntimeAuditReflection.Text(item)));
@@ -63,9 +99,12 @@ internal static class VanguardPostLootWeaponReadinessReader
 
 internal sealed class VanguardPostLootWeaponReadinessSnapshot
 {
+    public bool Observed { get; init; }
+    public string ObservationReason { get; init; } = "unobserved";
     public string HandsControllerType { get; init; } = "none";
     public bool CurrentWeaponKnown { get; init; }
     public string CurrentWeaponType { get; init; } = "none";
+    public string CurrentWeaponItemId { get; init; } = "none";
     public string CurrentWeaponTpl { get; init; } = "none";
     public string PrimaryWeaponTpl { get; init; } = "none";
     public string SecondaryWeaponTpl { get; init; } = "none";
@@ -76,11 +115,14 @@ internal sealed class VanguardPostLootWeaponReadinessSnapshot
 
     public bool WeaponReady => CurrentWeaponKnown && !ChangingWeapon && !HandsSuspicious;
 
-    public string Signature => Safe(HandsControllerType) + "|" + Safe(CurrentWeaponTpl) + "|" + ChangingWeapon + "|" + HandsSuspicious + "|" + FirstAidHaveToDo + "|" + FirstAidUsing;
+    public string Signature => Bool(Observed) + "|" + Safe(ObservationReason) + "|" + Safe(HandsControllerType) + "|" + Safe(CurrentWeaponItemId) + "|" + Safe(CurrentWeaponTpl) + "|" + ChangingWeapon + "|" + HandsSuspicious + "|" + FirstAidHaveToDo + "|" + FirstAidUsing;
 
-    public string Summary => "weaponReady=" + Bool(WeaponReady)
+    public string Summary => "observed=" + Bool(Observed)
+        + ";observationReason=" + Safe(ObservationReason)
+        + ";weaponReady=" + Bool(WeaponReady)
         + ";currentWeaponKnown=" + Bool(CurrentWeaponKnown)
         + ";currentWeaponType=" + Safe(CurrentWeaponType)
+        + ";currentWeaponItemId=" + Safe(CurrentWeaponItemId)
         + ";currentWeaponTpl=" + Safe(CurrentWeaponTpl)
         + ";primaryWeaponTpl=" + Safe(PrimaryWeaponTpl)
         + ";secondaryWeaponTpl=" + Safe(SecondaryWeaponTpl)

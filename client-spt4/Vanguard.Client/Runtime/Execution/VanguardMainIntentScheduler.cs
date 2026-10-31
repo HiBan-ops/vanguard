@@ -1,20 +1,26 @@
-#if SPT_CLIENT
+﻿#if SPT_CLIENT
 using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using Vanguard.Client.Diagnostics;
+using Vanguard.Client.Compatibility;
 using Vanguard.Client.Runtime.Decision;
 using Vanguard.Client.Runtime.Awareness;
 using Vanguard.Client.Runtime.Intents;
 using Vanguard.Client.Runtime.Movement;
 using Vanguard.Client.Runtime.Movement.Brain;
+using Vanguard.Client.Runtime.Movement.Diagnostics;
 using Vanguard.Client.Runtime.External;
+using Vanguard.Client.Runtime.Medical;
 using Vanguard.Client.Runtime.Medical.Execution;
+using Vanguard.Client.Runtime.Medical.Support;
 using Vanguard.Client.Runtime.PostLoot;
 using Vanguard.Client.Runtime.Loot;
 using Vanguard.Client.Runtime.Grenades;
 using Vanguard.Client.Raid.Runtime;
+using Vanguard.Client.Runtime.SquadCohesion;
+using Vanguard.Client.Runtime.TacticalAuthoring;
 
 // Responsibility: arbitrates competing Operator intents and grants the single primary execution domain for each decision window.
 // Flow: Subsystem snapshots/intents are gathered, precedence and lease rules select the active path, and work is dispatched to specialized executors/services.
@@ -37,6 +43,17 @@ internal static class VanguardMainIntentScheduler
 
     private static readonly object Sync = new();
     private static readonly Dictionary<string, VanguardPrimaryExecutionWindowState> ActiveByBotProfileId = new(StringComparer.OrdinalIgnoreCase);
+    // A published pair is not executable while predecessor retirement is still running.
+    // The token is never a proof of physical quiescence; it only fences re-entrant admission.
+    private sealed class MedicPairHandoffTicket
+    {
+        internal string CaregiverBotProfileId = "";
+        internal string PatientBotProfileId = "";
+        internal string CaregiverWindowId = "";
+        internal string PatientWindowId = "";
+    }
+
+    private static readonly Dictionary<string, MedicPairHandoffTicket> MedicPairHandoffsInFlight = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<string, VanguardSchedulerOutcomeRecord> OutcomeByBotProfileId = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<string, string> LastDecisionSignatureByBotProfileId = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<string, DateTimeOffset> LastLogAtByKey = new(StringComparer.OrdinalIgnoreCase);
@@ -58,6 +75,7 @@ internal static class VanguardMainIntentScheduler
         lock (Sync)
         {
             ActiveByBotProfileId.Clear();
+            MedicPairHandoffsInFlight.Clear();
             OutcomeByBotProfileId.Clear();
             LastDecisionSignatureByBotProfileId.Clear();
             LastLogAtByKey.Clear();
@@ -75,6 +93,66 @@ internal static class VanguardMainIntentScheduler
         bootLogged = false;
         VanguardClientDiagnosticsLog.Info(StatusTag,
             $"VANGUARD_SCHEDULER_RESET reason={Safe(reason)}; activeWindows=0; outcomeMemory=cleared; cleanAuth=true; cleanAuthTag={CleanAuthStatusTag}; tag={StatusTag}");
+    }
+
+    public static string ForgetRuntimePresence(string? botProfileId, string reason)
+    {
+        string key = Normalize(botProfileId);
+        if (string.Equals(key, "none", StringComparison.OrdinalIgnoreCase))
+        {
+            return "missing_identity";
+        }
+
+        bool activeRemoved;
+        bool outcomeRemoved;
+        bool signatureRemoved;
+        bool reopenUntilRemoved;
+        bool reopenTargetRemoved;
+        bool assignmentUntilRemoved;
+        bool assignmentTargetRemoved;
+        int noProgressRemoved = 0;
+        lock (Sync)
+        {
+            activeRemoved = ActiveByBotProfileId.Remove(key);
+            // An old in-flight handoff must not publish readiness after actor disappearance.
+            foreach (var pending in MedicPairHandoffsInFlight.Where(entry =>
+                         string.Equals(entry.Value.CaregiverBotProfileId, key, StringComparison.OrdinalIgnoreCase)
+                         || string.Equals(entry.Value.PatientBotProfileId, key, StringComparison.OrdinalIgnoreCase))
+                     .Select(entry => entry.Key).ToArray())
+            {
+                MedicPairHandoffsInFlight.Remove(pending);
+            }
+            outcomeRemoved = OutcomeByBotProfileId.Remove(key);
+            signatureRemoved = LastDecisionSignatureByBotProfileId.Remove(key);
+            reopenUntilRemoved = CombatReopenBlockedUntilByBotProfileId.Remove(key);
+            reopenTargetRemoved = CombatReopenBlockedTargetByBotProfileId.Remove(key);
+            assignmentUntilRemoved = CombatAssignmentPendingUntilByBotProfileId.Remove(key);
+            assignmentTargetRemoved = CombatAssignmentPendingTargetByBotProfileId.Remove(key);
+
+            string prefix = key + "|";
+            string[] seriesKeys = CombatNoProgressSeriesByBotAndTarget.Keys
+                .Where(candidate => candidate.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                .ToArray();
+            foreach (string seriesKey in seriesKeys)
+            {
+                if (CombatNoProgressSeriesByBotAndTarget.Remove(seriesKey))
+                {
+                    noProgressRemoved++;
+                }
+            }
+        }
+
+        string summary = "activeRemoved=" + Bool(activeRemoved)
+            + ";outcomeRemoved=" + Bool(outcomeRemoved)
+            + ";signatureRemoved=" + Bool(signatureRemoved)
+            + ";reopenUntilRemoved=" + Bool(reopenUntilRemoved)
+            + ";reopenTargetRemoved=" + Bool(reopenTargetRemoved)
+            + ";assignmentUntilRemoved=" + Bool(assignmentUntilRemoved)
+            + ";assignmentTargetRemoved=" + Bool(assignmentTargetRemoved)
+            + ";noProgressRemoved=" + noProgressRemoved.ToString(CultureInfo.InvariantCulture);
+        VanguardClientDiagnosticsLog.Info(StatusTag,
+            $"VANGUARD_SCHEDULER_RUNTIME_PRESENCE_FORGOTTEN botProfile={Safe(key)}; reason={Safe(reason)}; {summary}; newOwnerGranted=false; staleWindowResume=false; tag={StatusTag}");
+        return summary;
     }
 
     public static void Tick(IReadOnlyList<OperatorDecisionSnapshot> snapshots, DateTimeOffset now)
@@ -111,6 +189,8 @@ internal static class VanguardMainIntentScheduler
                 refreshSquadReadModel = true;
             }
         }
+
+        VanguardTemporalSchedulingProbeService.ObserveSchedulerPass(snapshots, now, batchAtUtc, refreshSquadReadModel);
 
         // The group contact read model is immutable for one snapshot batch. Rebuilding it every
         // Unity frame multiplied coop work without adding target truth. Primary arbitration remains
@@ -154,6 +234,14 @@ internal static class VanguardMainIntentScheduler
         if (snapshot == null || string.IsNullOrWhiteSpace(snapshot.BotProfileId))
         {
             reason = "snapshot_missing";
+            return false;
+        }
+
+        if (TacticalIntentContinuityService.ShouldDeferCohesion(snapshot, now, out string tacticalIntentReason))
+        {
+            reason = "tactical_intent_continuity:" + tacticalIntentReason;
+            LogThrottled("intentContinuity|hard_return|" + snapshot.BotProfileId, now, DecisionLogInterval,
+                $"VANGUARD_EXECUTION_DENIED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; requested=hard_return; reason={Safe(reason)}; deliberateTacticalSeparation=true; lowerPriorityMovement=false; intentTag={TacticalIntentContinuityService.StatusTag}; tag={StatusTag}");
             return false;
         }
 
@@ -230,6 +318,7 @@ internal static class VanguardMainIntentScheduler
                 WindowId = windowId,
                 OperatorId = snapshot.OperatorId,
                 BotProfileId = snapshot.BotProfileId,
+                OwnerProfileId = snapshot.OwnerProfileId,
                 WindowKind = VanguardPrimaryExecutionWindowKinds.HardReturnMovement,
                 State = "PendingExternalPreempt",
                 IntentKey = selected.IntentKey,
@@ -241,8 +330,8 @@ internal static class VanguardMainIntentScheduler
                 Score = selected.FinalScore,
                 StartedAtUtc = now,
                 MinUntilUtc = now + TimeSpan.FromSeconds(VanguardMovementAuthorityDoctrine.MovementLeaseMinDurationSeconds),
-                MaxUntilUtc = now + TimeSpan.FromSeconds(VanguardMovementAuthorityDoctrine.MovementLeaseHardMaxSeconds),
-                NoProgressUntilUtc = now + TimeSpan.FromSeconds(VanguardMovementAuthorityDoctrine.MovementLeaseNoProgressSeconds),
+                MaxUntilUtc = now + TimeSpan.FromSeconds(VanguardMovementAuthorityDoctrine.ForOwner(snapshot.OwnerProfileId).MovementLeaseHardMaxSeconds),
+                NoProgressUntilUtc = now + TimeSpan.FromSeconds(VanguardMovementAuthorityDoctrine.ForOwner(snapshot.OwnerProfileId).MovementLeaseNoProgressSeconds),
                 LastProgressAtUtc = now,
                 LastObservedAtUtc = now,
                 LastProgressKind = "pending_external_preempt"
@@ -263,6 +352,14 @@ internal static class VanguardMainIntentScheduler
         if (snapshot == null || string.IsNullOrWhiteSpace(snapshot.BotProfileId))
         {
             reason = "snapshot_missing";
+            return false;
+        }
+
+        if (TacticalIntentContinuityService.ShouldDeferCohesion(snapshot, now, out string tacticalIntentReason))
+        {
+            reason = "tactical_intent_continuity:" + tacticalIntentReason;
+            LogThrottled("intentContinuity|path_safe_hard_return|" + snapshot.BotProfileId, now, DecisionLogInterval,
+                $"VANGUARD_EXECUTION_DENIED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; requested=path_safe_hard_return; reason={Safe(reason)}; deliberateTacticalSeparation=true; lowerPriorityMovement=false; intentTag={TacticalIntentContinuityService.StatusTag}; tag={StatusTag}");
             return false;
         }
 
@@ -319,6 +416,7 @@ internal static class VanguardMainIntentScheduler
                 WindowId = windowId,
                 OperatorId = snapshot.OperatorId,
                 BotProfileId = snapshot.BotProfileId,
+                OwnerProfileId = snapshot.OwnerProfileId,
                 WindowKind = VanguardPrimaryExecutionWindowKinds.HardReturnMovement,
                 State = "PendingPathSafeFallbackCommand",
                 IntentKey = "PathSafeHardReturnFallback",
@@ -330,8 +428,8 @@ internal static class VanguardMainIntentScheduler
                 Score = 999.0f,
                 StartedAtUtc = now,
                 MinUntilUtc = now + TimeSpan.FromSeconds(VanguardMovementAuthorityDoctrine.MovementLeaseMinDurationSeconds),
-                MaxUntilUtc = now + TimeSpan.FromSeconds(VanguardMovementAuthorityDoctrine.MovementLeaseHardMaxSeconds),
-                NoProgressUntilUtc = now + TimeSpan.FromSeconds(VanguardMovementAuthorityDoctrine.MovementLeaseNoProgressSeconds),
+                MaxUntilUtc = now + TimeSpan.FromSeconds(VanguardMovementAuthorityDoctrine.ForOwner(snapshot.OwnerProfileId).MovementLeaseHardMaxSeconds),
+                NoProgressUntilUtc = now + TimeSpan.FromSeconds(VanguardMovementAuthorityDoctrine.ForOwner(snapshot.OwnerProfileId).MovementLeaseNoProgressSeconds),
                 LastProgressAtUtc = now,
                 LastObservedAtUtc = now,
                 LastProgressKind = "path_safe_fallback_window_opened"
@@ -345,6 +443,44 @@ internal static class VanguardMainIntentScheduler
     }
 
 
+
+    public static bool CanAuthoringPreviewAcquirePrimary(
+        string? botProfileId,
+        DateTimeOffset now,
+        out string reason)
+    {
+        reason = "none";
+        string key = Normalize(botProfileId);
+        if (string.Equals(key, "none", StringComparison.OrdinalIgnoreCase))
+        {
+            reason = "authoring_preview_identity_missing";
+            return false;
+        }
+
+        lock (Sync)
+        {
+            if (!ActiveByBotProfileId.TryGetValue(key, out var active) || !active.IsActive(now))
+            {
+                reason = "authoring_preview_primary_available";
+                return true;
+            }
+
+            if (active.IsAuthoringPreview)
+            {
+                reason = "authoring_preview_refresh";
+                return true;
+            }
+
+            if (CanSupersedeActiveForAuthoringPreview(active))
+            {
+                reason = "authoring_preview_may_supersede:" + Safe(active.WindowKind) + ":" + Safe(active.IntentKey);
+                return true;
+            }
+
+            reason = "authoring_preview_yield:" + Safe(active.WindowKind) + ":" + Safe(active.State);
+            return false;
+        }
+    }
 
     public static bool TryOpenOrRefreshAuthoringPreview(
         string? operatorId,
@@ -396,11 +532,20 @@ internal static class VanguardMainIntentScheduler
                     return false;
                 }
 
-                bool supersedable = VanguardPrimaryExecutionContract.IsMovementPrimaryKind(active.WindowKind)
-                    && !active.IsGrenadeEmergency
-                    && !active.IsMedical
-                    && !VanguardPrimaryExecutionContract.IsCombatPrimaryKind(active.WindowKind);
-                if (!supersedable)
+                if (IsProtectedTacticalCoordinatorExecution(active))
+                {
+                    // Automatic authored occupancy remains the persistent return target while a
+                    // qualified TC excursion owns execution. Manual live preview is never preempted
+                    // into such an excursion, and authoring must not steal execution back mid-window.
+                    windowId = active.WindowId;
+                    string tcExecution = string.Equals(active.IntentKey, "TacticalCoordinatorDirectCommit", StringComparison.OrdinalIgnoreCase)
+                        ? "tc_direct_commit"
+                        : "tc_alt_develop";
+                    reason = "authoring_preview_yield:" + tcExecution + ":" + Safe(active.State);
+                    return false;
+                }
+
+                if (!CanSupersedeActiveForAuthoringPreview(active))
                 {
                     windowId = active.WindowId;
                     reason = "authoring_preview_yield:" + Safe(active.WindowKind) + ":" + Safe(active.State);
@@ -427,6 +572,7 @@ internal static class VanguardMainIntentScheduler
                 WindowId = windowId,
                 OperatorId = Normalize(operatorId),
                 BotProfileId = key,
+                OwnerProfileId = ResolveOwnerProfileIdForBot(key),
                 WindowKind = VanguardPrimaryExecutionWindowKinds.AuthoringPreviewMovement,
                 State = "RunningLivePreview",
                 IntentKey = "TacticalAuthoringLivePreview",
@@ -453,6 +599,57 @@ internal static class VanguardMainIntentScheduler
         return true;
     }
 
+    public static bool HasActiveAutomaticAuthoringPreview(string? botProfileId, DateTimeOffset now)
+    {
+        string key = Normalize(botProfileId);
+        if (string.Equals(key, "none", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        lock (Sync)
+        {
+            return ActiveByBotProfileId.TryGetValue(key, out var active)
+                && active.IsActive(now)
+                && IsAutomaticAuthoringPreview(active);
+        }
+    }
+
+    private static bool IsAutomaticAuthoringPreview(VanguardPrimaryExecutionWindowState active)
+    {
+        return active != null
+            && active.IsAuthoringPreview
+            && string.Equals(active.IntentKey, "TacticalAuthoringLivePreview", StringComparison.OrdinalIgnoreCase)
+            && !string.IsNullOrWhiteSpace(active.PlanKey)
+            && active.PlanKey.Trim().StartsWith("auto-", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsProtectedTacticalCoordinatorExecution(VanguardPrimaryExecutionWindowState active)
+    {
+        return active != null
+            && active.IsTacticalMovement
+            && (string.Equals(active.IntentKey, "TacticalCoordinatorAltDevelop", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(active.IntentKey, "TacticalCoordinatorDirectCommit", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool CanSupersedeActiveForAuthoringPreview(VanguardPrimaryExecutionWindowState active)
+    {
+        if (active.IsOpportunisticLoot)
+        {
+            return false;
+        }
+
+        if (IsProtectedTacticalCoordinatorExecution(active))
+        {
+            return false;
+        }
+
+        return VanguardPrimaryExecutionContract.IsMovementPrimaryKind(active.WindowKind)
+            && !active.IsGrenadeEmergency
+            && !active.IsMedical
+            && !VanguardPrimaryExecutionContract.IsCombatPrimaryKind(active.WindowKind);
+    }
+
     public static bool TryOpenTacticalReposition(OperatorDecisionSnapshot snapshot, DateTimeOffset now, out string windowId, out string reason)
     {
         windowId = "none";
@@ -460,6 +657,14 @@ internal static class VanguardMainIntentScheduler
         if (snapshot == null || string.IsNullOrWhiteSpace(snapshot.BotProfileId))
         {
             reason = "snapshot_missing";
+            return false;
+        }
+
+        if (TacticalIntentContinuityService.ShouldDeferCohesion(snapshot, now, out string tacticalIntentReason))
+        {
+            reason = "tactical_intent_continuity:" + tacticalIntentReason;
+            LogThrottled("intentContinuity|tactical_reposition|" + snapshot.BotProfileId, now, DecisionLogInterval,
+                $"VANGUARD_EXECUTION_DENIED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; requested=tactical_reposition; reason={Safe(reason)}; deliberateTacticalSeparation=true; lowerPriorityMovement=false; intentTag={TacticalIntentContinuityService.StatusTag}; tag={StatusTag}");
             return false;
         }
 
@@ -494,6 +699,7 @@ internal static class VanguardMainIntentScheduler
                 WindowId = windowId,
                 OperatorId = snapshot.OperatorId,
                 BotProfileId = snapshot.BotProfileId,
+                OwnerProfileId = snapshot.OwnerProfileId,
                 WindowKind = VanguardPrimaryExecutionWindowKinds.TacticalMovement,
                 State = "PlanningAnchor",
                 IntentKey = selected.IntentKey,
@@ -506,7 +712,7 @@ internal static class VanguardMainIntentScheduler
                 StartedAtUtc = now,
                 MinUntilUtc = now + TimeSpan.FromSeconds(2.25d),
                 MaxUntilUtc = now + TimeSpan.FromSeconds(VanguardMovementAuthorityDoctrine.TacticalRepositionMaxDurationSeconds),
-                NoProgressUntilUtc = now + TimeSpan.FromSeconds(VanguardMovementAuthorityDoctrine.TacticalRepositionNoProgressSeconds),
+                NoProgressUntilUtc = now + TimeSpan.FromSeconds(VanguardMovementAuthorityDoctrine.ForOwner(snapshot.OwnerProfileId).TacticalRepositionNoProgressSeconds),
                 LastProgressAtUtc = now,
                 LastObservedAtUtc = now,
                 LastProgressKind = "planning_environment_anchor"
@@ -515,6 +721,375 @@ internal static class VanguardMainIntentScheduler
             reason = "opened:" + selected.IntentKey;
             VanguardClientDiagnosticsLog.Info(StatusTag,
                 $"VANGUARD_TACTICAL_EXECUTION_STARTED {window.Summary}; phase=planning_environment_anchor; candidates={Safe(TopCandidates(board))}; tacticalTag={VanguardMovementAuthorityDoctrine.TacticalRepositionActiveStatusTag}; solverTag={VanguardMovementAuthorityDoctrine.TacticalPlacementSolverStatusTag}; cleanAuthTag={CleanAuthStatusTag}; tag={StatusTag}");
+            return true;
+        }
+    }
+
+    public static bool TryOpenTacticalCoordinatorAltDevelopSearchHandoff(
+        OperatorDecisionSnapshot snapshot,
+        string threatId,
+        string candidateId,
+        DateTimeOffset now,
+        TimeSpan maxWait,
+        out string windowId,
+        out string reason)
+    {
+        windowId = "none";
+        reason = "none";
+        if (snapshot == null || string.IsNullOrWhiteSpace(snapshot.BotProfileId))
+        {
+            reason = "snapshot_missing";
+            return false;
+        }
+
+        ExpireStaleWindow(snapshot, now);
+        VanguardPrimaryExecutionWindowState? superseded = null;
+        lock (Sync)
+        {
+            if (ActiveByBotProfileId.TryGetValue(snapshot.BotProfileId, out var active) && active.IsActive(now))
+            {
+                if (active.IsTacticalMovement
+                    && string.Equals(active.IntentKey, "TacticalCoordinatorAltDevelop", StringComparison.OrdinalIgnoreCase)
+                    && string.Equals(active.State, "AwaitingSainSearchHandoff", StringComparison.OrdinalIgnoreCase)
+                    && string.Equals(Normalize(active.TargetKey), Normalize(threatId), StringComparison.OrdinalIgnoreCase)
+                    && string.Equals(Normalize(active.PlanKey), Normalize(candidateId), StringComparison.OrdinalIgnoreCase))
+                {
+                    windowId = active.WindowId;
+                    reason = "tc_alt_develop_search_handoff_already_active";
+                    return true;
+                }
+
+                bool travelCohesionYield = active.IsCloseCohesionMovement
+                    && string.Equals(active.IntentKey, "MovementBrokerTravelCohesionFollowThrough", StringComparison.OrdinalIgnoreCase);
+                bool authoringYield = IsAutomaticAuthoringPreview(active);
+                if (!travelCohesionYield && !authoringYield)
+                {
+                    reason = "search_handoff_primary_not_supersedable:" + Safe(active.WindowKind) + ":" + Safe(active.IntentKey);
+                    windowId = active.WindowId;
+                    return false;
+                }
+
+                superseded = active;
+                ActiveByBotProfileId.Remove(snapshot.BotProfileId);
+                OutcomeByBotProfileId[snapshot.BotProfileId] = new VanguardSchedulerOutcomeRecord
+                {
+                    BotProfileId = snapshot.BotProfileId,
+                    WindowId = active.WindowId,
+                    WindowKind = active.WindowKind,
+                    IntentKey = active.IntentKey,
+                    Outcome = "Interrupted",
+                    Reason = authoringYield
+                        ? "tc_alt_develop_search_handoff_yields_authoring_hold"
+                        : "tc_alt_develop_search_handoff_yields_travel_cohesion",
+                    BackendSummary = Safe(active.Summary),
+                    RecordedAtUtc = now
+                };
+            }
+            else
+            {
+                reason = "search_handoff_requires_supersedable_primary_window";
+                return false;
+            }
+
+            double waitSeconds = Math.Max(0.75d, Math.Min(3.0d, maxWait.TotalSeconds));
+            windowId = "tc_alt_search_handoff_" + now.ToUnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture) + "_" + Safe(snapshot.BotProfileId);
+            var window = new VanguardPrimaryExecutionWindowState
+            {
+                WindowId = windowId,
+                OperatorId = snapshot.OperatorId,
+                BotProfileId = snapshot.BotProfileId,
+                OwnerProfileId = snapshot.OwnerProfileId,
+                WindowKind = VanguardPrimaryExecutionWindowKinds.TacticalMovement,
+                State = "AwaitingSainSearchHandoff",
+                IntentKey = "TacticalCoordinatorAltDevelop",
+                Domain = "TacticalCoordination",
+                Reason = "bounded_non_survival_movement_yield_before_search_translation",
+                TargetKey = threatId,
+                PlanKey = candidateId,
+                NextStep = "YieldSupersedableVanguardMovementThenAwaitSainSearch",
+                Score = 0f,
+                StartedAtUtc = now,
+                MinUntilUtc = now,
+                MaxUntilUtc = now + TimeSpan.FromSeconds(waitSeconds),
+                NoProgressUntilUtc = now + TimeSpan.FromSeconds(waitSeconds),
+                LastProgressAtUtc = now,
+                LastObservedAtUtc = now,
+                LastProgressKind = "awaiting_sain_search_handoff"
+            };
+            ActiveByBotProfileId[snapshot.BotProfileId] = window;
+            reason = "tc_alt_develop_search_handoff_opened:" + Safe(superseded?.IntentKey);
+            VanguardClientDiagnosticsLog.Info(StatusTag,
+                $"TC_ALT_DEVELOP_SEARCH_HANDOFF_WINDOW_OPENED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; previousWindow={Safe(superseded?.WindowId)}; previousKind={Safe(superseded?.WindowKind)}; previousIntent={Safe(superseded?.IntentKey)}; window={Safe(window.WindowId)}; threat={Safe(threatId)}; axis={Safe(candidateId)}; waitSeconds={waitSeconds:0.00}; physicalTranslation=false; sainLayerResumeRequired=true; survivalAuthorityPreserved=true; directCommit=false; tag={StatusTag}");
+            return true;
+        }
+    }
+
+    public static bool TryOpenTacticalCoordinatorAltDevelop(
+        OperatorDecisionSnapshot snapshot,
+        string threatId,
+        string candidateId,
+        DateTimeOffset now,
+        TimeSpan maxDuration,
+        TimeSpan noProgressDuration,
+        out string windowId,
+        out string reason)
+    {
+        windowId = "none";
+        reason = "none";
+        if (snapshot == null || string.IsNullOrWhiteSpace(snapshot.BotProfileId))
+        {
+            reason = "snapshot_missing";
+            return false;
+        }
+
+        ExpireStaleWindow(snapshot, now);
+        VanguardPrimaryExecutionWindowState? supersededCombat = null;
+        VanguardPrimaryExecutionWindowState? supersededAuthoring = null;
+        string combatHandoffReason = "none";
+        lock (Sync)
+        {
+            if (ActiveByBotProfileId.TryGetValue(snapshot.BotProfileId, out var active) && active.IsActive(now))
+            {
+                if (active.IsTacticalMovement
+                    && string.Equals(active.IntentKey, "TacticalCoordinatorAltDevelop", StringComparison.OrdinalIgnoreCase)
+                    && string.Equals(active.State, "AwaitingSainSearchHandoff", StringComparison.OrdinalIgnoreCase))
+                {
+                    bool samePendingPlan = string.Equals(Normalize(active.TargetKey), Normalize(threatId), StringComparison.OrdinalIgnoreCase)
+                        && string.Equals(Normalize(active.PlanKey), Normalize(candidateId), StringComparison.OrdinalIgnoreCase);
+                    if (!samePendingPlan)
+                    {
+                        reason = "tc_alt_develop_search_handoff_plan_mismatch";
+                        windowId = active.WindowId;
+                        return false;
+                    }
+                    if (!AltDevelopAuthorityPolicy.IsAltDevelopTranslationCompatible(snapshot, threatId, out var promoteReason))
+                    {
+                        reason = "tc_alt_develop_search_handoff_not_ready:" + Safe(promoteReason);
+                        windowId = active.WindowId;
+                        return false;
+                    }
+
+                    double promotedMaxSeconds = Math.Max(1.0d, maxDuration.TotalSeconds);
+                    double promotedNoProgressSeconds = Math.Max(0.75d, Math.Min(promotedMaxSeconds, noProgressDuration.TotalSeconds));
+                    active.State = "PlanningAltEstablishment";
+                    active.Reason = "qualified_alt_establishment_assignment_after_search_handoff";
+                    active.NextStep = "MoveToAltEstablishmentRegion";
+                    active.StartedAtUtc = now;
+                    active.MinUntilUtc = now;
+                    active.MaxUntilUtc = now + TimeSpan.FromSeconds(promotedMaxSeconds);
+                    active.NoProgressUntilUtc = now + TimeSpan.FromSeconds(promotedNoProgressSeconds);
+                    active.LastProgressAtUtc = now;
+                    active.LastObservedAtUtc = now;
+                    active.LastProgressKind = "search_handoff_promoted_to_alt_develop";
+                    ActiveByBotProfileId[snapshot.BotProfileId] = active;
+                    windowId = active.WindowId;
+                    reason = "tc_alt_develop_search_handoff_promoted";
+                    VanguardClientDiagnosticsLog.Info(StatusTag,
+                        $"TC_ALT_DEVELOP_SEARCH_HANDOFF_PROMOTED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; window={Safe(active.WindowId)}; threat={Safe(threatId)}; axis={Safe(candidateId)}; compatibleReason={Safe(promoteReason)}; physicalTranslationPending=true; sameWindow=true; freshPathStillRequired=true; freshLeaseStillRequired=true; tag={StatusTag}");
+                    return true;
+                }
+
+                bool compatibleCombatHandoff = VanguardPrimaryExecutionContract.IsCombatPrimaryKind(active.WindowKind)
+                    && AltDevelopAuthorityPolicy.IsAltDevelopTranslationCompatible(snapshot, threatId, out combatHandoffReason);
+                if (compatibleCombatHandoff)
+                {
+                    supersededCombat = active;
+                    OutcomeByBotProfileId[snapshot.BotProfileId] = new VanguardSchedulerOutcomeRecord
+                    {
+                        BotProfileId = snapshot.BotProfileId,
+                        WindowId = active.WindowId,
+                        WindowKind = active.WindowKind,
+                        IntentKey = active.IntentKey,
+                        Outcome = "Interrupted",
+                        Reason = "tc_alt_develop_translation_handoff:" + combatHandoffReason,
+                        BackendSummary = Safe(active.Summary),
+                        RecordedAtUtc = now
+                    };
+                }
+                else if (IsAutomaticAuthoringPreview(active))
+                {
+                    supersededAuthoring = active;
+                    OutcomeByBotProfileId[snapshot.BotProfileId] = new VanguardSchedulerOutcomeRecord
+                    {
+                        BotProfileId = snapshot.BotProfileId,
+                        WindowId = active.WindowId,
+                        WindowKind = active.WindowKind,
+                        IntentKey = active.IntentKey,
+                        Outcome = "Interrupted",
+                        Reason = "tc_alt_develop_authoring_excursion_handoff",
+                        BackendSummary = Safe(active.Summary),
+                        RecordedAtUtc = now
+                    };
+                }
+                else
+                {
+                    reason = "primary_window_busy:" + Safe(active.WindowKind) + ":" + Safe(active.IntentKey);
+                    windowId = active.WindowId;
+                    LogThrottled("denyBusyTcAltDevelop|" + snapshot.BotProfileId + "|" + active.WindowKind, now, DecisionLogInterval,
+                        $"TC_ALT_DEVELOP_WINDOW_DENIED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; threat={Safe(threatId)}; axis={Safe(candidateId)}; reason={Safe(reason)}; mutation=false; doctrine=noncompatible_primary_authority_precedes_tc_alt_develop; tag={StatusTag}");
+                    return false;
+                }
+            }
+
+            double maxSeconds = Math.Max(1.0d, maxDuration.TotalSeconds);
+            double noProgressSeconds = Math.Max(0.75d, Math.Min(maxSeconds, noProgressDuration.TotalSeconds));
+            windowId = "tc_alt_develop_" + now.ToUnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture) + "_" + Safe(snapshot.BotProfileId);
+            var window = new VanguardPrimaryExecutionWindowState
+            {
+                WindowId = windowId,
+                OperatorId = snapshot.OperatorId,
+                BotProfileId = snapshot.BotProfileId,
+                OwnerProfileId = snapshot.OwnerProfileId,
+                WindowKind = VanguardPrimaryExecutionWindowKinds.TacticalMovement,
+                State = "PlanningAltEstablishment",
+                IntentKey = "TacticalCoordinatorAltDevelop",
+                Domain = "TacticalCoordination",
+                Reason = "qualified_alt_establishment_assignment",
+                TargetKey = threatId,
+                PlanKey = candidateId,
+                NextStep = "MoveToAltEstablishmentRegion",
+                Score = 0f,
+                StartedAtUtc = now,
+                MinUntilUtc = now,
+                MaxUntilUtc = now + TimeSpan.FromSeconds(maxSeconds),
+                NoProgressUntilUtc = now + TimeSpan.FromSeconds(noProgressSeconds),
+                LastProgressAtUtc = now,
+                LastObservedAtUtc = now,
+                LastProgressKind = "planning_alt_establishment"
+            };
+            ActiveByBotProfileId[snapshot.BotProfileId] = window;
+            reason = supersededCombat != null
+                ? "tc_alt_develop_window_opened_from_compatible_combat"
+                : supersededAuthoring != null
+                    ? "tc_alt_develop_window_opened_from_authoring_excursion"
+                    : "tc_alt_develop_window_opened";
+            if (supersededCombat != null)
+            {
+                VanguardClientDiagnosticsLog.Info(StatusTag,
+                    $"TC_ALT_DEVELOP_COMBAT_TRANSLATION_HANDOFF operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; previousWindow={Safe(supersededCombat.WindowId)}; previousKind={Safe(supersededCombat.WindowKind)}; previousIntent={Safe(supersededCombat.IntentKey)}; nextWindow={Safe(window.WindowId)}; threat={Safe(threatId)}; axis={Safe(candidateId)}; compatibleReason={Safe(combatHandoffReason)}; atomicPrimaryReplacement=true; sainPerceptionAimFirePreserved=true; movementAuthority=TC_AltDevelop; directCommit=false; tag={StatusTag}");
+            }
+            if (supersededAuthoring != null)
+            {
+                VanguardClientDiagnosticsLog.Info(StatusTag,
+                    $"TC_ALT_DEVELOP_AUTHORING_EXECUTION_HANDOFF operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; previousWindow={Safe(supersededAuthoring.WindowId)}; previousIntent={Safe(supersededAuthoring.IntentKey)}; nextWindow={Safe(window.WindowId)}; threat={Safe(threatId)}; axis={Safe(candidateId)}; assignmentStickyExternal=true; returnTargetPreservedByAuthoring=true; atomicPrimaryReplacement=true; movementAuthority=TC_AltDevelop; tag={StatusTag}");
+            }
+            VanguardClientDiagnosticsLog.Info(StatusTag,
+                $"TC_ALT_DEVELOP_WINDOW_OPENED {window.Summary}; maxSeconds={maxSeconds:0.00}; noProgressSeconds={noProgressSeconds:0.00}; localCombatAuthority=SAIN; directCommit=false; fullAltEstablished=false; tag={StatusTag}");
+            return true;
+        }
+    }
+
+    public static bool TryOpenTacticalCoordinatorDirectCommit(
+        OperatorDecisionSnapshot snapshot,
+        string threatId,
+        long planEpoch,
+        DateTimeOffset now,
+        TimeSpan maxDuration,
+        TimeSpan noProgressDuration,
+        out string windowId,
+        out string reason)
+    {
+        windowId = "none";
+        reason = "none";
+        if (snapshot == null || string.IsNullOrWhiteSpace(snapshot.BotProfileId) || planEpoch <= 0)
+        {
+            reason = "snapshot_or_plan_epoch_missing";
+            return false;
+        }
+
+        ExpireStaleWindow(snapshot, now);
+        VanguardPrimaryExecutionWindowState? supersededCombat = null;
+        VanguardPrimaryExecutionWindowState? supersededAutomaticAuthoring = null;
+        string combatHandoffReason = "none";
+        lock (Sync)
+        {
+            if (ActiveByBotProfileId.TryGetValue(snapshot.BotProfileId, out var active) && active.IsActive(now))
+            {
+                bool compatibleCombatHandoff = VanguardPrimaryExecutionContract.IsCombatPrimaryKind(active.WindowKind)
+                    && AltDevelopAuthorityPolicy.IsTranslationCompatible(snapshot, threatId, out combatHandoffReason);
+                if (compatibleCombatHandoff)
+                {
+                    supersededCombat = active;
+                    OutcomeByBotProfileId[snapshot.BotProfileId] = new VanguardSchedulerOutcomeRecord
+                    {
+                        BotProfileId = snapshot.BotProfileId,
+                        WindowId = active.WindowId,
+                        WindowKind = active.WindowKind,
+                        IntentKey = active.IntentKey,
+                        Outcome = "Interrupted",
+                        Reason = "tc_direct_commit_translation_handoff:" + combatHandoffReason,
+                        BackendSummary = Safe(active.Summary),
+                        RecordedAtUtc = now
+                    };
+                }
+                else if (IsAutomaticAuthoringPreview(active))
+                {
+                    supersededAutomaticAuthoring = active;
+                    OutcomeByBotProfileId[snapshot.BotProfileId] = new VanguardSchedulerOutcomeRecord
+                    {
+                        BotProfileId = snapshot.BotProfileId,
+                        WindowId = active.WindowId,
+                        WindowKind = active.WindowKind,
+                        IntentKey = active.IntentKey,
+                        Outcome = "Interrupted",
+                        Reason = "tc_direct_commit_automatic_authoring_excursion_handoff",
+                        BackendSummary = Safe(active.Summary),
+                        RecordedAtUtc = now
+                    };
+                }
+                else
+                {
+                    reason = "primary_window_busy:" + Safe(active.WindowKind) + ":" + Safe(active.IntentKey);
+                    windowId = active.WindowId;
+                    return false;
+                }
+            }
+
+            double maxSeconds = Math.Max(0.75d, maxDuration.TotalSeconds);
+            double noProgressSeconds = Math.Max(0.50d, Math.Min(maxSeconds, noProgressDuration.TotalSeconds));
+            windowId = "tc_direct_commit_" + now.ToUnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture) + "_" + Safe(snapshot.BotProfileId);
+            var window = new VanguardPrimaryExecutionWindowState
+            {
+                WindowId = windowId,
+                OperatorId = snapshot.OperatorId,
+                BotProfileId = snapshot.BotProfileId,
+                OwnerProfileId = snapshot.OwnerProfileId,
+                WindowKind = VanguardPrimaryExecutionWindowKinds.TacticalMovement,
+                State = "PlanningDirectCommit",
+                IntentKey = "TacticalCoordinatorDirectCommit",
+                Domain = "TacticalCoordination",
+                Reason = "synchronized_split_flank_commit_ready",
+                TargetKey = threatId,
+                PlanKey = planEpoch.ToString(CultureInfo.InvariantCulture),
+                NextStep = "BoundedDirectAdvance",
+                Score = 0f,
+                StartedAtUtc = now,
+                MinUntilUtc = now,
+                MaxUntilUtc = now + TimeSpan.FromSeconds(maxSeconds),
+                NoProgressUntilUtc = now + TimeSpan.FromSeconds(noProgressSeconds),
+                LastProgressAtUtc = now,
+                LastObservedAtUtc = now,
+                LastProgressKind = "planning_bounded_direct_commit"
+            };
+            ActiveByBotProfileId[snapshot.BotProfileId] = window;
+            reason = supersededCombat != null
+                ? "tc_direct_commit_window_opened_from_compatible_combat"
+                : supersededAutomaticAuthoring != null
+                    ? "tc_direct_commit_window_opened_from_automatic_authoring_excursion"
+                    : "tc_direct_commit_window_opened";
+
+            if (supersededCombat != null)
+            {
+                VanguardClientDiagnosticsLog.Info(StatusTag,
+                    $"TC_DIRECT_COMMIT_COMBAT_TRANSLATION_HANDOFF operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; previousWindow={Safe(supersededCombat.WindowId)}; previousKind={Safe(supersededCombat.WindowKind)}; previousIntent={Safe(supersededCombat.IntentKey)}; nextWindow={Safe(window.WindowId)}; threat={Safe(threatId)}; planEpoch={planEpoch}; compatibleReason={Safe(combatHandoffReason)}; atomicPrimaryReplacement=true; sainPerceptionAimFirePreserved=true; movementAuthority=TC_DirectCommit; tag={StatusTag}");
+            }
+            if (supersededAutomaticAuthoring != null)
+            {
+                VanguardClientDiagnosticsLog.Info(StatusTag,
+                    $"TC_DIRECT_COMMIT_AUTHORING_EXECUTION_HANDOFF operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; previousWindow={Safe(supersededAutomaticAuthoring.WindowId)}; previousIntent={Safe(supersededAutomaticAuthoring.IntentKey)}; previousSession={Safe(supersededAutomaticAuthoring.PlanKey)}; nextWindow={Safe(window.WindowId)}; threat={Safe(threatId)}; planEpoch={planEpoch}; automaticOccupancy=true; manualPreviewPreemptible=false; returnTargetPreservedByAuthoring=true; atomicPrimaryReplacement=true; movementAuthority=TC_DirectCommit; tag={StatusTag}");
+            }
+            VanguardClientDiagnosticsLog.Info(StatusTag,
+                $"TC_DIRECT_COMMIT_WINDOW_OPENED {window.Summary}; planEpoch={planEpoch}; maxSeconds={maxSeconds:0.00}; noProgressSeconds={noProgressSeconds:0.00}; localCombatAuthority=SAIN; fireCommand=false; targetMutation=false; tag={StatusTag}");
             return true;
         }
     }
@@ -529,6 +1104,14 @@ internal static class VanguardMainIntentScheduler
             return false;
         }
 
+        if (TacticalIntentContinuityService.ShouldDeferCohesion(snapshot, now, out string tacticalIntentReason))
+        {
+            reason = "tactical_intent_continuity:" + tacticalIntentReason;
+            LogThrottled("intentContinuity|travel_corridor|" + snapshot.BotProfileId, now, DecisionLogInterval,
+                $"VANGUARD_EXECUTION_DENIED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; requested=travel_corridor; reason={Safe(reason)}; deliberateTacticalSeparation=true; lowerPriorityMovement=false; intentTag={TacticalIntentContinuityService.StatusTag}; tag={StatusTag}");
+            return false;
+        }
+
         ExpireStaleWindow(snapshot, now);
         var board = VanguardOperatorIntentDryRunService.BuildBoard(snapshot);
         var selected = board.Selected;
@@ -539,6 +1122,13 @@ internal static class VanguardMainIntentScheduler
         {
             if (ActiveByBotProfileId.TryGetValue(snapshot.BotProfileId, out var active) && active.IsActive(now))
             {
+                if (active.IsTacticalMovement
+                    && string.Equals(active.IntentKey, "TacticalCoordinatorAltDevelop", StringComparison.OrdinalIgnoreCase))
+                {
+                    reason = "primary_window_busy:" + Safe(active.WindowKind) + ":" + Safe(active.IntentKey) + ":" + Safe(active.State);
+                    windowId = active.WindowId;
+                    return false;
+                }
                 bool supersedableMovementWindow = active.IsCloseCohesionMovement
                     || active.IsTacticalMovement;
                 if (!supersedableMovementWindow)
@@ -581,6 +1171,7 @@ internal static class VanguardMainIntentScheduler
                 WindowId = windowId,
                 OperatorId = snapshot.OperatorId,
                 BotProfileId = snapshot.BotProfileId,
+                OwnerProfileId = snapshot.OwnerProfileId,
                 WindowKind = VanguardPrimaryExecutionWindowKinds.CloseCohesionMovement,
                 State = "PlanningMonotonicTravelCorridor",
                 IntentKey = selected.IntentKey,
@@ -653,6 +1244,14 @@ internal static class VanguardMainIntentScheduler
             return false;
         }
 
+        if (TacticalIntentContinuityService.ShouldDeferCohesion(snapshot, now, out string tacticalIntentReason))
+        {
+            reason = "tactical_intent_continuity:" + tacticalIntentReason;
+            LogThrottled("intentContinuity|close_cohesion|" + snapshot.BotProfileId, now, DecisionLogInterval,
+                $"VANGUARD_EXECUTION_DENIED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; requested=close_cohesion; reason={Safe(reason)}; deliberateTacticalSeparation=true; lowerPriorityMovement=false; intentTag={TacticalIntentContinuityService.StatusTag}; tag={StatusTag}");
+            return false;
+        }
+
         if (VanguardSquadTravelCohesionExecutor.HasActiveTravelAuthority(snapshot.BotProfileId))
         {
             reason = "monotonic_travel_corridor_active";
@@ -695,6 +1294,7 @@ internal static class VanguardMainIntentScheduler
                 WindowId = windowId,
                 OperatorId = snapshot.OperatorId,
                 BotProfileId = snapshot.BotProfileId,
+                OwnerProfileId = snapshot.OwnerProfileId,
                 WindowKind = VanguardPrimaryExecutionWindowKinds.CloseCohesionMovement,
                 State = planningState,
                 IntentKey = selected.IntentKey,
@@ -803,6 +1403,7 @@ internal static class VanguardMainIntentScheduler
                 WindowId = windowId,
                 OperatorId = snapshot.OperatorId,
                 BotProfileId = snapshot.BotProfileId,
+                OwnerProfileId = snapshot.OwnerProfileId,
                 WindowKind = VanguardPrimaryExecutionWindowKinds.CorpseLoot,
                 State = "PlanningCorpseApproach",
                 IntentKey = selected.IntentKey,
@@ -884,7 +1485,7 @@ internal static class VanguardMainIntentScheduler
             windowId = "containerloot_" + now.ToUnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture) + "_" + Safe(snapshot.BotProfileId);
             var window = new VanguardPrimaryExecutionWindowState
             {
-                WindowId = windowId, OperatorId = snapshot.OperatorId, BotProfileId = snapshot.BotProfileId,
+                WindowId = windowId, OperatorId = snapshot.OperatorId, BotProfileId = snapshot.BotProfileId, OwnerProfileId = snapshot.OwnerProfileId,
                 WindowKind = VanguardPrimaryExecutionWindowKinds.WorldContainerLoot, State = "PlanningContainerApproach",
                 IntentKey = "ApproachAssignedWorldContainer", Domain = "WorldContainerLoot",
                 Reason = "assignment_plus_loot004_permission", TargetKey = containerId,
@@ -982,10 +1583,12 @@ internal static class VanguardMainIntentScheduler
                     return false;
                 }
 
+                string recoveredOwnerProfileId = ResolveOwnerProfileIdForBot(key);
                 window = new VanguardPrimaryExecutionWindowState
                 {
                     WindowId = "tactical_recovered_" + now.ToUnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture) + "_" + Safe(key),
                     BotProfileId = key,
+                    OwnerProfileId = recoveredOwnerProfileId,
                     WindowKind = VanguardPrimaryExecutionWindowKinds.TacticalMovement,
                     IntentKey = "MovementBrokerRecoveredTacticalReposition",
                     Domain = "MovementAuthority",
@@ -1011,6 +1614,85 @@ internal static class VanguardMainIntentScheduler
     }
 
 
+    public static bool MarkTacticalCoordinatorAltDevelopStarted(string? botProfileId, string leaseId, DateTimeOffset now, string backendSummary, string? expectedWindowId = null)
+    {
+        string key = Normalize(botProfileId);
+        string expected = Normalize(expectedWindowId);
+        lock (Sync)
+        {
+            if (!ActiveByBotProfileId.TryGetValue(key, out var window))
+            {
+                VanguardClientDiagnosticsLog.Info(StatusTag,
+                    $"TC_ALT_DEVELOP_WINDOW_START_IGNORED botProfile={Safe(key)}; expectedWindow={Safe(expected)}; requestedLease={Safe(leaseId)}; reason=expected_window_not_active; mutation=false; tag={StatusTag}");
+                return false;
+            }
+            if (!string.Equals(expected, "none", StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(window.WindowId, expected, StringComparison.OrdinalIgnoreCase))
+            {
+                VanguardClientDiagnosticsLog.Info(StatusTag,
+                    $"TC_ALT_DEVELOP_WINDOW_START_IGNORED botProfile={Safe(key)}; expectedWindow={Safe(expected)}; activeWindow={Safe(window.WindowId)}; requestedLease={Safe(leaseId)}; reason=window_owner_mismatch; mutation=false; tag={StatusTag}");
+                return false;
+            }
+            if (!string.Equals(window.IntentKey, "TacticalCoordinatorAltDevelop", StringComparison.OrdinalIgnoreCase)
+                || !window.IsTacticalMovement)
+            {
+                VanguardClientDiagnosticsLog.Info(StatusTag,
+                    $"TC_ALT_DEVELOP_WINDOW_START_IGNORED botProfile={Safe(key)}; expectedWindow={Safe(expected)}; activeKind={Safe(window.WindowKind)}; activeIntent={Safe(window.IntentKey)}; reason=active_window_not_tc_alt_develop; mutation=false; tag={StatusTag}");
+                return false;
+            }
+
+            window.State = "RunningAltDevelop";
+            window.BackendLeaseId = leaseId;
+            window.BackendSummary = backendSummary;
+            window.LastProgressKind = "tc_alt_develop_backend_lease_started";
+            window.LastProgressAtUtc = now;
+            window.LastObservedAtUtc = now;
+            VanguardClientDiagnosticsLog.Info(StatusTag,
+                $"TC_ALT_DEVELOP_WINDOW_RUNNING {window.Summary}; phase=backend_lease_started; directCommit=false; fullAltEstablished=false; tag={StatusTag}");
+        }
+        return true;
+    }
+
+    public static bool MarkTacticalCoordinatorDirectCommitStarted(
+        string? botProfileId,
+        string leaseId,
+        long planEpoch,
+        DateTimeOffset now,
+        string backendSummary,
+        string? expectedWindowId = null)
+    {
+        string key = Normalize(botProfileId);
+        string expected = Normalize(expectedWindowId);
+        lock (Sync)
+        {
+            if (!ActiveByBotProfileId.TryGetValue(key, out var window))
+            {
+                return false;
+            }
+            if (!string.Equals(expected, "none", StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(window.WindowId, expected, StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+            if (!window.IsTacticalMovement
+                || !string.Equals(window.IntentKey, "TacticalCoordinatorDirectCommit", StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(Normalize(window.PlanKey), planEpoch.ToString(CultureInfo.InvariantCulture), StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            window.State = "RunningDirectCommit";
+            window.BackendLeaseId = leaseId;
+            window.BackendSummary = backendSummary;
+            window.LastProgressKind = "tc_direct_commit_backend_lease_started";
+            window.LastProgressAtUtc = now;
+            window.LastObservedAtUtc = now;
+            VanguardClientDiagnosticsLog.Info(StatusTag,
+                $"TC_DIRECT_COMMIT_WINDOW_RUNNING {window.Summary}; planEpoch={planEpoch}; phase=backend_lease_started; boundedTranslation=true; localCombatAuthority=SAIN; tag={StatusTag}");
+        }
+        return true;
+    }
+
     public static bool MarkCloseCohesionStarted(string? botProfileId, string leaseId, DateTimeOffset now, string backendSummary, string? expectedWindowId = null)
     {
         string key = Normalize(botProfileId);
@@ -1035,10 +1717,12 @@ internal static class VanguardMainIntentScheduler
                     return false;
                 }
 
+                string recoveredOwnerProfileId = ResolveOwnerProfileIdForBot(key);
                 window = new VanguardPrimaryExecutionWindowState
                 {
                     WindowId = "closecohesion_recovered_" + now.ToUnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture) + "_" + Safe(key),
                     BotProfileId = key,
+                    OwnerProfileId = recoveredOwnerProfileId,
                     WindowKind = VanguardPrimaryExecutionWindowKinds.CloseCohesionMovement,
                     IntentKey = "MovementBrokerRecoveredCloseCohesion",
                     Domain = "MovementAuthority",
@@ -1170,17 +1854,20 @@ internal static class VanguardMainIntentScheduler
                     return false;
                 }
 
+                string recoveredOwnerProfileId = ResolveOwnerProfileIdForBot(key);
+                var recoveredOwnerPolicy = VanguardMovementAuthorityDoctrine.ForOwner(recoveredOwnerProfileId);
                 window = new VanguardPrimaryExecutionWindowState
                 {
                     WindowId = "primary_recovered_" + now.ToUnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture) + "_" + Safe(key),
                     BotProfileId = key,
+                    OwnerProfileId = recoveredOwnerProfileId,
                     WindowKind = VanguardPrimaryExecutionWindowKinds.HardReturnMovement,
                     IntentKey = "MovementBrokerRecoveredHardReturn",
                     Domain = "MovementAuthority",
                     State = "Running",
                     StartedAtUtc = now,
                     MinUntilUtc = now,
-                    MaxUntilUtc = now + TimeSpan.FromSeconds(VanguardMovementAuthorityDoctrine.MovementLeaseHardMaxSeconds)
+                    MaxUntilUtc = now + TimeSpan.FromSeconds(recoveredOwnerPolicy.MovementLeaseHardMaxSeconds)
                 };
                 ActiveByBotProfileId[key] = window;
             }
@@ -1262,6 +1949,7 @@ internal static class VanguardMainIntentScheduler
                 WindowId = id,
                 OperatorId = snapshot.OperatorId,
                 BotProfileId = snapshot.BotProfileId,
+                OwnerProfileId = snapshot.OwnerProfileId,
                 WindowKind = VanguardPrimaryExecutionWindowKinds.EmergencyGrenadeEvasion,
                 State = "Admitted",
                 IntentKey = VanguardGrenadeEmergencyPolicy.RequestKind,
@@ -1321,6 +2009,578 @@ internal static class VanguardMainIntentScheduler
         grenadeKey = "none";
         summary = "none";
         return false;
+    }
+
+    /// <summary>
+    /// Grants Anti-conga permission to own one short locomotion sidecar without replacing the
+    /// scheduler-owned SAIN combat primary window. This is an admission/readback boundary only:
+    /// anti-conga owns and must release its exact generation-stamped Advance Gate; it does not own the
+    /// SAIN combat action, target, route or firing authority.
+    /// </summary>
+    public static bool TryGrantTacticalCoordinatorCombatMovementSidecar(
+        OperatorDecisionSnapshot snapshot,
+        DateTimeOffset now,
+        string threatId,
+        out string schedulerWindowId,
+        out string reason)
+    {
+        schedulerWindowId = "none";
+        reason = "none";
+        if (snapshot == null || string.IsNullOrWhiteSpace(snapshot.BotProfileId))
+        {
+            reason = "snapshot_missing";
+            return false;
+        }
+
+        ExpireStaleWindow(snapshot, now);
+        string key = Normalize(snapshot.BotProfileId);
+        string normalizedThreat = Normalize(threatId);
+        lock (Sync)
+        {
+            if (!ActiveByBotProfileId.TryGetValue(key, out var active) || !active.IsActive(now))
+            {
+                reason = "no_active_primary_window";
+                return false;
+            }
+
+            if (!VanguardPrimaryExecutionContract.IsCombatPrimaryKind(active.WindowKind))
+            {
+                reason = "primary_not_sain_combat:" + Safe(active.WindowKind) + ":" + Safe(active.IntentKey);
+                return false;
+            }
+
+            if (!string.Equals(Normalize(active.TargetKey), normalizedThreat, StringComparison.OrdinalIgnoreCase))
+            {
+                reason = "combat_target_mismatch:active=" + Safe(active.TargetKey) + ":requested=" + Safe(normalizedThreat);
+                return false;
+            }
+
+            if (!HasFreshSnapshotEvidenceForTarget(snapshot, normalizedThreat, out string targetReason))
+            {
+                reason = "combat_target_not_fresh:" + Safe(targetReason);
+                return false;
+            }
+
+            schedulerWindowId = active.WindowId;
+            reason = "combat_sidecar_granted:window=" + Safe(active.WindowId) + ":target=" + Safe(normalizedThreat);
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// Exact readback for Anti-conga's already-admitted combat sidecar. Unlike admission, this check
+    /// does not depend on a decision snapshot: it verifies the live scheduler window identity,
+    /// combat-primary kind and target immediately before the SAIN path tick may be gated.
+    /// </summary>
+    public static bool IsTacticalCoordinatorCombatMovementSidecarCurrent(
+        string? botProfileId,
+        DateTimeOffset now,
+        string threatId,
+        string expectedWindowId,
+        out string reason)
+    {
+        string key = Normalize(botProfileId);
+        string normalizedThreat = Normalize(threatId);
+        string expected = Normalize(expectedWindowId);
+        lock (Sync)
+        {
+            if (!ActiveByBotProfileId.TryGetValue(key, out var active) || !active.IsActive(now))
+            {
+                reason = "no_active_primary_window";
+                return false;
+            }
+            if (!string.Equals(Normalize(active.WindowId), expected, StringComparison.OrdinalIgnoreCase))
+            {
+                reason = "window_identity_changed:active=" + Safe(active.WindowId) + ":expected=" + Safe(expected);
+                return false;
+            }
+            if (!VanguardPrimaryExecutionContract.IsCombatPrimaryKind(active.WindowKind))
+            {
+                reason = "primary_not_sain_combat:" + Safe(active.WindowKind) + ":" + Safe(active.IntentKey);
+                return false;
+            }
+            if (!string.Equals(Normalize(active.TargetKey), normalizedThreat, StringComparison.OrdinalIgnoreCase))
+            {
+                reason = "combat_target_mismatch:active=" + Safe(active.TargetKey) + ":requested=" + Safe(normalizedThreat);
+                return false;
+            }
+            reason = "current";
+            return true;
+        }
+    }
+
+    public static bool TryGrantMedicSupportCombatMovementSidecar(
+        OperatorDecisionSnapshot snapshot,
+        DateTimeOffset now,
+        string threatId,
+        string sessionId,
+        out string schedulerWindowId,
+        out string reason)
+    {
+        if (snapshot == null)
+        {
+            schedulerWindowId = "none";
+            reason = "snapshot_missing";
+            return false;
+        }
+        if (!IsCurrentMedicSupportSessionActor(sessionId, snapshot.BotProfileId, out reason))
+        {
+            schedulerWindowId = "none";
+            return false;
+        }
+        bool granted = TryGrantTacticalCoordinatorCombatMovementSidecar(snapshot, now, threatId, out schedulerWindowId, out string sidecarReason);
+        reason = granted ? "medic_support_combat_movement_sidecar:" + sidecarReason : sidecarReason;
+        return granted;
+    }
+
+    public static bool TryGrantMedicSupportCombatCareSidecar(
+        OperatorDecisionSnapshot snapshot,
+        DateTimeOffset now,
+        string threatId,
+        string sessionId,
+        out string schedulerWindowId,
+        out string reason)
+    {
+        if (snapshot == null)
+        {
+            schedulerWindowId = "none";
+            reason = "snapshot_missing";
+            return false;
+        }
+        if (!IsCurrentMedicSupportSessionActor(sessionId, snapshot.BotProfileId, out reason))
+        {
+            schedulerWindowId = "none";
+            return false;
+        }
+        bool granted = TryGrantTacticalCoordinatorCombatMovementSidecar(snapshot, now, threatId, out schedulerWindowId, out string sidecarReason);
+        reason = granted ? "medic_support_combat_care_sidecar:" + sidecarReason : sidecarReason;
+        return granted;
+    }
+
+    public static bool IsMedicSupportCombatMovementSidecarCurrent(
+        string? botProfileId,
+        DateTimeOffset now,
+        string threatId,
+        string expectedWindowId,
+        string sessionId,
+        out string reason)
+    {
+        if (!IsCurrentMedicSupportSessionActor(sessionId, botProfileId, out reason))
+        {
+            return false;
+        }
+        bool current = IsTacticalCoordinatorCombatMovementSidecarCurrent(botProfileId, now, threatId, expectedWindowId, out string sidecarReason);
+        reason = current ? "medic_support_combat_sidecar_current" : sidecarReason;
+        return current;
+    }
+
+    public static bool IsMedicSupportAuxiliaryWindowCurrent(
+        string? botProfileId,
+        DateTimeOffset now,
+        string expectedWindowId,
+        string sessionId,
+        out string reason)
+    {
+        if (!IsCurrentMedicSupportSessionActor(sessionId, botProfileId, out reason))
+        {
+            return false;
+        }
+
+        string key = Normalize(botProfileId);
+        string expected = Normalize(expectedWindowId);
+        string expectedSession = Normalize(sessionId);
+        lock (Sync)
+        {
+            if (!ActiveByBotProfileId.TryGetValue(key, out var active) || !active.IsActive(now))
+            {
+                reason = "medic_support_auxiliary_window_not_active";
+                return false;
+            }
+            if (!active.IsMedicSupport || active.IsMedicSupportSupplyDrop)
+            {
+                reason = "active_window_not_medic_support_auxiliary";
+                return false;
+            }
+            if (!string.Equals(Normalize(active.WindowId), expected, StringComparison.OrdinalIgnoreCase))
+            {
+                reason = "medic_support_auxiliary_window_identity_mismatch";
+                return false;
+            }
+            if (!string.Equals(Normalize(active.PlanKey), expectedSession, StringComparison.OrdinalIgnoreCase))
+            {
+                reason = "medic_support_auxiliary_session_mismatch";
+                return false;
+            }
+        }
+
+        reason = "medic_support_auxiliary_window_current";
+        return true;
+    }
+
+    // The existing primary scheduler commits both non-combat medic actors together.
+    // A reservation is never evidence of Unity movement or a completed medical action.
+    internal static bool TryEnsureMedicSupportPairPrimary(
+        VanguardMedicSupportSession session,
+        OperatorDecisionSnapshot caregiver,
+        OperatorDecisionSnapshot patient,
+        DateTimeOffset now,
+        out string reason)
+    {
+        reason = "pair_invalid";
+        if (session == null || caregiver == null || patient == null
+            || !VanguardFikaCompat.IsRaidAuthority
+            || !caregiver.Alive || !patient.Alive
+            || !string.Equals(caregiver.BotProfileId, session.CaregiverBotProfileId, StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(patient.BotProfileId, session.PatientBotProfileId, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(caregiver.BotProfileId, patient.BotProfileId, StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(caregiver.OwnerProfileId, patient.OwnerProfileId, StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(caregiver.OwnerProfileId, session.CaregiverOwnerProfileId, StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(patient.OwnerProfileId, session.PatientOwnerProfileId, StringComparison.OrdinalIgnoreCase)
+            || caregiver.CapturedAtUtc > now || patient.CapturedAtUtc > now
+            || now - caregiver.CapturedAtUtc > TimeSpan.FromSeconds(1.50d)
+            || now - patient.CapturedAtUtc > TimeSpan.FromSeconds(1.50d)
+            || !VanguardMedicSupportSessionStore.TryGetActive(out VanguardMedicSupportSession currentSession)
+            || !string.Equals(currentSession.SessionId, session.SessionId, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        // Do not force medical stationary movement through an immediate danger.
+        // Compatible mobile care in a live SAIN combat window keeps its sidecar path.
+        if (caregiver.Sain.RunningToCover == true || patient.Sain.RunningToCover == true
+            || caregiver.Sain.IsInCombat == true || patient.Sain.IsInCombat == true
+            || caregiver.Threat.ResidualThreat || patient.Threat.ResidualThreat
+            || caregiver.ThreatScan.CombatContext || patient.ThreatScan.CombatContext
+            || caregiver.Threat.DirectThreat || patient.Threat.DirectThreat
+            || caregiver.Medical.Safety.IncomingFireRecent || patient.Medical.Safety.IncomingFireRecent
+            || caregiver.Medical.Safety.EnemyCanShoot || patient.Medical.Safety.EnemyCanShoot
+            || caregiver.Medical.Safety.ImmediateCombatBlock || patient.Medical.Safety.ImmediateCombatBlock)
+        {
+            reason = "pair_direct_threat_preserved";
+            return false;
+        }
+
+        // Read both predecessors and publish BOTH replacements under one scheduler lock.
+        // No TA/TC/SAIN/mover callout is allowed inside this lock.
+        VanguardPrimaryExecutionWindowState? oldCaregiver;
+        VanguardPrimaryExecutionWindowState? oldPatient;
+        string pairId;
+        string caregiverNewId;
+        string patientNewId;
+        MedicPairHandoffTicket handoff;
+        lock (Sync)
+        {
+            // Both windows may be visible before physical predecessor retirement ends.
+            // Do not let a second admission turn that visibility into a grant.
+            if (MedicPairHandoffsInFlight.ContainsKey(session.SessionId))
+            {
+                reason = "pair_predecessor_handoff_in_progress";
+                return false;
+            }
+            ActiveByBotProfileId.TryGetValue(caregiver.BotProfileId, out oldCaregiver);
+            ActiveByBotProfileId.TryGetValue(patient.BotProfileId, out oldPatient);
+            if (oldCaregiver != null && !oldCaregiver.IsActive(now)) oldCaregiver = null;
+            if (oldPatient != null && !oldPatient.IsActive(now)) oldPatient = null;
+            bool ownCaregiver = IsOwnMedicSupportSession(oldCaregiver, session.SessionId);
+            bool ownPatient = IsOwnMedicSupportSession(oldPatient, session.SessionId);
+            if (ownCaregiver && ownPatient)
+            {
+                reason = "pair_medical_windows_current";
+                return true;
+            }
+            bool caregiverAllowed = CanReplaceWithMedicPair(oldCaregiver, session.SessionId, out string caregiverGate);
+            bool patientAllowed = CanReplaceWithMedicPair(oldPatient, session.SessionId, out string patientGate);
+            if (!caregiverAllowed || !patientAllowed)
+            {
+                reason = "pair_protected_primary:" + Safe(caregiverGate) + ":" + Safe(patientGate);
+                return false;
+            }
+
+            // Re-admission is idempotent for each actor. In particular, a phase transition
+            // must never replace an already-owned medical window and orphan its physical
+            // rendezvous command while the other actor temporarily lacks a window.
+            // Allocate an identity only for a genuinely missing/replaced participant.
+            pairId = "medpair_" + Guid.NewGuid().ToString("N");
+            if (!ownCaregiver)
+                ActiveByBotProfileId[caregiver.BotProfileId] = NewMedicPairWindow(caregiver, session.SessionId, pairId + "_caregiver", "caregiver", now);
+            if (!ownPatient)
+                ActiveByBotProfileId[patient.BotProfileId] = NewMedicPairWindow(patient, session.SessionId, pairId + "_patient", "patient", now);
+            caregiverNewId = ownCaregiver ? oldCaregiver!.WindowId : pairId + "_caregiver";
+            patientNewId = ownPatient ? oldPatient!.WindowId : pairId + "_patient";
+            handoff = new MedicPairHandoffTicket
+            {
+                CaregiverBotProfileId = caregiver.BotProfileId,
+                PatientBotProfileId = patient.BotProfileId,
+                CaregiverWindowId = caregiverNewId,
+                PatientWindowId = patientNewId
+            };
+            MedicPairHandoffsInFlight[session.SessionId] = handoff;
+        }
+
+        // Retire physical predecessors only AFTER both scheduler windows exist.
+        // Exact-owned TA/return commands cannot erase a later lease. Every cleanup
+        // is fenced by a fresh pair readback before touching native movement.
+        // Old same-session windows retain their exact identities and are never
+        // handed off or closed merely because the partner needs re-admission.
+        bool caregiverYield = false;
+        bool patientYield = false;
+        string caregiverCleanup = "not_started";
+        string patientCleanup = "not_started";
+        try
+        {
+            caregiverYield = TryYieldMedicPairPredecessor(caregiver.BotProfileId, oldCaregiver, session.SessionId,
+                caregiverNewId, now, out caregiverCleanup);
+            patientYield = caregiverYield
+                && TryYieldMedicPairPredecessor(patient.BotProfileId, oldPatient, session.SessionId,
+                    patientNewId, now, out patientCleanup);
+        }
+        catch (Exception ex)
+        {
+            caregiverYield = false;
+            patientYield = false;
+            caregiverCleanup = "predecessor_yield_exception:" + ex.GetType().Name;
+        }
+
+        // These legacy yield APIs are not a physical drain receipt. Only close the
+        // re-entrant visibility gap; do not treat this gate as HardReturn transfer proof.
+        bool sessionStillCurrent = VanguardMedicSupportSessionStore.TryGetActive(out VanguardMedicSupportSession liveSession)
+            && string.Equals(liveSession.SessionId, session.SessionId, StringComparison.OrdinalIgnoreCase);
+        bool legacyHandoffReady = false;
+        if (caregiverYield && patientYield && sessionStillCurrent)
+        {
+            lock (Sync)
+            {
+                if (MedicPairHandoffsInFlight.TryGetValue(session.SessionId, out var pending)
+                    && ReferenceEquals(pending, handoff)
+                    && ActiveByBotProfileId.TryGetValue(caregiver.BotProfileId, out var currentCaregiver)
+                    && ActiveByBotProfileId.TryGetValue(patient.BotProfileId, out var currentPatient)
+                    && currentCaregiver.IsActive(now) && currentPatient.IsActive(now)
+                    && IsOwnMedicSupportSession(currentCaregiver, session.SessionId)
+                    && IsOwnMedicSupportSession(currentPatient, session.SessionId)
+                    && string.Equals(currentCaregiver.WindowId, handoff.CaregiverWindowId, StringComparison.OrdinalIgnoreCase)
+                    && string.Equals(currentPatient.WindowId, handoff.PatientWindowId, StringComparison.OrdinalIgnoreCase))
+                {
+                    MedicPairHandoffsInFlight.Remove(session.SessionId);
+                    legacyHandoffReady = true;
+                }
+            }
+        }
+
+        if (!legacyHandoffReady)
+        {
+            // Roll back only the windows created by this attempt. Keep the token
+            // until no such window remains, so a failed cleanup cannot fail open.
+            try
+            {
+                if (!IsOwnMedicSupportSession(oldCaregiver, session.SessionId))
+                    FinishPrimaryWindow(caregiver.BotProfileId, now, "Interrupted",
+                        "pair_predecessor_handoff_failed", caregiverCleanup, caregiverNewId);
+                if (!IsOwnMedicSupportSession(oldPatient, session.SessionId))
+                    FinishPrimaryWindow(patient.BotProfileId, now, "Interrupted",
+                        "pair_predecessor_handoff_failed", patientCleanup, patientNewId);
+            }
+            catch (Exception ex)
+            {
+                caregiverCleanup = "pair_rollback_exception:" + ex.GetType().Name;
+            }
+            lock (Sync)
+            {
+                if (MedicPairHandoffsInFlight.TryGetValue(session.SessionId, out var pending)
+                    && ReferenceEquals(pending, handoff))
+                {
+                    bool caregiverStillPublished = !IsOwnMedicSupportSession(oldCaregiver, session.SessionId)
+                        && ActiveByBotProfileId.TryGetValue(caregiver.BotProfileId, out var remainingCaregiver)
+                        && string.Equals(remainingCaregiver.WindowId, handoff.CaregiverWindowId, StringComparison.OrdinalIgnoreCase);
+                    bool patientStillPublished = !IsOwnMedicSupportSession(oldPatient, session.SessionId)
+                        && ActiveByBotProfileId.TryGetValue(patient.BotProfileId, out var remainingPatient)
+                        && string.Equals(remainingPatient.WindowId, handoff.PatientWindowId, StringComparison.OrdinalIgnoreCase);
+                    if (!caregiverStillPublished && !patientStillPublished)
+                        MedicPairHandoffsInFlight.Remove(session.SessionId);
+                }
+            }
+            reason = "pair_physical_handoff_failed:" + Safe(caregiverCleanup);
+            return false;
+        }
+
+        VanguardClientDiagnosticsLog.Info(VanguardMedicSupportDoctrine.SessionStatusTag,
+            $"VANGUARD_MEDICAL_PAIR_PRIMARY_COMMITTED session={Safe(session.SessionId)}; pair={Safe(pairId)}; caregiver={Safe(caregiver.BotProfileId)}; patient={Safe(patient.BotProfileId)}; caregiverPrior={Safe(oldCaregiver?.WindowId)}; patientPrior={Safe(oldPatient?.WindowId)}; physicalProgressNotYetProven=true; predecessorYieldCallsComplete=true; physicalDrainReceiptNotEstablished=true; doctrine=exclusive_primary_pair_then_native_execution");
+        reason = "pair_medical_primary_committed";
+        return true;
+    }
+
+    private static bool IsOwnMedicSupportSession(VanguardPrimaryExecutionWindowState? w, string sessionId)
+        => w != null && w.IsMedicSupport
+            && (string.Equals(Normalize(w.PlanKey), Normalize(sessionId), StringComparison.OrdinalIgnoreCase)
+                || (w.IsMedicSupportSupplyDrop
+                    && w.PlanKey.StartsWith(Normalize(sessionId) + ":itemInstance=", StringComparison.OrdinalIgnoreCase)));
+
+    private static bool CanReplaceWithMedicPair(
+        VanguardPrimaryExecutionWindowState? w, string sessionId, out string reason)
+    {
+        reason = "no_primary";
+        if (w == null) return true;
+        if (IsOwnMedicSupportSession(w, sessionId)) { reason = "same_medical_session"; return true; }
+        if (w.IsGrenadeEmergency
+            || VanguardPrimaryExecutionContract.IsCombatPrimaryKind(w.WindowKind)
+            || (w.IsMedical && !w.IsMedicSupport))
+        {
+            reason = "life_combat_or_personal_care_protected:" + Safe(w.WindowKind);
+            return false;
+        }
+        if (w.IsHardReturn || w.IsAuthoringPreview || w.IsTacticalMovement || w.IsCloseCohesionMovement
+            || string.Equals(w.WindowKind, VanguardPrimaryExecutionWindowKinds.Rejoin, StringComparison.OrdinalIgnoreCase))
+        {
+            reason = "noncritical_primary_medical_priority:" + Safe(w.WindowKind);
+            return true;
+        }
+        reason = "unknown_primary_preserved:" + Safe(w.WindowKind);
+        return false;
+    }
+
+    private static VanguardPrimaryExecutionWindowState NewMedicPairWindow(
+        OperatorDecisionSnapshot snapshot, string sessionId, string windowId,
+        string role, DateTimeOffset now)
+        => new VanguardPrimaryExecutionWindowState
+        {
+            WindowId = windowId, OperatorId = snapshot.OperatorId, BotProfileId = snapshot.BotProfileId,
+            OwnerProfileId = snapshot.OwnerProfileId,
+            WindowKind = VanguardPrimaryExecutionWindowKinds.MedicSupportRendezvous,
+            State = "PairMedicalPrimary", IntentKey = VanguardMedicSupportDoctrine.SupportIntentKey,
+            Domain = "Medical", Reason = "medical_pair_atomic_acquisition:" + role,
+            TargetKey = role, PlanKey = Normalize(sessionId),
+            NextStep = "ExecuteMedicSupportSession", Score = 500f,
+            StartedAtUtc = now, MinUntilUtc = now + TimeSpan.FromSeconds(0.15d),
+            MaxUntilUtc = now + TimeSpan.FromSeconds(VanguardMedicSupportDoctrine.RendezvousWindowMaxSeconds),
+            NoProgressUntilUtc = now + TimeSpan.FromSeconds(VanguardMedicSupportDoctrine.RendezvousWindowMaxSeconds),
+            LastProgressAtUtc = now, LastObservedAtUtc = now,
+            LastProgressKind = "pair_reserved_native_unconfirmed"
+        };
+
+    internal static bool IsOwnMedicPairCurrent(
+        string sessionId, string caregiverBot, string patientBot, DateTimeOffset now)
+    {
+        lock (Sync)
+        {
+            return !MedicPairHandoffsInFlight.ContainsKey(sessionId)
+                && ActiveByBotProfileId.TryGetValue(caregiverBot, out var c)
+                && ActiveByBotProfileId.TryGetValue(patientBot, out var p)
+                && c.IsActive(now) && p.IsActive(now)
+                && IsOwnMedicSupportSession(c, sessionId) && IsOwnMedicSupportSession(p, sessionId);
+        }
+    }
+
+    private static bool IsExactMedicPairCurrent(string sessionId,
+        string caregiverBot, string caregiverWindowId,
+        string patientBot, string patientWindowId, DateTimeOffset now)
+    {
+        lock (Sync)
+        {
+            return ActiveByBotProfileId.TryGetValue(caregiverBot, out var c)
+                && ActiveByBotProfileId.TryGetValue(patientBot, out var p)
+                && c.IsActive(now) && p.IsActive(now)
+                && IsOwnMedicSupportSession(c, sessionId)
+                && IsOwnMedicSupportSession(p, sessionId)
+                && string.Equals(c.WindowId, caregiverWindowId, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(p.WindowId, patientWindowId, StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    // Progress belongs to the pair only when one native mover actually reduces
+    // its remaining distance. Refresh both windows for the bounded session,
+    // never from mere scheduler heartbeats or unchanged world positions.
+    internal static void ReportMedicPairPhysicalProgress(
+        string sessionId, string movingBot, string expectedWindowId, DateTimeOffset now)
+    {
+        if (!VanguardMedicSupportSessionStore.TryGetActive(out VanguardMedicSupportSession session)
+            || !string.Equals(session.SessionId, sessionId, StringComparison.OrdinalIgnoreCase)) return;
+        DateTimeOffset finalDeadline = session.StartedAtUtc + TimeSpan.FromSeconds(
+            session.Mode == VanguardMedicSupportMode.SupplyDrop
+                ? VanguardMedicSupportDoctrine.SupplySessionProgressingAbsoluteMaxSeconds
+                : VanguardMedicSupportDoctrine.DirectCareSessionMaxSeconds);
+        if (now >= finalDeadline) return;
+        lock (Sync)
+        {
+            if (!ActiveByBotProfileId.TryGetValue(movingBot, out var moving)
+                || !moving.IsActive(now)
+                || !IsOwnMedicSupportSession(moving, sessionId)
+                || !string.Equals(moving.WindowId, expectedWindowId, StringComparison.OrdinalIgnoreCase)) return;
+            if (!ActiveByBotProfileId.TryGetValue(session.CaregiverBotProfileId, out var caregiver)
+                || !ActiveByBotProfileId.TryGetValue(session.PatientBotProfileId, out var patient)
+                || !caregiver.IsActive(now) || !patient.IsActive(now)
+                || !IsOwnMedicSupportSession(caregiver, sessionId)
+                || !IsOwnMedicSupportSession(patient, sessionId)) return;
+            foreach (var w in new[] { caregiver, patient })
+            {
+                w.LastProgressAtUtc = now;
+                w.LastObservedAtUtc = now;
+                w.NoProgressUntilUtc = now + TimeSpan.FromSeconds(7.0d);
+                w.MaxUntilUtc = finalDeadline;
+                w.LastProgressKind = "medic_pair_native_distance_reduced";
+            }
+        }
+        // Store liveness outside the scheduler lock; all earlier checks use the
+        // exact moving window ID and both current session windows.
+        VanguardMedicSupportSessionStore.TryMarkPhysicalPairProgress(sessionId, now);
+    }
+
+    private static bool TryYieldMedicPairPredecessor(
+        string bot, VanguardPrimaryExecutionWindowState? old,
+        string sessionId, string expectedNewWindowId, DateTimeOffset now, out string summary)
+    {
+        summary = "none";
+        if (old == null || IsOwnMedicSupportSession(old, sessionId)) return true;
+        if (!IsCurrentMedicSupportSessionActor(sessionId, bot, out _)) return false;
+        lock (Sync)
+        {
+            if (!ActiveByBotProfileId.TryGetValue(bot, out var cur)
+                || !IsOwnMedicSupportSession(cur, sessionId) || !cur.IsActive(now)
+                || !string.Equals(cur.WindowId, expectedNewWindowId, StringComparison.OrdinalIgnoreCase)) return false;
+        }
+        if (old.IsHardReturn)
+            return VanguardHardReturnMovementExecutor.TryYieldForMedicPair(bot, old.WindowId, now, out summary);
+        if (old.IsAuthoringPreview)
+            return VanguardTacticalAuthoringHeadlessPreviewService.TryYieldPreviewForMedicPair(
+                bot, old.WindowId, now, out summary);
+        if (old.IsTacticalMovement)
+        {
+            summary = TacticalCoordinationPhysicalAuthorityBarrier.DrainForHigherAuthority(
+                bot, now, "medical_pair:" + sessionId).Summary;
+            return true;
+        }
+        if (old.IsCloseCohesionMovement)
+        {
+            summary = "close_cohesion=" + VanguardCloseCohesionExecutor.DrainForHigherAuthority(
+                bot, now, "medical_pair:" + sessionId);
+            return true;
+        }
+        // These older movement commands are removed only if their original exact
+        // window ID and issuance timestamp still match; never clear by bot alone.
+        if (string.Equals(old.WindowKind, VanguardPrimaryExecutionWindowKinds.Rejoin, StringComparison.OrdinalIgnoreCase))
+        {
+            summary = VanguardReturnMovementCommandStore.ClearOwned(
+                bot, old.WindowId, old.StartedAtUtc, "medical_pair_rejoin_preempt");
+            return true;
+        }
+        return false;
+    }
+
+    private static bool IsCurrentMedicSupportSessionActor(string sessionId, string? botProfileId, out string reason)
+    {
+        if (!VanguardMedicSupportSessionStore.TryGetActive(out VanguardMedicSupportSession session)
+            || !string.Equals(Normalize(session.SessionId), Normalize(sessionId), StringComparison.OrdinalIgnoreCase))
+        {
+            reason = "medic_support_session_not_current";
+            return false;
+        }
+        string bot = Normalize(botProfileId);
+        if (!string.Equals(bot, Normalize(session.CaregiverBotProfileId), StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(bot, Normalize(session.PatientBotProfileId), StringComparison.OrdinalIgnoreCase))
+        {
+            reason = "actor_not_member_of_current_medic_support_pair";
+            return false;
+        }
+        reason = "current_medic_support_pair_actor";
+        return true;
     }
 
     public static bool ReportPrimaryProgress(
@@ -1476,6 +2736,47 @@ internal static class VanguardMainIntentScheduler
         }
     }
 
+    public static bool HasBlockingPrimaryWindowForTacticalCoordinatorAltDevelop(OperatorDecisionSnapshot snapshot, string expectedThreatId, DateTimeOffset now, out string reason)
+    {
+        reason = "none";
+        if (snapshot == null || string.IsNullOrWhiteSpace(snapshot.BotProfileId))
+        {
+            reason = "snapshot_missing";
+            return true;
+        }
+
+        string key = Normalize(snapshot.BotProfileId);
+        lock (Sync)
+        {
+            if (!ActiveByBotProfileId.TryGetValue(key, out var active) || !active.IsActive(now))
+            {
+                return false;
+            }
+
+            if (active.IsTacticalMovement
+                && string.Equals(active.IntentKey, "TacticalCoordinatorAltDevelop", StringComparison.OrdinalIgnoreCase)
+                && string.Equals(Normalize(active.TargetKey), Normalize(expectedThreatId), StringComparison.OrdinalIgnoreCase))
+            {
+                reason = "tc_alt_develop_owns_primary_window:" + Safe(active.State);
+                return false;
+            }
+            if (VanguardPrimaryExecutionContract.IsCombatPrimaryKind(active.WindowKind)
+                && AltDevelopAuthorityPolicy.IsAltDevelopTranslationCompatible(snapshot, expectedThreatId, out var compatibleReason))
+            {
+                reason = "compatible_combat_translation_handoff:" + compatibleReason;
+                return false;
+            }
+            if (IsAutomaticAuthoringPreview(active))
+            {
+                reason = "compatible_automatic_authoring_excursion_handoff";
+                return false;
+            }
+
+            reason = active.WindowKind + ":" + active.State + ":" + active.IntentKey;
+            return true;
+        }
+    }
+
     public static bool HasBlockingPrimaryWindowForTravel(string? botProfileId, DateTimeOffset now, out string reason)
     {
         reason = "none";
@@ -1509,6 +2810,811 @@ internal static class VanguardMainIntentScheduler
 
             reason = active.WindowKind + ":" + active.State + ":" + active.IntentKey;
             return true;
+        }
+    }
+
+    public static bool IsTacticalCoordinatorAltDevelopCurrent(
+        string? botProfileId,
+        DateTimeOffset now,
+        string expectedWindowId,
+        string expectedLeaseId,
+        out string reason)
+    {
+        string key = Normalize(botProfileId);
+        string expectedWindow = Normalize(expectedWindowId);
+        string expectedLease = Normalize(expectedLeaseId);
+        lock (Sync)
+        {
+            if (!ActiveByBotProfileId.TryGetValue(key, out var active) || !active.IsActive(now))
+            {
+                reason = "no_active_primary_window";
+                return false;
+            }
+            if (!string.Equals(Normalize(active.WindowId), expectedWindow, StringComparison.OrdinalIgnoreCase))
+            {
+                reason = "window_identity_changed:active=" + Safe(active.WindowId) + ":expected=" + Safe(expectedWindow);
+                return false;
+            }
+            if (!active.IsTacticalMovement
+                || !string.Equals(active.IntentKey, "TacticalCoordinatorAltDevelop", StringComparison.OrdinalIgnoreCase))
+            {
+                reason = "primary_not_tc_alt_develop:" + Safe(active.WindowKind) + ":" + Safe(active.IntentKey);
+                return false;
+            }
+            if (!string.Equals(Normalize(active.BackendLeaseId), expectedLease, StringComparison.OrdinalIgnoreCase))
+            {
+                reason = "backend_lease_changed:active=" + Safe(active.BackendLeaseId) + ":expected=" + Safe(expectedLease);
+                return false;
+            }
+            if (!string.Equals(active.State, "RunningAltDevelop", StringComparison.OrdinalIgnoreCase))
+            {
+                reason = "alt_develop_not_running:" + Safe(active.State);
+                return false;
+            }
+            reason = "current";
+            return true;
+        }
+    }
+
+    public static bool IsTacticalCoordinatorDirectCommitCurrent(
+        string? botProfileId,
+        DateTimeOffset now,
+        string expectedWindowId,
+        string expectedLeaseId,
+        long expectedPlanEpoch,
+        out string reason)
+    {
+        string key = Normalize(botProfileId);
+        string expectedWindow = Normalize(expectedWindowId);
+        string expectedLease = Normalize(expectedLeaseId);
+        string expectedEpoch = expectedPlanEpoch.ToString(CultureInfo.InvariantCulture);
+        lock (Sync)
+        {
+            if (!ActiveByBotProfileId.TryGetValue(key, out var active) || !active.IsActive(now))
+            {
+                reason = "no_active_primary_window";
+                return false;
+            }
+            if (!string.Equals(Normalize(active.WindowId), expectedWindow, StringComparison.OrdinalIgnoreCase))
+            {
+                reason = "window_identity_changed";
+                return false;
+            }
+            if (!active.IsTacticalMovement
+                || !string.Equals(active.IntentKey, "TacticalCoordinatorDirectCommit", StringComparison.OrdinalIgnoreCase))
+            {
+                reason = "primary_not_tc_direct_commit:" + Safe(active.WindowKind) + ":" + Safe(active.IntentKey);
+                return false;
+            }
+            if (!string.Equals(Normalize(active.BackendLeaseId), expectedLease, StringComparison.OrdinalIgnoreCase))
+            {
+                reason = "backend_lease_changed";
+                return false;
+            }
+            if (!string.Equals(Normalize(active.PlanKey), expectedEpoch, StringComparison.OrdinalIgnoreCase))
+            {
+                reason = "plan_epoch_changed";
+                return false;
+            }
+            if (!string.Equals(active.State, "RunningDirectCommit", StringComparison.OrdinalIgnoreCase))
+            {
+                reason = "direct_commit_not_running:" + Safe(active.State);
+                return false;
+            }
+            reason = "current";
+            return true;
+        }
+    }
+
+    public static bool TryGetActiveTacticalCoordinatorDirectCommitContext(
+        string? botProfileId,
+        DateTimeOffset now,
+        out string threatId,
+        out long planEpoch,
+        out string reason)
+    {
+        string key = Normalize(botProfileId);
+        lock (Sync)
+        {
+            if (!ActiveByBotProfileId.TryGetValue(key, out var active) || !active.IsActive(now))
+            {
+                threatId = "none";
+                planEpoch = 0;
+                reason = "no_active_primary_window";
+                return false;
+            }
+            if (!active.IsTacticalMovement
+                || !string.Equals(active.IntentKey, "TacticalCoordinatorDirectCommit", StringComparison.OrdinalIgnoreCase))
+            {
+                threatId = "none";
+                planEpoch = 0;
+                reason = "primary_not_tc_direct_commit:" + Safe(active.WindowKind) + ":" + Safe(active.IntentKey);
+                return false;
+            }
+            string expectedThreat = Normalize(active.TargetKey);
+            if (string.Equals(expectedThreat, "none", StringComparison.OrdinalIgnoreCase)
+                || !long.TryParse(Normalize(active.PlanKey), NumberStyles.Integer, CultureInfo.InvariantCulture, out long parsedEpoch)
+                || parsedEpoch <= 0)
+            {
+                threatId = "none";
+                planEpoch = 0;
+                reason = "direct_commit_context_missing";
+                return false;
+            }
+            threatId = expectedThreat;
+            planEpoch = parsedEpoch;
+            reason = "current";
+            return true;
+        }
+    }
+
+    public static bool TryGetActiveTacticalCoordinatorAltDevelopThreatId(
+        string? botProfileId,
+        DateTimeOffset now,
+        out string threatId,
+        out string reason)
+    {
+        string key = Normalize(botProfileId);
+        lock (Sync)
+        {
+            if (!ActiveByBotProfileId.TryGetValue(key, out var active) || !active.IsActive(now))
+            {
+                threatId = "none";
+                reason = "no_active_primary_window";
+                return false;
+            }
+            if (!active.IsTacticalMovement
+                || !string.Equals(active.IntentKey, "TacticalCoordinatorAltDevelop", StringComparison.OrdinalIgnoreCase))
+            {
+                threatId = "none";
+                reason = "primary_not_tc_alt_develop:" + Safe(active.WindowKind) + ":" + Safe(active.IntentKey);
+                return false;
+            }
+
+            string expectedThreat = Normalize(active.TargetKey);
+            if (string.Equals(expectedThreat, "none", StringComparison.OrdinalIgnoreCase))
+            {
+                threatId = "none";
+                reason = "alt_develop_threat_identity_missing";
+                return false;
+            }
+
+            threatId = expectedThreat;
+            reason = "current";
+            return true;
+        }
+    }
+
+    public static bool TryGetActiveTacticalCoordinatorAltDevelopWindow(
+        string? botProfileId,
+        DateTimeOffset now,
+        out string windowId,
+        out string state,
+        out string threatId,
+        out string candidateId)
+    {
+        string key = Normalize(botProfileId);
+        lock (Sync)
+        {
+            if (ActiveByBotProfileId.TryGetValue(key, out var active)
+                && active.IsActive(now)
+                && active.IsTacticalMovement
+                && string.Equals(active.IntentKey, "TacticalCoordinatorAltDevelop", StringComparison.OrdinalIgnoreCase))
+            {
+                windowId = active.WindowId;
+                state = active.State;
+                threatId = Normalize(active.TargetKey);
+                candidateId = Normalize(active.PlanKey);
+                return true;
+            }
+        }
+
+        windowId = "none";
+        state = "none";
+        threatId = "none";
+        candidateId = "none";
+        return false;
+    }
+
+    public static bool TryOpenMedicSupportSupplyDrop(
+        OperatorDecisionSnapshot snapshot,
+        VanguardMedicSupportCandidateFact fact,
+        string itemInstanceId,
+        DateTimeOffset now,
+        out string windowId,
+        out string reason)
+    {
+        windowId = "none";
+        reason = "none";
+        if (snapshot == null || fact == null || string.IsNullOrWhiteSpace(snapshot.BotProfileId))
+        {
+            reason = "snapshot_or_candidate_missing";
+            return false;
+        }
+
+        if (!fact.SupplyDropDryRunEligible
+            || !string.Equals(Normalize(fact.CaregiverBotProfileId), Normalize(snapshot.BotProfileId), StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(Normalize(fact.CaregiverOwnerProfileId), Normalize(snapshot.OwnerProfileId), StringComparison.OrdinalIgnoreCase)
+            || string.IsNullOrWhiteSpace(itemInstanceId)
+            || string.Equals(Normalize(itemInstanceId), "none", StringComparison.OrdinalIgnoreCase))
+        {
+            reason = "candidate_identity_or_item_preflight_invalid";
+            return false;
+        }
+
+        ExpireStaleWindow(snapshot, now);
+        var board = VanguardOperatorIntentDryRunService.BuildBoard(snapshot);
+        ObserveBoard(board, now);
+        var selected = board.Selected;
+        // A real Medical pair already admitted by THIS scheduler retains its
+        // primary through the native drop phase. Re-electing it at this point
+        // would let a read-only MovementBroker win over an active Medical lease.
+        bool pairOwnsPhase = VanguardMedicSupportSessionStore.TryGetActive(out VanguardMedicSupportSession livePair)
+            && string.Equals(livePair.CaregiverBotProfileId, snapshot.BotProfileId, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(livePair.PatientBotProfileId, fact.PatientBotProfileId, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(livePair.ItemInstanceId, itemInstanceId, StringComparison.OrdinalIgnoreCase)
+            && IsOwnMedicPairCurrent(livePair.SessionId, livePair.CaregiverBotProfileId,
+                livePair.PatientBotProfileId, now);
+        if (!pairOwnsPhase
+            && (selected == null
+                || (!string.Equals(selected.IntentKey, VanguardMedicSupportDoctrine.SupplyDropIntentKey, StringComparison.OrdinalIgnoreCase)
+                    && !string.Equals(selected.IntentKey, VanguardMedicSupportDoctrine.SupportIntentKey, StringComparison.OrdinalIgnoreCase))
+                || !string.Equals(Normalize(selected.TargetKey), Normalize(fact.PatientBotProfileId), StringComparison.OrdinalIgnoreCase)))
+        {
+            reason = "supply_drop_not_current_selected_primary:" + Safe(selected?.IntentKey) + ":target=" + Safe(selected?.TargetKey);
+            return false;
+        }
+
+        lock (Sync)
+        {
+            if (ActiveByBotProfileId.TryGetValue(snapshot.BotProfileId, out var active) && active.IsActive(now))
+            {
+                if (active.IsMedicSupportSupplyDrop
+                    && string.Equals(Normalize(active.TargetKey), Normalize(fact.PatientBotProfileId), StringComparison.OrdinalIgnoreCase)
+                    && active.PlanKey.IndexOf(Normalize(itemInstanceId), StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    windowId = active.WindowId;
+                    reason = "medic_supply_drop_window_already_active";
+                    return true;
+                }
+
+                if (active.IsMedicSupport)
+                {
+                    ActiveByBotProfileId.Remove(snapshot.BotProfileId);
+                    OutcomeByBotProfileId[snapshot.BotProfileId] = new VanguardSchedulerOutcomeRecord
+                    {
+                        BotProfileId = snapshot.BotProfileId,
+                        WindowId = active.WindowId,
+                        WindowKind = active.WindowKind,
+                        IntentKey = active.IntentKey,
+                        Outcome = "Completed",
+                        Reason = "medic_support_phase_transition_to_supply_drop",
+                        BackendSummary = active.Summary,
+                        RecordedAtUtc = now
+                    };
+                }
+                else
+                {
+                    if (!TryYieldNonCriticalPrimaryForUrgentMedicSupplyDrop(snapshot, fact, active, now, out string preemptReason, out string cleanupSummary))
+                    {
+                        windowId = active.WindowId;
+                        reason = "primary_window_busy:" + Safe(active.WindowKind) + ":" + Safe(active.IntentKey) + ":" + Safe(preemptReason);
+                        return false;
+                    }
+
+                    ActiveByBotProfileId.Remove(snapshot.BotProfileId);
+                    OutcomeByBotProfileId[snapshot.BotProfileId] = new VanguardSchedulerOutcomeRecord
+                    {
+                        BotProfileId = snapshot.BotProfileId,
+                        WindowId = active.WindowId,
+                        WindowKind = active.WindowKind,
+                        IntentKey = active.IntentKey,
+                        Outcome = "Interrupted",
+                        Reason = preemptReason,
+                        BackendSummary = Safe(active.Summary) + ":cleanup=" + Safe(cleanupSummary),
+                        RecordedAtUtc = now
+                    };
+                    VanguardClientDiagnosticsLog.Info(
+                        VanguardMedicSupportDoctrine.SupplyDropStatusTag,
+                        $"VANGUARD_MEDIC_SUPPLY_DROP_NONCRITICAL_WINDOW_SUPERSEDED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; patientBot={Safe(fact.PatientBotProfileId)}; need={fact.PatientNeed}; previous={active.Summary}; reason={Safe(preemptReason)}; cleanup={Safe(cleanupSummary)}; survivalCombatSelfMedicalManualAuthoringPreserved=true");
+                }
+            }
+
+            windowId = "medic_supply_" + now.ToUnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture) + "_" + Safe(snapshot.BotProfileId);
+            var window = new VanguardPrimaryExecutionWindowState
+            {
+                WindowId = windowId,
+                OperatorId = snapshot.OperatorId,
+                BotProfileId = snapshot.BotProfileId,
+                OwnerProfileId = snapshot.OwnerProfileId,
+                WindowKind = VanguardPrimaryExecutionWindowKinds.MedicSupportSupplyDrop,
+                State = "ReservedForNativeDrop",
+                IntentKey = VanguardMedicSupportDoctrine.SupplyDropIntentKey,
+                Domain = "Medical",
+                Reason = pairOwnsPhase ? "same_medical_pair_phase_transition" : selected!.Reason,
+                TargetKey = fact.PatientBotProfileId,
+                PlanKey = (pairOwnsPhase ? livePair.SessionId : selected!.PlanKey) + ":itemInstance=" + Normalize(itemInstanceId),
+                NextStep = "ExecuteNativeMedicOwnedItemDrop",
+                Score = pairOwnsPhase ? 500f : selected!.FinalScore,
+                StartedAtUtc = now,
+                MinUntilUtc = now + TimeSpan.FromSeconds(0.25d),
+                MaxUntilUtc = now + TimeSpan.FromSeconds(VanguardMedicSupportDoctrine.SupplyDropWindowMaxSeconds),
+                NoProgressUntilUtc = now + TimeSpan.FromSeconds(VanguardMedicSupportDoctrine.SupplyDropNoProgressSeconds),
+                LastProgressAtUtc = now,
+                LastObservedAtUtc = now,
+                LastProgressKind = "supply_drop_primary_granted"
+            };
+            ActiveByBotProfileId[snapshot.BotProfileId] = window;
+            reason = "medic_supply_drop_primary_granted";
+            VanguardClientDiagnosticsLog.Info(
+                VanguardMedicSupportDoctrine.SupplyDropStatusTag,
+                $"VANGUARD_MEDIC_SUPPLY_DROP_WINDOW_OPENED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; patientBot={Safe(fact.PatientBotProfileId)}; need={fact.PatientNeed}; template={Safe(fact.CandidateItemTemplateId)}; itemInstance={Safe(itemInstanceId)}; distance={fact.DirectDistanceMeters:0.00}; window={Safe(windowId)}; patientLease=false; movement=false; nativeDropPending=true; healthMutation=false");
+            return true;
+        }
+    }
+
+    private static bool TryYieldNonCriticalPrimaryForUrgentMedicSupplyDrop(
+        OperatorDecisionSnapshot snapshot,
+        VanguardMedicSupportCandidateFact fact,
+        VanguardPrimaryExecutionWindowState active,
+        DateTimeOffset now,
+        out string reason,
+        out string cleanupSummary)
+    {
+        reason = "active_primary_not_yieldable_to_medic_support";
+        cleanupSummary = "none";
+        if (snapshot == null || fact == null || active == null)
+        {
+            return false;
+        }
+
+        if (active.IsGrenadeEmergency || active.IsHardReturn)
+        {
+            reason = "survival_primary_preserved:" + Safe(active.WindowKind);
+            return false;
+        }
+        if (VanguardPrimaryExecutionContract.IsCombatPrimaryKind(active.WindowKind))
+        {
+            reason = "sain_combat_primary_preserved_use_sidecar";
+            return false;
+        }
+        if (active.IsMedical && !active.IsMedicSupport)
+        {
+            reason = "self_medical_primary_preserved:" + Safe(active.WindowKind);
+            return false;
+        }
+
+        if (active.IsAuthoringPreview)
+        {
+            if (string.IsNullOrWhiteSpace(active.PlanKey)
+                || !active.PlanKey.StartsWith("auto-", StringComparison.OrdinalIgnoreCase))
+            {
+                reason = "manual_authoring_preview_preserved";
+                return false;
+            }
+            if (!VanguardTacticalAuthoringHeadlessPreviewService.TryYieldAutomaticPreviewForMedicSupport(
+                    snapshot.BotProfileId, active.WindowId, now, out cleanupSummary))
+            {
+                reason = "automatic_authoring_preview_cleanup_not_confirmed";
+                return false;
+            }
+            reason = "medic_support_supersedes_automatic_authoring_preview";
+            return true;
+        }
+
+        if (active.IsCorpseLoot)
+        {
+            if (!VanguardCorpseLootApproachExecutor.TryYieldForUrgentMedicSupport(
+                    snapshot.BotProfileId, active.WindowId, now, out cleanupSummary))
+            {
+                reason = "corpse_loot_cleanup_not_confirmed";
+                return false;
+            }
+            reason = "medic_support_supersedes_corpse_loot";
+            return true;
+        }
+
+        if (active.IsWorldContainerLoot)
+        {
+            if (!VanguardWorldLootContainerApproachExecutor.TryYieldForMedicSupport(
+                    snapshot.BotProfileId, active.WindowId, now, out cleanupSummary))
+            {
+                reason = "world_container_loot_cleanup_not_confirmed";
+                return false;
+            }
+            reason = "medic_support_supersedes_world_container_loot";
+            return true;
+        }
+
+        if (active.IsTacticalMovement)
+        {
+            var drain = TacticalCoordinationPhysicalAuthorityBarrier.DrainForHigherAuthority(
+                snapshot.BotProfileId, now, "medical_support_preempt:" + fact.PatientNeed);
+            cleanupSummary = drain.Summary;
+            reason = "medic_support_supersedes_tc_physical_movement";
+            return true;
+        }
+
+        if (active.IsCloseCohesionMovement)
+        {
+            bool drained = VanguardCloseCohesionExecutor.DrainForHigherAuthority(
+                snapshot.BotProfileId, now, "medical_support_preempt:" + fact.PatientNeed);
+            cleanupSummary = "closeCohesionDrained=" + (drained ? "true" : "false");
+            reason = "medic_support_supersedes_close_cohesion";
+            return true;
+        }
+
+        if (string.Equals(active.WindowKind, VanguardPrimaryExecutionWindowKinds.Rejoin, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(active.WindowKind, VanguardPrimaryExecutionWindowKinds.Recovery, StringComparison.OrdinalIgnoreCase))
+        {
+            cleanupSummary = VanguardReturnMovementCommandStore.Clear(snapshot.BotProfileId, "medic_support_preempt:" + fact.PatientNeed);
+            reason = "medic_support_supersedes_noncritical_rejoin_or_recovery";
+            return true;
+        }
+
+        reason = "unclassified_primary_preserved:" + Safe(active.WindowKind);
+        return false;
+    }
+
+    public static bool TryGetActiveMedicSupportSupplyDropWindow(
+        string? botProfileId,
+        string? expectedWindowId,
+        DateTimeOffset now,
+        out string state,
+        out string summary)
+    {
+        string key = Normalize(botProfileId);
+        string expected = Normalize(expectedWindowId);
+        lock (Sync)
+        {
+            if (ActiveByBotProfileId.TryGetValue(key, out var active)
+                && active.IsActive(now)
+                && active.IsMedicSupportSupplyDrop
+                && string.Equals(Normalize(active.WindowId), expected, StringComparison.OrdinalIgnoreCase))
+            {
+                state = active.State;
+                summary = active.Summary;
+                return true;
+            }
+        }
+
+        state = "none";
+        summary = "none";
+        return false;
+    }
+
+    public static bool TryMarkMedicSupportSupplyDropProgress(
+        string? botProfileId,
+        string? expectedWindowId,
+        string progress,
+        DateTimeOffset now)
+    {
+        string key = Normalize(botProfileId);
+        string expected = Normalize(expectedWindowId);
+        lock (Sync)
+        {
+            if (!ActiveByBotProfileId.TryGetValue(key, out var active)
+                || !active.IsActive(now)
+                || !active.IsMedicSupportSupplyDrop
+                || !string.Equals(Normalize(active.WindowId), expected, StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            active.LastProgressAtUtc = now;
+            active.LastObservedAtUtc = now;
+            active.NoProgressUntilUtc = now + TimeSpan.FromSeconds(VanguardMedicSupportDoctrine.SupplyDropNoProgressSeconds);
+            active.LastProgressKind = Safe(progress);
+            active.State = Safe(progress);
+            ActiveByBotProfileId[key] = active;
+            return true;
+        }
+    }
+
+    public static bool TryCloseMedicSupportSupplyDrop(
+        string? botProfileId,
+        string? expectedWindowId,
+        string outcome,
+        string reason,
+        string backendSummary,
+        DateTimeOffset now)
+    {
+        string key = Normalize(botProfileId);
+        string expected = Normalize(expectedWindowId);
+        VanguardPrimaryExecutionWindowState? closed = null;
+        bool activeSessionAvailable = VanguardMedicSupportSessionStore.TryGetActive(out VanguardMedicSupportSession currentPair);
+        lock (Sync)
+        {
+            if (!ActiveByBotProfileId.TryGetValue(key, out var active)
+                || !active.IsMedicSupportSupplyDrop
+                || !string.Equals(Normalize(active.WindowId), expected, StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            closed = active;
+            // A successfully observed ground drop is a PHASE transition, not the
+            // end of the pair medical session. Hold caregiver's medical authority
+            // while the patient completes the exact-world-item pickup.
+            bool handoffToPickup = string.Equals(outcome, "Completed", StringComparison.OrdinalIgnoreCase)
+                && string.Equals(reason, "physical_drop_verified_handoff_to_targeted_pickup", StringComparison.OrdinalIgnoreCase)
+                && activeSessionAvailable
+                && IsOwnMedicSupportSession(active, currentPair.SessionId);
+            if (handoffToPickup)
+            {
+                active.WindowKind = VanguardPrimaryExecutionWindowKinds.MedicSupportRendezvous;
+                active.State = "CaregiverAwaitPatientPickup";
+                active.PlanKey = currentPair.SessionId;
+                active.LastObservedAtUtc = now;
+                active.LastProgressAtUtc = now;
+                active.NoProgressUntilUtc = now + TimeSpan.FromSeconds(VanguardMedicSupportDoctrine.PickupWindowMaxSeconds);
+                active.MaxUntilUtc = now + TimeSpan.FromSeconds(VanguardMedicSupportDoctrine.PickupWindowMaxSeconds);
+                active.LastProgressKind = "physical_drop_observed_handoff_to_pickup";
+                ActiveByBotProfileId[key] = active;
+            }
+            else
+            {
+                ActiveByBotProfileId.Remove(key);
+            }
+            OutcomeByBotProfileId[key] = new VanguardSchedulerOutcomeRecord
+            {
+                BotProfileId = key,
+                WindowId = active.WindowId,
+                WindowKind = active.WindowKind,
+                IntentKey = active.IntentKey,
+                Outcome = Safe(outcome),
+                Reason = Safe(reason),
+                BackendSummary = Safe(backendSummary),
+                RecordedAtUtc = now
+            };
+        }
+
+        VanguardClientDiagnosticsLog.Info(
+            VanguardMedicSupportDoctrine.SupplyDropStatusTag,
+            $"VANGUARD_MEDIC_SUPPLY_DROP_WINDOW_CLOSED botProfile={Safe(key)}; window={Safe(closed?.WindowId)}; outcome={Safe(outcome)}; reason={Safe(reason)}; patientLease=false; movement=false; healthMutation=false");
+        return true;
+    }
+
+    public static bool TryOpenMedicSupportAuxiliaryWindow(
+        OperatorDecisionSnapshot snapshot,
+        string sessionId,
+        string windowKind,
+        string role,
+        DateTimeOffset now,
+        out string windowId,
+        out string reason)
+    {
+        windowId = "none";
+        reason = "none";
+        if (snapshot == null || string.IsNullOrWhiteSpace(snapshot.BotProfileId)
+            || !IsCurrentMedicSupportSessionActor(sessionId, snapshot.BotProfileId, out reason))
+        {
+            return false;
+        }
+
+        bool supportedKind = string.Equals(windowKind, VanguardPrimaryExecutionWindowKinds.MedicSupportRendezvous, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(windowKind, VanguardPrimaryExecutionWindowKinds.MedicSupportPickup, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(windowKind, VanguardPrimaryExecutionWindowKinds.MedicSupportDirectCare, StringComparison.OrdinalIgnoreCase);
+        if (!supportedKind)
+        {
+            reason = "unsupported_medic_support_auxiliary_window:" + Safe(windowKind);
+            return false;
+        }
+
+        ExpireStaleWindow(snapshot, now);
+        string key = Normalize(snapshot.BotProfileId);
+        VanguardPrimaryExecutionWindowState? existing = null;
+        lock (Sync)
+        {
+            if (ActiveByBotProfileId.TryGetValue(key, out var active) && active.IsActive(now))
+            {
+                existing = active;
+            }
+        }
+
+        if (existing != null)
+        {
+            if (existing.IsMedicSupport
+                && !existing.IsMedicSupportSupplyDrop
+                && string.Equals(Normalize(existing.PlanKey), Normalize(sessionId), StringComparison.OrdinalIgnoreCase))
+            {
+                // Rendezvous / stationary HOLD / pickup are phases of ONE medical
+                // authority. Preserve the window ID consumed by the physical mover.
+                // Do not renew deadlines without measured physical progress.
+                windowId = existing.WindowId;
+                reason = "medic_support_same_session_window_reused";
+                return true;
+            }
+            else
+            {
+                if (existing.IsMedicSupportSupplyDrop
+                    && IsOwnMedicSupportSession(existing, sessionId))
+                {
+                    windowId = existing.WindowId;
+                    reason = "medic_supply_drop_phase_cannot_be_replaced_by_auxiliary";
+                    return false;
+                }
+                if (!VanguardMedicSupportSessionStore.TryGetActive(out VanguardMedicSupportSession session))
+                {
+                    reason = "medic_support_session_lost_before_auxiliary_acquire";
+                    return false;
+                }
+                var minimalFact = new VanguardMedicSupportCandidateFact
+                {
+                    PatientNeed = session.Need,
+                    PatientBotProfileId = session.PatientBotProfileId,
+                    CaregiverBotProfileId = session.CaregiverBotProfileId,
+                    SameOwnerInitialScope = true,
+                    SupplyDropDryRunEligible = true,
+                    DirectCareDryRunEligible = true
+                };
+                if (!TryYieldNonCriticalPrimaryForUrgentMedicSupplyDrop(
+                        snapshot,
+                        minimalFact,
+                        existing,
+                        now,
+                        out string yieldReason,
+                        out string cleanupSummary))
+                {
+                    windowId = existing.WindowId;
+                    reason = "primary_window_busy:" + Safe(existing.WindowKind) + ":" + Safe(yieldReason);
+                    return false;
+                }
+                FinishPrimaryWindow(key, now, "Interrupted", yieldReason, cleanupSummary, existing.WindowId);
+            }
+        }
+
+        double maxSeconds = string.Equals(windowKind, VanguardPrimaryExecutionWindowKinds.MedicSupportPickup, StringComparison.OrdinalIgnoreCase)
+            ? VanguardMedicSupportDoctrine.PickupWindowMaxSeconds
+            : string.Equals(windowKind, VanguardPrimaryExecutionWindowKinds.MedicSupportDirectCare, StringComparison.OrdinalIgnoreCase)
+                ? VanguardMedicSupportDoctrine.DirectCareWindowMaxSeconds
+                : VanguardMedicSupportDoctrine.RendezvousWindowMaxSeconds;
+
+        lock (Sync)
+        {
+            if (ActiveByBotProfileId.TryGetValue(key, out var unexpected) && unexpected.IsActive(now))
+            {
+                windowId = unexpected.WindowId;
+                reason = "primary_window_reappeared_during_medic_support_acquire:" + Safe(unexpected.WindowKind);
+                return false;
+            }
+
+            windowId = "medic_support_" + Safe(role) + "_" + now.ToUnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture) + "_" + Safe(key);
+            var window = new VanguardPrimaryExecutionWindowState
+            {
+                WindowId = windowId,
+                OperatorId = snapshot.OperatorId,
+                BotProfileId = snapshot.BotProfileId,
+                OwnerProfileId = snapshot.OwnerProfileId,
+                WindowKind = windowKind,
+                State = "MedicSupportAuxiliary",
+                IntentKey = VanguardMedicSupportDoctrine.SupportIntentKey,
+                Domain = "Medical",
+                Reason = "medic_support_pair_authority:" + Safe(role),
+                TargetKey = Safe(role),
+                PlanKey = Normalize(sessionId),
+                NextStep = "ContinueMedicSupportSession",
+                Score = 500f,
+                StartedAtUtc = now,
+                MinUntilUtc = now + TimeSpan.FromSeconds(0.15d),
+                MaxUntilUtc = now + TimeSpan.FromSeconds(maxSeconds),
+                NoProgressUntilUtc = now + TimeSpan.FromSeconds(maxSeconds),
+                LastProgressAtUtc = now,
+                LastObservedAtUtc = now,
+                LastProgressKind = "medic_support_auxiliary_granted"
+            };
+            ActiveByBotProfileId[key] = window;
+        }
+
+        VanguardClientDiagnosticsLog.Info(
+            VanguardMedicSupportDoctrine.SessionStatusTag,
+            $"VANGUARD_MEDIC_SUPPORT_AUX_WINDOW_OPENED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; session={Safe(sessionId)}; role={Safe(role)}; kind={Safe(windowKind)}; window={Safe(windowId)}; combatPrimaryReplaced=false; survivalPriorityPreserved=true");
+        reason = "medic_support_auxiliary_window_granted";
+        return true;
+    }
+
+    public static bool TryCloseMedicSupportAuxiliaryWindow(
+        string? botProfileId,
+        string? expectedWindowId,
+        string outcome,
+        string reason,
+        string backendSummary,
+        DateTimeOffset now)
+    {
+        string key = Normalize(botProfileId);
+        string expected = Normalize(expectedWindowId);
+        lock (Sync)
+        {
+            if (!ActiveByBotProfileId.TryGetValue(key, out var active)
+                || !active.IsMedicSupport
+                || !string.Equals(Normalize(active.WindowId), expected, StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+        }
+        return FinishPrimaryWindow(key, now, outcome, reason, backendSummary, expected);
+    }
+
+    public static void TryCloseMedicSupportWindowsForSession(
+        string sessionId,
+        string caregiverBotProfileId,
+        string patientBotProfileId,
+        string outcome,
+        string reason,
+        string backendSummary,
+        DateTimeOffset now)
+    {
+        foreach (string bot in new[] { Normalize(caregiverBotProfileId), Normalize(patientBotProfileId) }.Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            VanguardPrimaryExecutionWindowState? active = null;
+            lock (Sync)
+            {
+                if (ActiveByBotProfileId.TryGetValue(bot, out var found)
+                    && IsOwnMedicSupportSession(found, sessionId))
+                {
+                    active = found;
+                }
+            }
+            if (active != null)
+            {
+                FinishPrimaryWindow(bot, now, outcome, reason, backendSummary, active.WindowId);
+            }
+        }
+    }
+
+    // Exact runtime boundary for external movement suppression. No mutation and no window creation.
+    public static bool IsExactExternalMovementWindowCurrent(string? botProfileId, string? expectedWindowId, DateTimeOffset now, bool grenade)
+    {
+        string key = Normalize(botProfileId);
+        string expected = Normalize(expectedWindowId);
+        if (string.Equals(expected, "none", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        lock (Sync)
+        {
+            return ActiveByBotProfileId.TryGetValue(key, out var window)
+                && window.IsActive(now)
+                && string.Equals(window.WindowId, expected, StringComparison.OrdinalIgnoreCase)
+                && (grenade ? window.IsGrenadeEmergency : window.IsHardReturn);
+        }
+    }
+
+    // A Travel terminal may hand back while its own scheduler window is still live.
+    // This predicate is exact and must not authorize any other primary window.
+    public static bool IsExactTravelCorridorWindowCurrent(string? botProfileId, string? expectedWindowId, DateTimeOffset now)
+    {
+        string key = Normalize(botProfileId);
+        string expected = Normalize(expectedWindowId);
+        if (string.Equals(expected, "none", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        lock (Sync)
+        {
+            return ActiveByBotProfileId.TryGetValue(key, out var window)
+                && window.IsActive(now)
+                && string.Equals(window.WindowId, expected, StringComparison.OrdinalIgnoreCase)
+                && window.State.IndexOf("TravelCorridor", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+    }
+
+    public static bool IsExactCombatWindowCurrent(string? botProfileId, string? expectedWindowId, DateTimeOffset now)
+    {
+        string key = Normalize(botProfileId);
+        string expected = Normalize(expectedWindowId);
+        if (string.Equals(expected, "none", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+        lock (Sync)
+        {
+            return ActiveByBotProfileId.TryGetValue(key, out var window)
+                && window.IsActive(now)
+                && VanguardPrimaryExecutionContract.IsCombatPrimaryKind(window.WindowKind)
+                && string.Equals(window.WindowId, expected, StringComparison.OrdinalIgnoreCase);
         }
     }
 
@@ -1967,6 +4073,15 @@ internal static class VanguardMainIntentScheduler
             return;
         }
 
+        if (TryGetActiveTacticalCoordinatorAltDevelopThreatId(snapshot.BotProfileId, now, out var altDevelopThreatId, out _)
+            && string.Equals(Normalize(locallyAppliedTarget), Normalize(altDevelopThreatId), StringComparison.OrdinalIgnoreCase)
+            && AltDevelopAuthorityPolicy.IsAltDevelopTranslationCompatible(snapshot, altDevelopThreatId, out var altDevelopCompatibleReason))
+        {
+            LogThrottled("TcAltDevelopPreserve|" + snapshot.BotProfileId, now, ProgressLogInterval,
+                $"TC_ALT_DEVELOP_COMBAT_CONTEXT_PRESERVED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; requestedCombatTarget={Safe(locallyAppliedTarget)}; combatAuthorityReason={Safe(authorityReason)}; compatibleReason={Safe(altDevelopCompatibleReason)}; primaryMutation=false; sainPerceptionAimFirePreserved=true; translationAuthority=TC_AltDevelop; doctrine=search_or_bounded_opportunity_combat_flank_preserves_sain_aim_fire; tag={StatusTag}");
+            return;
+        }
+
         VanguardPrimaryExecutionWindowState? window = null;
         bool opened = false;
         bool interrupted = false;
@@ -2044,6 +4159,7 @@ internal static class VanguardMainIntentScheduler
                     WindowId = "combat_" + now.ToUnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture) + "_" + Safe(snapshot.BotProfileId),
                     OperatorId = snapshot.OperatorId,
                     BotProfileId = snapshot.BotProfileId,
+                    OwnerProfileId = snapshot.OwnerProfileId,
                     WindowKind = VanguardPrimaryExecutionWindowKinds.SainCombatRelease,
                     State = "RunningSainAuthority",
                     IntentKey = selected.IntentKey,
@@ -2132,7 +4248,8 @@ internal static class VanguardMainIntentScheduler
             snapshot,
             selected.IntentKey + ":" + authorityReason,
             TimeSpan.FromSeconds(Math.Max(4.5d, VanguardMovementAuthorityDoctrine.SquadContactSectorAlertSeconds)),
-            now);
+            now,
+            window.WindowId);
     }
 
     private static bool ObserveMedicalLease(OperatorDecisionSnapshot snapshot, DateTimeOffset now)
@@ -2205,6 +4322,7 @@ internal static class VanguardMainIntentScheduler
                     WindowId = "medical_observed_" + Safe(snapshot.BotProfileId) + "_" + Safe(medicalLease.LeaseId),
                     OperatorId = snapshot.OperatorId,
                     BotProfileId = snapshot.BotProfileId,
+                    OwnerProfileId = snapshot.OwnerProfileId,
                     WindowKind = medicalLease.WindowKind.IndexOf("Mobile", StringComparison.OrdinalIgnoreCase) >= 0
                         ? VanguardPrimaryExecutionWindowKinds.MobileMedical
                         : VanguardPrimaryExecutionWindowKinds.StationaryMedical,
@@ -2255,7 +4373,9 @@ internal static class VanguardMainIntentScheduler
         VanguardPrimaryExecutionWindowState? released = null;
         lock (Sync)
         {
-            if (ActiveByBotProfileId.TryGetValue(key, out var active) && active.IsMedical)
+            if (ActiveByBotProfileId.TryGetValue(key, out var active)
+                && active.IsMedical
+                && !active.IsMedicSupport)
             {
                 released = active;
                 ActiveByBotProfileId.Remove(key);
@@ -2397,6 +4517,23 @@ internal static class VanguardMainIntentScheduler
                     return;
                 }
             }
+            else if (active.IsMedicSupport)
+            {
+                bool maxExpired = active.MaxUntilUtc != DateTimeOffset.MinValue && active.MaxUntilUtc <= now;
+                bool noProgressExpired = active.NoProgressUntilUtc != DateTimeOffset.MinValue && active.NoProgressUntilUtc <= now;
+                if (maxExpired || noProgressExpired)
+                {
+                    expired = active;
+                    timeoutReason = maxExpired ? "MedicSupportMaxExpired:" + Safe(active.WindowKind) : "MedicSupportNoProgress:" + Safe(active.WindowKind);
+                    ActiveByBotProfileId.Remove(key);
+                }
+                else
+                {
+                    active.LastObservedAtUtc = now;
+                    ActiveByBotProfileId[key] = active;
+                    return;
+                }
+            }
             else if (active.IsMedical)
             {
                 active.LastObservedAtUtc = now;
@@ -2490,7 +4627,23 @@ internal static class VanguardMainIntentScheduler
                             + ":snapshotEvidence=" + Bool(snapshotTargetEvidence);
                 if (!activeTargetLive)
                 {
-                    VanguardCombatAwarenessBridge.InvalidateSquadCombatTarget(snapshot.OwnerProfileId, activeTarget, now, "scheduler_local_target_authority_lost:" + activeTargetLiveReason);
+                    // Losing this Operator's SAIN GoalEnemy revokes its local combat window,
+                    // not the squad's independently observed hostile contact. Only a world
+                    // target that is no longer valid may be removed from shared awareness.
+                    // A live/temporarily-unresolved contact remains bounded by its existing
+                    // TTL and must pass individual SAIN readback before combat authority.
+                    if (!worldTargetLive)
+                    {
+                        VanguardCombatAwarenessBridge.InvalidateSquadCombatTarget(
+                            snapshot.OwnerProfileId, activeTarget, now,
+                            "scheduler_world_target_invalid:" + worldTargetLiveReason);
+                    }
+                    else
+                    {
+                        LogThrottled("LocalGoalLostSquadContactRetained|" + key + "|" + activeTarget,
+                            now, DecisionLogInterval,
+                            $"VANGUARD_LOCAL_COMBAT_GOAL_LOST_CONTACT_RETAINED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(key)}; owner={Safe(snapshot.OwnerProfileId)}; target={Safe(activeTarget)}; localGoal={Safe(localGoalReason)}; worldReason={Safe(worldTargetLiveReason)}; squadContactMutation=false; previousLocalGoalVerified=false; retainedUntilExistingTtl=true; continuationRequiresLocalReadback=true; tag={VanguardPrimaryExecutionContract.SainWindowStatusTag}; schedulerTag={StatusTag}");
+                    }
                 }
 
                 bool localAppliedSwitch = differentLocallyAppliedTarget
@@ -2550,8 +4703,10 @@ internal static class VanguardMainIntentScheduler
                         if (!activeTargetLive)
                         {
                             expired = active;
-                            timeoutReason = "CombatTargetsResolved";
-                            combatReason = "duplicate_or_same_continuation_did_not_replace_dead_target";
+                            timeoutReason = worldTargetLive ? "CombatLocalGoalAuthorityLost" : "CombatTargetsResolved";
+                            combatReason = worldTargetLive
+                                ? "duplicate_or_same_continuation_did_not_restore_local_goal"
+                                : "duplicate_or_same_continuation_did_not_replace_dead_target";
                             ActiveByBotProfileId.Remove(key);
                         }
                         else if ((noProgressExpired || absoluteExpired) && !productive && !trueDirectThreat)
@@ -2621,8 +4776,10 @@ internal static class VanguardMainIntentScheduler
                 else if (!activeTargetLive)
                 {
                     expired = active;
-                    timeoutReason = "CombatTargetsResolved";
-                    combatReason = "active_target_dead_or_missing_and_no_local_scan_or_group_continuation:" + Safe(activeTargetLiveReason);
+                    timeoutReason = worldTargetLive ? "CombatLocalGoalAuthorityLost" : "CombatTargetsResolved";
+                    combatReason = worldTargetLive
+                        ? "local_goal_unconfirmed_no_locally_verified_continuation:" + Safe(activeTargetLiveReason)
+                        : "world_target_invalid_no_locally_verified_continuation:" + Safe(activeTargetLiveReason);
                     ActiveByBotProfileId.Remove(key);
                     CombatReopenBlockedUntilByBotProfileId.Remove(key);
                     CombatReopenBlockedTargetByBotProfileId.Remove(key);
@@ -2834,7 +4991,8 @@ internal static class VanguardMainIntentScheduler
                 snapshot,
                 "scheduler_combat_window_no_progress:" + combatReason,
                 TimeSpan.FromSeconds(combatReopenBackoffSeconds),
-                now);
+                now,
+                expired.WindowId);
             VanguardClientDiagnosticsLog.Info(VanguardPrimaryExecutionContract.SainWindowStatusTag,
                 $"VANGUARD_SAIN_WINDOW_NO_PROGRESS_CLOSED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(key)}; target={Safe(expired.TargetKey)}; reason={Safe(combatReason)}; outcome={cleanup.Outcome}; reopenBackoff={combatReopenBackoffSeconds:0.0}; isolatedSeries={Bool(combatReopenBackoffSeconds > VanguardMovementAuthorityDoctrine.CombatNoProductionReopenBackoffSeconds + 0.01f)}; squadQuarantine={Safe(squadQuarantineSummary)}; doctrine=single_cleanup_then_squad_knowledge_only_then_rescore_medical_before_cohesion; isolatedBackoffTag={VanguardPrimaryExecutionContract.IsolatedCombatBackoffStatusTag}; quarantineTag={VanguardSquadTargetNoProgressQuarantine.StatusTag}; tag={VanguardPrimaryExecutionContract.SainWindowStatusTag}; schedulerTag={StatusTag}");
         }
@@ -2851,7 +5009,8 @@ internal static class VanguardMainIntentScheduler
                 releaseRecord.BotOwner,
                 snapshot.BotProfileId,
                 now,
-                timeoutReason);
+                timeoutReason,
+                expired.WindowId);
             VanguardClientDiagnosticsLog.Info(VanguardPrimaryExecutionContract.SainWindowStatusTag,
                 $"VANGUARD_SAIN_WINDOW_EXTERNAL_AUTHORITY_RELEASED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(key)}; target={Safe(expired.TargetKey)}; timeoutReason={Safe(timeoutReason)}; {Safe(releaseSummary)}; doctrine=orbit_patrol_and_low_priority_systems_resume_only_after_combat_window_terminal_close; tag={VanguardPrimaryExecutionContract.SainWindowStatusTag}; schedulerTag={StatusTag}");
         }
@@ -2990,7 +5149,17 @@ internal static class VanguardMainIntentScheduler
     private static void RollCombatWindow(VanguardPrimaryExecutionWindowState active, DateTimeOffset now, string targetId, bool targetChanged, string reason)
     {
         DateTimeOffset absoluteUntil = now + TimeSpan.FromSeconds(VanguardMovementAuthorityDoctrine.CombatProtectedAbsoluteMaxSeconds);
+        string priorCombatWindowId = active.WindowId;
         active.WindowId = "combat_chain_" + now.ToUnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture) + "_" + Safe(active.BotProfileId);
+        // The physical Combat suppression remains unchanged across this logical renewal.
+        // Retag only the exact preceding receipt, leaving replacement owners untouched.
+        bool combatReceiptTransferred = VanguardExternalAuthorityAdapter.TransferCombatWindowReceipt(
+            active.BotProfileId, priorCombatWindowId, active.WindowId);
+        if (!combatReceiptTransferred)
+        {
+            VanguardClientDiagnosticsLog.Diagnostic(StatusTag, () =>
+                $"VANGUARD_COMBAT_WINDOW_RECEIPT_NOT_TRANSFERRED botProfile={Safe(active.BotProfileId)}; previous={Safe(priorCombatWindowId)}; next={Safe(active.WindowId)}; physicalMutation=false; tag={StatusTag}");
+        }
         active.TargetKey = Normalize(targetId);
         active.CommittedTargetKey = active.TargetKey;
         active.CommittedTargetSource = "locally_verified_chain_roll";
@@ -3034,7 +5203,7 @@ internal static class VanguardMainIntentScheduler
 
         if (active.IsHardReturn)
         {
-            return VanguardMovementAuthorityDoctrine.MovementLeaseNoProgressSeconds;
+            return VanguardMovementAuthorityDoctrine.ForOwner(active.OwnerProfileId).MovementLeaseNoProgressSeconds;
         }
 
         if (active.IsCloseCohesionMovement)
@@ -3049,7 +5218,7 @@ internal static class VanguardMainIntentScheduler
 
         if (active.IsTacticalMovement)
         {
-            return VanguardMovementAuthorityDoctrine.TacticalRepositionNoProgressSeconds;
+            return VanguardMovementAuthorityDoctrine.ForOwner(active.OwnerProfileId).TacticalRepositionNoProgressSeconds;
         }
 
         if (active.IsCorpseLoot || active.IsWorldContainerLoot)
@@ -3100,6 +5269,17 @@ internal static class VanguardMainIntentScheduler
             || candidate.IntentKey.IndexOf("AwarenessRelease", StringComparison.OrdinalIgnoreCase) >= 0)
         {
             return VanguardPrimaryExecutionWindowKinds.SainCombatRelease;
+        }
+
+        if (string.Equals(candidate.IntentKey, VanguardMedicSupportDoctrine.SupplyDropIntentKey, StringComparison.OrdinalIgnoreCase))
+        {
+            return VanguardPrimaryExecutionWindowKinds.MedicSupportSupplyDrop;
+        }
+
+        if (string.Equals(candidate.IntentKey, VanguardMedicSupportDoctrine.SupportIntentKey, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(candidate.IntentKey, VanguardMedicSupportDoctrine.DirectCareIntentKey, StringComparison.OrdinalIgnoreCase))
+        {
+            return VanguardPrimaryExecutionWindowKinds.MedicSupportRendezvous;
         }
 
         if (candidate.Domain == "Medical" || candidate.IntentKey.IndexOf("Medical", StringComparison.OrdinalIgnoreCase) >= 0 || candidate.IntentKey.IndexOf("Surgery", StringComparison.OrdinalIgnoreCase) >= 0)
@@ -3451,6 +5631,15 @@ internal static class VanguardMainIntentScheduler
         {
             VanguardClientDiagnosticsLog.Info(StatusTag, message);
         }
+    }
+
+
+    private static string ResolveOwnerProfileIdForBot(string? botProfileId)
+    {
+        string key = Normalize(botProfileId);
+        OperatorDecisionSnapshot? snapshot = VanguardOperatorDecisionSnapshotService.GetLatestSnapshots()
+            .FirstOrDefault(item => item != null && string.Equals(item.BotProfileId, key, StringComparison.OrdinalIgnoreCase));
+        return snapshot == null ? "none" : Normalize(snapshot.OwnerProfileId);
     }
 
     private static string Normalize(string? value) => string.IsNullOrWhiteSpace(value) ? "none" : value.Trim();

@@ -54,6 +54,28 @@ internal sealed partial class VanguardOperatorDecisionSnapshotBuilder
         bool? shotMe = Bool(VanguardOperatorRuntimeAuditReflection.GetPropertyOrField(status, "ShotMeRecently"));
         bool? shotAtMe = Bool(VanguardOperatorRuntimeAuditReflection.GetPropertyOrField(status, "ShotAtMeRecently"));
 
+        // Route convergence foundation: preserve the best SAIN-owned threat location in the existing
+        // immutable threat snapshot instead of creating a second target/knowledge model.
+        // Exact EnemyPosition is admitted only with direct current proof; otherwise use
+        // SAIN's own LastKnownPosition. Missing position remains explicit/fail-open.
+        Vector3? enemyPosition = Vector(VanguardOperatorRuntimeAuditReflection.GetPropertyOrField(enemy, "EnemyPosition"));
+        Vector3? lastKnownPosition = Vector(VanguardOperatorRuntimeAuditReflection.GetPropertyOrField(enemy, "LastKnownPosition"))
+            ?? Vector(VanguardOperatorRuntimeAuditReflection.GetPropertyOrField(knownPlaces, "LastKnownPosition"));
+        bool hasDirectPositionProof = visible == true || los == true || canShoot == true;
+        Vector3? threatAnchorPosition = hasDirectPositionProof && enemyPosition.HasValue
+            ? enemyPosition
+            : lastKnownPosition;
+        string threatAnchorSource = hasDirectPositionProof && enemyPosition.HasValue
+            ? "sain_enemy_current_direct"
+            : lastKnownPosition.HasValue
+                ? "sain_enemy_last_known"
+                : "none";
+        string threatAnchorConfidence = hasDirectPositionProof && enemyPosition.HasValue
+            ? "current_direct"
+            : lastKnownPosition.HasValue
+                ? "last_known"
+                : "none";
+
         var classification = ClassifyThreat(hasThreat, visible, los, canShoot, distance, seenAgo, heardAgo, knownAgo, shotMe, shotAtMe, brain);
         return new VanguardThreatDecisionSnapshot
         {
@@ -70,6 +92,9 @@ internal sealed partial class VanguardOperatorDecisionSnapshotBuilder
             TimeSinceKnownUpdated = knownAgo,
             PathLength = Float(VanguardOperatorRuntimeAuditReflection.GetPropertyOrField(path, "PathLength")),
             BotDistanceFromLastKnown = Float(VanguardOperatorRuntimeAuditReflection.GetPropertyOrField(knownPlaces, "BotDistanceFromLastKnown")),
+            ThreatAnchorPosition = threatAnchorPosition,
+            ThreatAnchorSource = threatAnchorSource,
+            ThreatAnchorConfidence = threatAnchorConfidence,
             ShotMeRecently = shotMe,
             ShotAtMeRecently = shotAtMe,
             EnemyAction = Text(VanguardOperatorRuntimeAuditReflection.GetPropertyOrField(status, "VulnerableAction")),

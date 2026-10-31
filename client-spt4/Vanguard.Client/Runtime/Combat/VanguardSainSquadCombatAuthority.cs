@@ -53,6 +53,25 @@ internal static class VanguardSainSquadCombatAuthority
             $"VANGUARD_SAIN_SQUAD_AUTHORITY_RESET reason={Safe(reason)}; cleared={cleared}; cacheSeconds={CacheLifetime.TotalSeconds:0.0}; tag={StatusTag}");
     }
 
+    public static string ForgetRuntimePresence(string? botProfileId, string reason)
+    {
+        string key = string.IsNullOrWhiteSpace(botProfileId) ? string.Empty : botProfileId.Trim();
+        if (key.Length == 0)
+        {
+            return "ignored=missing_bot_profile";
+        }
+
+        bool stateRemoved;
+        bool yieldRemoved;
+        lock (Sync)
+        {
+            stateRemoved = StatesByBotProfileId.Remove(key);
+            yieldRemoved = LayerYieldGrantsByBotProfileId.Remove(key);
+        }
+
+        return $"stateRemoved={(stateRemoved ? "true" : "false")}; layerYieldRemoved={(yieldRemoved ? "true" : "false")}; reason={Safe(reason)}";
+    }
+
     public static bool IsSnapshotAuthority(VanguardSainDecisionSnapshot sain, out string reason)
     {
         reason = "none";

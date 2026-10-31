@@ -1,10 +1,10 @@
 using System.Reflection;
 using System.Runtime.CompilerServices;
 
-// Responsibility: Provides Assembly Info support for the Vanguard client.
-// Flow: The file encapsulates one bounded piece of the subsystem and exchanges explicit inputs/results with neighboring services instead of relying on hidden cross-system state.
-// Authority boundary: Authority remains with the owning subsystem and any external EFT/SPT/Fika/SAIN component explicitly referenced by its call path.
-// Invariant: Behavior stays scoped to the current profile/raid/process contract and preserves existing safety and compatibility boundaries.
+// Responsibility: Publish Vanguard.Client assembly identity, build metadata and test-assembly visibility.
+// Flow: Assembly attributes take version and status values from VanguardBuildVersion and declare InternalsVisibleTo for client tests.
+// Authority boundary: These attributes describe the compiled client assembly; runtime feature ownership stays with the relevant subsystems.
+// Invariant: AssemblyVersion and AssemblyFileVersion continue to use the shared build version contract.
 
 [assembly: AssemblyTitle("Vanguard.Client")]
 [assembly: AssemblyDescription("Vanguard client foundation for SPT/Fika")]

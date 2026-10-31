@@ -2,12 +2,14 @@
 using EFT;
 using UnityEngine;
 
-// Responsibility: Provides Raid Operator Hud Candidate support for the raid Operator HUD.
-// Flow: The file encapsulates one bounded piece of the subsystem and exchanges explicit inputs/results with neighboring services instead of relying on hidden cross-system state.
-// Authority boundary: Authority remains with the owning subsystem and any external EFT/SPT/Fika/SAIN component explicitly referenced by its call path.
-// Invariant: Behavior stays scoped to the current profile/raid/process contract and preserves existing safety and compatibility boundaries.
+// Responsibility: Represent Operator identity and presentation snapshots consumed by the raid HUD.
+// Flow: Carry player identity, health, effects, icons, and world-position inputs to the HUD renderer.
+// Authority boundary: These read models neither own nor decide authoritative raid or Operator state.
+// Invariant: The display signature tracks selected presentation fields, not the complete gameplay state.
+
 namespace Vanguard.Client.Raid.Hud;
 
+/// <summary>Identifies the raid player associated with an Operator without assigning gameplay authority.</summary>
 internal sealed record VanguardRaidOperatorHudIdentity(
     string Key,
     string OperatorId,
@@ -17,6 +19,7 @@ internal sealed record VanguardRaidOperatorHudIdentity(
     string Source,
     IPlayer Player);
 
+/// <summary>HUD display inputs; the signature detects presentation changes, not complete gameplay state.</summary>
 internal sealed record VanguardRaidOperatorHudCandidate(
     string Key,
     string OperatorId,

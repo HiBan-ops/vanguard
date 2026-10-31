@@ -512,6 +512,28 @@ internal static class VanguardRuntimeBindGuardService
         }
 
         string profileId = Normalize(owner.ProfileId);
+        if (VanguardRaidOperatorRuntimeRegistry.TryAuthorizeExplicitRuntimeReplacement(
+                owner,
+                "BotSpawner.OnBotCreated",
+                out var replacementSnapshot,
+                out string replacementReason))
+        {
+            CacheCandidate(owner, "BotSpawner.OnBotCreated:explicit_replacement");
+            VanguardClientDiagnosticsLog.Info(
+                SpawnSyncGuardStatusTag,
+                $"VANGUARD_TYPED_REPLACEMENT_CANDIDATE operator={Safe(replacementSnapshot.OperatorId)}; owner={Safe(replacementSnapshot.OwnerProfileId)}; profile={Safe(profileId)}; source=BotSpawner.OnBotCreated; authorization={Safe(replacementReason)}; action=cache_exact_candidate_for_pending_bind; peerReconnectAuthority=false; tag={SpawnSyncGuardStatusTag}");
+            return;
+        }
+
+        if (!string.Equals(replacementReason, "not_raid_authority", StringComparison.Ordinal)
+            && VanguardRaidOperatorRuntimeRegistry.TryGetRuntimeByBotProfileId(profileId, out var priorRuntime))
+        {
+            VanguardClientDiagnosticsLog.Warning(
+                SpawnSyncGuardStatusTag,
+                $"VANGUARD_TYPED_REPLACEMENT_REJECTED operator={Safe(priorRuntime.OperatorId)}; owner={Safe(priorRuntime.OwnerProfileId)}; profile={Safe(profileId)}; priorIncarnation={priorRuntime.RuntimeIncarnation}; detached={priorRuntime.RuntimeDetachedAtUtc.HasValue}; wasDeadAtDetach={priorRuntime.RuntimeWasDeadAtDetach?.ToString() ?? "unknown"}; cleanupSucceeded={priorRuntime.RuntimeCleanupSucceeded?.ToString() ?? "unknown"}; source=BotSpawner.OnBotCreated; reason={Safe(replacementReason)}; action=no_admission_no_cache; peerReconnectAuthority=false; tag={SpawnSyncGuardStatusTag}");
+            return;
+        }
+
         bool expected = false;
         foreach (var pending in VanguardRaidOperatorRuntimeRegistry.GetPendingRuntimeBindings())
         {
@@ -541,9 +563,14 @@ internal static class VanguardRuntimeBindGuardService
             return;
         }
 
+        VanguardRaidOperatorRuntimeRegistry.CancelExplicitRuntimeReplacementExact(owner, "BotSpawner.OnBotRemoved_before_replacement_bind");
         lock (Sync)
         {
-            CandidateByProfileId.Remove(profileId);
+            if (CandidateByProfileId.TryGetValue(profileId, out CandidateOwner cached)
+                && ReferenceEquals(cached.Owner, owner))
+            {
+                CandidateByProfileId.Remove(profileId);
+            }
         }
     }
 

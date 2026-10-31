@@ -55,6 +55,46 @@ internal static class VanguardCloseCohesionExecutor
             $"VANGUARD_CLOSE_COHESION_RESET reason={Safe(reason)}; active=0; cooldowns=cleared; doctrine=radial_micro_adjust_no_slot_churn; tag={StatusTag}; moveBridgeTag={VanguardReturnMovementCommandStore.StatusTag}");
     }
 
+    public static string ForgetRuntimePresence(string? botProfileId, string reason)
+    {
+        string key = Safe(botProfileId);
+        bool activeRemoved;
+        CloseCohesionLeaseState forgottenLease = default;
+        lock (Sync)
+        {
+            ActiveByBotProfileId.TryGetValue(key, out forgottenLease);
+            activeRemoved = ActiveByBotProfileId.Remove(key);
+            CooldownByBotProfileId.Remove(key);
+            foreach (string logKey in LastLogByKey.Keys.Where(value => value.IndexOf(key, StringComparison.OrdinalIgnoreCase) >= 0).ToArray())
+            {
+                LastLogByKey.Remove(logKey);
+            }
+        }
+
+        if (activeRemoved)
+        {
+            _ = ReleaseCohesionQuiesce(null, key, DateTimeOffset.UtcNow, forgottenLease.LeaseId, forgottenLease.WindowId, "presence_seal:" + reason);
+        }
+        return "closeCohesionForgotten=true;activeRemoved=" + Bool(activeRemoved)
+            + ";cooldownRetained=false;normalFinish=false;reason=" + Safe(reason);
+    }
+
+    internal static bool DrainForHigherAuthority(string botProfileId, DateTimeOffset now, string reason)
+    {
+        string key = Safe(botProfileId);
+        CloseCohesionLeaseState lease;
+        lock (Sync)
+        {
+            if (!ActiveByBotProfileId.TryGetValue(key, out lease))
+            {
+                return false;
+            }
+        }
+
+        FinishLease(lease, now, "Interrupted", "higher_authority:" + Safe(reason), failureCooldown: false, snapshotSignature: "higher_authority");
+        return true;
+    }
+
     public static void Tick()
     {
         DateTimeOffset now = DateTimeOffset.UtcNow;
@@ -68,21 +108,15 @@ internal static class VanguardCloseCohesionExecutor
         {
             bootLogged = true;
             VanguardClientDiagnosticsLog.Info(StatusTag,
-                $"VANGUARD_CLOSE_COHESION_BOOT enabled={Bool(VanguardMovementAuthorityDoctrine.TacticalRepositionActiveEnabled)}; scope=inside_bubble_safe_micro_adjust; slotPolicy=none_radial_lane_preserved; backend=BigBrain_GoToSomePointData; startBand={VanguardMovementAuthorityDoctrine.CloseCohesionStartMinMeters:0.0}-{VanguardMovementAuthorityDoctrine.CloseCohesionStartMaxMeters:0.0}; forceStart={VanguardMovementAuthorityDoctrine.CloseCohesionForceStartMeters:0.0}; targets=indoor_{VanguardMovementAuthorityDoctrine.CloseCohesionIndoorTargetMeters:0.0}_outdoor_{VanguardMovementAuthorityDoctrine.CloseCohesionOutdoorTargetMeters:0.0}; max={VanguardMovementAuthorityDoctrine.CloseCohesionMaxDurationSeconds:0.0}; noProgress={VanguardMovementAuthorityDoctrine.CloseCohesionNoProgressSeconds:0.0}; cooldownSuccess={VanguardMovementAuthorityDoctrine.CloseCohesionSuccessCooldownSeconds:0.0}; cooldownFailure={VanguardMovementAuthorityDoctrine.CloseCohesionFailureCooldownSeconds:0.0}; softProgress=anchor_{VanguardMovementAuthorityDoctrine.CloseCohesionSoftProgressGainMeters:0.00}_owner_{VanguardMovementAuthorityDoctrine.CloseCohesionOwnerProgressGainMeters:0.00}; softCompleteExtra={VanguardMovementAuthorityDoctrine.CloseCohesionSoftCompleteExtraMeters:0.0}; excludes=productiveDirectThreat_stationaryMedical_hardReturn_criticalLoot; orbitPreempt=bounded_soft_drive_if_noncritical; pathPreempt=bounded_if_far; WeakWindowPreempt=true; tag={StatusTag}; Tag={VanguardMovementAuthorityDoctrine.CombatCohesionAuthorityStatusTag}; runtimeTuningTag={RuntimeTuningStatusTag}; moveBridgeTag={VanguardReturnMovementCommandStore.StatusTag}; build={VanguardBuildVersion.BuildLabel}");
+                $"VANGUARD_CLOSE_COHESION_BOOT enabled=player_scoped_owner_profile_id; movementF12Scope=PLAYER_SCOPED; scope=inside_bubble_safe_micro_adjust; slotPolicy=none_radial_lane_preserved; backend=BigBrain_GoToSomePointData; excludes=productiveDirectThreat_stationaryMedical_hardReturn_criticalLoot; WeakWindowPreempt=true; tag={StatusTag}; Tag={VanguardMovementAuthorityDoctrine.CombatCohesionAuthorityStatusTag}; runtimeTuningTag={RuntimeTuningStatusTag}; moveBridgeTag={VanguardReturnMovementCommandStore.StatusTag}; build={VanguardBuildVersion.BuildLabel}");
         }
 
         var snapshots = VanguardOperatorDecisionSnapshotService.GetLatestSnapshots();
         TickActiveLeases(snapshots, now);
-        if (!VanguardMovementAuthorityDoctrine.TacticalRepositionActiveEnabled)
-        {
-            return;
-        }
-
         if (VanguardRuntimeFrameBudgetGuard.ShouldRunOptional(
             "CloseCohesionPlanning",
             now,
-            TimeSpan.FromSeconds(1.0d),
-            out _))
+            TimeSpan.FromSeconds(1.0d)))
         {
             TryStartOneLease(snapshots, now);
         }
@@ -167,6 +201,7 @@ internal static class VanguardCloseCohesionExecutor
                 continue;
             }
 
+            string leaseId = "close_cohesion_" + now.ToUnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture) + "_" + Safe(snapshot.BotProfileId);
             if (NeedsExternalPreempt(snapshot))
             {
                 var preempt = VanguardExternalAuthorityAdapter.RequestOrbitAuthorityQuiesce(
@@ -174,12 +209,14 @@ internal static class VanguardCloseCohesionExecutor
                     snapshot,
                     "close_cohesion_micro_adjust",
                     TimeSpan.FromSeconds(VanguardMovementAuthorityDoctrine.CloseCohesionMaxDurationSeconds + VanguardMovementAuthorityDoctrine.OrbitQuiesceRefreshSeconds + 2.0f),
-                    now);
+                    now,
+                    ownerLeaseId: leaseId, ownerWindowId: windowId);
                 string softDriveReason = "none";
                 if (!preempt.CanDriveMovement && !CanSoftDriveAfterNonCriticalPreempt(snapshot, preempt, out softDriveReason))
                 {
                     SetCooldown(snapshot.BotProfileId, now, VanguardMovementAuthorityDoctrine.CloseCohesionFailureCooldownSeconds);
                     VanguardMainIntentScheduler.FinishPrimaryWindow(snapshot.BotProfileId, now, "Failed", "external_preempt_not_granted:" + preempt.Outcome, preempt.Summary, windowId);
+                    _ = ReleaseCohesionQuiesce(record.BotOwner, snapshot.BotProfileId, now, leaseId, windowId, "external_preempt_not_granted");
                     VanguardClientDiagnosticsLog.Info(StatusTag,
                         $"VANGUARD_CLOSE_COHESION_ABORTED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; reason=external_preempt_not_granted; outcome={preempt.Outcome}; preempt={Safe(preempt.Summary)}; plan={Safe(plan.Summary)}; tag={StatusTag}; runtimeTuningTag={RuntimeTuningStatusTag}");
                     continue;
@@ -192,7 +229,6 @@ internal static class VanguardCloseCohesionExecutor
                 }
             }
 
-            string leaseId = "close_cohesion_" + now.ToUnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture) + "_" + Safe(snapshot.BotProfileId);
             DateTimeOffset maxUntil = now + TimeSpan.FromSeconds(VanguardMovementAuthorityDoctrine.CloseCohesionMaxDurationSeconds);
             bool issued = VanguardReturnMovementCommandStore.Issue(
                 leaseId,
@@ -211,6 +247,7 @@ internal static class VanguardCloseCohesionExecutor
             {
                 SetCooldown(snapshot.BotProfileId, now, VanguardMovementAuthorityDoctrine.CloseCohesionFailureCooldownSeconds);
                 VanguardMainIntentScheduler.FinishPrimaryWindow(snapshot.BotProfileId, now, "Failed", "move_bridge_rejected:" + commandResult, plan.Summary, windowId);
+                _ = ReleaseCohesionQuiesce(record.BotOwner, snapshot.BotProfileId, now, leaseId, windowId, "move_bridge_rejected");
                 VanguardClientDiagnosticsLog.Info(StatusTag,
                     $"VANGUARD_CLOSE_COHESION_ABORTED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; reason=move_bridge_rejected:{Safe(commandResult)}; plan={Safe(plan.Summary)}; tag={StatusTag}");
                 continue;
@@ -223,6 +260,7 @@ internal static class VanguardCloseCohesionExecutor
                 VanguardReturnMovementCommandStore.ClearOwned(snapshot.BotProfileId, leaseId, now, "close_cohesion_command_identity_not_confirmed");
                 SetCooldown(snapshot.BotProfileId, now, VanguardMovementAuthorityDoctrine.CloseCohesionFailureCooldownSeconds);
                 VanguardMainIntentScheduler.FinishPrimaryWindow(snapshot.BotProfileId, now, "Failed", "move_bridge_identity_not_confirmed", plan.Summary, windowId);
+                _ = ReleaseCohesionQuiesce(record.BotOwner, snapshot.BotProfileId, now, leaseId, windowId, "move_bridge_identity_not_confirmed");
                 VanguardClientDiagnosticsLog.Warning(StatusTag,
                     $"VANGUARD_CLOSE_COMMAND_IDENTITY_REJECTED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; lease={Safe(leaseId)}; request={VanguardMovementContractPolicy.CloseCohesionMicroAdjust}; commandResult={Safe(commandResult)}; doctrine=movement_lease_requires_exact_owned_command_generation; tag={VanguardMedicalCohesionStatusTags.MovementLeaseIdentity}; moveBridgeTag={VanguardReturnMovementCommandStore.StatusTag}");
                 continue;
@@ -444,6 +482,12 @@ internal static class VanguardCloseCohesionExecutor
 
     private static string CheckStartGate(OperatorDecisionSnapshot snapshot, CloseCohesionLeaseState? currentLease = null)
     {
+        var ownerPolicy = VanguardMovementAuthorityDoctrine.ForOwner(snapshot.OwnerProfileId);
+        if (!ownerPolicy.TacticalRepositionActiveEnabled)
+        {
+            return "owner_movement_disabled";
+        }
+
         DateTimeOffset now = DateTimeOffset.UtcNow;
         if (VanguardMainIntentScheduler.IsSainCombatExecutionProtected(snapshot.BotProfileId, now, out var combatWindowReason))
         {
@@ -478,7 +522,7 @@ internal static class VanguardCloseCohesionExecutor
 
         if (VanguardMovementAuthorityDoctrine.ShouldPreemptWeakCohesionForHardReturn(snapshot, out var hardReturnReason)
             || snapshot.MovementAuthority.HardOutsideBubble
-            || snapshot.SquadCohesion.OperatorDistanceToOwner >= VanguardMovementAuthorityDoctrine.HardCorrectionMeters)
+            || snapshot.SquadCohesion.OperatorDistanceToOwner >= ownerPolicy.HardCorrectionMeters)
         {
             return "hard_return_higher_priority:" + hardReturnReason;
         }
@@ -523,6 +567,7 @@ internal static class VanguardCloseCohesionExecutor
 
     private static string CheckInterrupt(OperatorDecisionSnapshot snapshot, CloseCohesionLeaseState lease)
     {
+        var ownerPolicy = VanguardMovementAuthorityDoctrine.ForOwner(snapshot.OwnerProfileId);
         string gate = CheckStartGate(snapshot, lease);
         if (string.Equals(gate, "already_close", StringComparison.OrdinalIgnoreCase))
         {
@@ -530,7 +575,7 @@ internal static class VanguardCloseCohesionExecutor
         }
 
         if (string.Equals(gate, "outside_close_cohesion_band", StringComparison.OrdinalIgnoreCase)
-            && snapshot.SquadCohesion.OperatorDistanceToOwner < VanguardMovementAuthorityDoctrine.CombatCohesionForcedCatchupMeters)
+            && snapshot.SquadCohesion.OperatorDistanceToOwner < ownerPolicy.CombatCohesionForcedCatchupMeters)
         {
             return "none";
         }
@@ -545,7 +590,7 @@ internal static class VanguardCloseCohesionExecutor
             return "direct_threat";
         }
 
-        if (snapshot.SquadCohesion.OperatorDistanceToOwner >= VanguardMovementAuthorityDoctrine.CombatCohesionForcedCatchupMeters)
+        if (snapshot.SquadCohesion.OperatorDistanceToOwner >= ownerPolicy.CombatCohesionForcedCatchupMeters)
         {
             return "forced_catchup_preempts_close_cohesion";
         }
@@ -824,6 +869,14 @@ internal static class VanguardCloseCohesionExecutor
         return true;
     }
 
+    private static BotOwner? ResolveRuntimeBotOwner(string botProfileId)
+        => VanguardRaidOperatorRuntimeRegistry.TryGetRuntimeByBotProfileId(botProfileId, out var record)
+            && record.BotOwner != null && !record.BotOwner.IsDead ? record.BotOwner : null;
+
+    private static string ReleaseCohesionQuiesce(BotOwner? botOwner, string botProfileId, DateTimeOffset now, string leaseId, string windowId, string reason)
+        => VanguardExternalAuthorityAdapter.ReleaseCohesionOrbitAuthorityQuiesce(
+            botOwner, botProfileId, now, reason, "CloseCohesion", leaseId, windowId);
+
     private static void FinishLease(CloseCohesionLeaseState lease, DateTimeOffset now, string outcome, string reason, bool failureCooldown, string snapshotSignature)
     {
         lock (Sync)
@@ -837,11 +890,12 @@ internal static class VanguardCloseCohesionExecutor
             : VanguardMovementAuthorityDoctrine.CloseCohesionSuccessCooldownSeconds;
         SetCooldown(lease.BotProfileId, now, cooldownSeconds);
         VanguardMainIntentScheduler.FinishPrimaryWindow(lease.BotProfileId, now, outcome, reason, lease.Summary, lease.WindowId);
+        string externalRelease = ReleaseCohesionQuiesce(ResolveRuntimeBotOwner(lease.BotProfileId), lease.BotProfileId, now, lease.LeaseId, lease.WindowId, "terminal:" + reason);
         string log = string.Equals(outcome, "Completed", StringComparison.OrdinalIgnoreCase)
             ? "VANGUARD_CLOSE_COHESION_COMPLETED"
             : "VANGUARD_CLOSE_COHESION_ABORTED";
         VanguardClientDiagnosticsLog.Info(StatusTag,
-            $"{log} {lease.Summary}; outcome={Safe(outcome)}; reason={Safe(reason)}; snapshot={Safe(snapshotSignature)}; cooldown={cooldownSeconds:0.0}; tag={StatusTag}; moveBridgeTag={VanguardReturnMovementCommandStore.StatusTag}");
+            $"{log} {lease.Summary}; outcome={Safe(outcome)}; reason={Safe(reason)}; snapshot={Safe(snapshotSignature)}; cooldown={cooldownSeconds:0.0}; externalRelease={Safe(externalRelease)}; tag={StatusTag}; moveBridgeTag={VanguardReturnMovementCommandStore.StatusTag}");
     }
 
     private static void SetCooldown(string botProfileId, DateTimeOffset now, float seconds)

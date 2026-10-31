@@ -1,4 +1,4 @@
-#if SPT_CLIENT
+﻿#if SPT_CLIENT
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -14,6 +14,7 @@ using Vanguard.Client.Runtime.Execution;
 using Vanguard.Client.Runtime.External;
 using Vanguard.Client.Runtime.Loot;
 using Vanguard.Client.Runtime.Movement.Brain;
+using Vanguard.Client.Runtime.SquadCohesion;
 
 // Responsibility: Owns the short emergency movement window that gets an Operator away from a live grenade while preserving the rest of combat state.
 // Flow: A validated grenade hazard opens one high-priority movement lease, a safe detour is selected and monitored, and the Operator holds safety until that exact grenade is gone before normal arbitration resumes.
@@ -61,6 +62,41 @@ internal static class VanguardGrenadeEmergencyEvasionService
         VanguardGrenadeEmergencyPhysicalDriver.ResetForRaidLifecycle();
         VanguardClientDiagnosticsLog.Operational(VanguardGrenadeEmergencyPolicy.SafetyContinuityStatusTag, () =>
             $"VANGUARD_GRENADE_EMERGENCY_RESET reason={Safe(reason)}; statesCleared={active.Length}; movementCommandsOwnedOnly=true; tag={VanguardGrenadeEmergencyPolicy.SafetyContinuityStatusTag}; foundationTag={VanguardGrenadeEmergencyPolicy.StatusTag}");
+    }
+
+    public static string ForgetRuntimePresence(VanguardRaidOperatorRuntimeRecord runtime, DateTimeOffset now, string reason)
+    {
+        if (runtime == null || string.IsNullOrWhiteSpace(runtime.BotProfileId))
+        {
+            return "runtime_missing";
+        }
+
+        VanguardGrenadeEmergencyOperatorState? state = GetState(runtime.BotProfileId);
+        string commandCleanup = "none";
+        if (state != null)
+        {
+            commandCleanup = VanguardReturnMovementCommandStore.ClearOwned(
+                runtime.BotProfileId,
+                state.WindowId,
+                state.StartedAtUtc,
+                "runtime_presence_lost:" + reason);
+            RemoveState(runtime.BotProfileId, state.WindowId);
+        }
+
+        // Presence-loss cleanup is not a normal authority hand-back. The BotOwner is leaving the
+        // runtime, so release only Vanguard-owned driver bookkeeping. Never stop the generic EFT mover
+        // here: the native removal/disposal boundary owns destruction of the disappearing physical actor.
+        VanguardGrenadeEmergencyPhysicalDriver.Release(runtime.BotProfileId);
+
+        string summary = "stateRemoved=" + Bool(state != null)
+            + ";commandCleanup=" + Safe(commandCleanup)
+            + ";physicalCleanup=driver_state_released"
+            + ";moverStopped=false"
+            + ";schedulerHandback=false"
+            + ";externalResume=false";
+        VanguardClientDiagnosticsLog.Info(VanguardGrenadeEmergencyPolicy.SafetyContinuityStatusTag,
+            $"VANGUARD_GRENADE_RUNTIME_PRESENCE_FORGOTTEN operator={Safe(runtime.OperatorId)}; botProfile={Safe(runtime.BotProfileId)}; incarnation={runtime.RuntimeIncarnation}; reason={Safe(reason)}; {summary}; tag={VanguardGrenadeEmergencyPolicy.SafetyContinuityStatusTag}");
+        return summary;
     }
 
     public static void Tick(IReadOnlyList<OperatorDecisionSnapshot> snapshots, DateTimeOffset now)
@@ -226,6 +262,11 @@ internal static class VanguardGrenadeEmergencyEvasionService
             return;
         }
 
+        TacticalCoordinationPhysicalDrainResult tcDrain = TacticalCoordinationPhysicalAuthorityBarrier.DrainForHigherAuthority(
+            runtime.BotProfileId,
+            now,
+            "grenade_emergency:" + hazard.GrenadeKey);
+
         if (!VanguardMainIntentScheduler.TryOpenEmergencyGrenadeEvasion(snapshot, hazard, now, out string windowId, out string preemptedSummary, out string openReason))
         {
             VanguardClientDiagnosticsLog.Warning(VanguardGrenadeEmergencyPolicy.SafetyContinuityStatusTag,
@@ -239,7 +280,7 @@ internal static class VanguardGrenadeEmergencyEvasionService
         string lootPreempt = VanguardOpportunisticLootBroker.PreventForVanguardOwnedWindow(runtime.BotOwner!, windowSeconds + 1.0f, "grenade_emergency");
         string medicalPreempt = RequestMedicalCancellation(runtime.BotProfileId, now, hazard);
         VanguardExternalPreemptResult externalPreempt = VanguardExternalAuthorityAdapter.RequestGrenadeEmergencyPreempt(
-            runtime.BotOwner, snapshot, "grenade_emergency", suppressionTtl, now);
+            runtime.BotOwner, snapshot, "grenade_emergency", suppressionTtl, now, windowId);
 
         Vector3 start = runtime.BotOwner!.Position;
         var state = new VanguardGrenadeEmergencyOperatorState
@@ -293,7 +334,7 @@ internal static class VanguardGrenadeEmergencyEvasionService
         VanguardClientDiagnosticsLog.Operational(VanguardGrenadeEmergencyPolicy.FuseProfileTag, () =>
             $"operator={Safe(runtime.OperatorId)}; botProfile={Safe(runtime.BotProfileId)}; grenade={Safe(hazard.GrenadeKey)}; {hazard.FuseProfile.Summary}; safeDistance={hazard.SafeDistance:0.00}; nativeProbe={hazard.NativeProbeSeconds:0.00}; absoluteWindow={windowSeconds:0.00}; tag={VanguardGrenadeEmergencyPolicy.SafetyContinuityStatusTag}");
         VanguardClientDiagnosticsLog.Operational(VanguardGrenadeEmergencyPolicy.ActivityPreemptedTag, () =>
-            $"operator={Safe(runtime.OperatorId)}; botProfile={Safe(runtime.BotProfileId)}; grenade={Safe(hazard.GrenadeKey)}; schedulerPreempt={Safe(preemptedSummary)}; movement={Safe(movementClear)}; medical={Safe(medicalPreempt)}; loot={Safe(lootPreempt)}; external={Safe(externalPreempt.ToString())}; exactPathAuthorityRequested=true; grenadeThrowingPreempt=new_throw_decisions_vetoed_existing_hands_left_to_safe_brain_handoff; tag={VanguardGrenadeEmergencyPolicy.SafetyContinuityStatusTag}");
+            $"operator={Safe(runtime.OperatorId)}; botProfile={Safe(runtime.BotProfileId)}; grenade={Safe(hazard.GrenadeKey)}; tcDrain={Safe(tcDrain.Summary)}; schedulerPreempt={Safe(preemptedSummary)}; movement={Safe(movementClear)}; medical={Safe(medicalPreempt)}; loot={Safe(lootPreempt)}; external={Safe(externalPreempt.ToString())}; exactPathAuthorityRequested=true; tcCleanBeforeEmergencyAcquire=true; grenadeThrowingPreempt=new_throw_decisions_vetoed_existing_hands_left_to_safe_brain_handoff; tag={VanguardGrenadeEmergencyPolicy.SafetyContinuityStatusTag}");
         VanguardClientDiagnosticsLog.Operational(VanguardGrenadeEmergencyPolicy.NativeRequestedTag, () =>
             $"operator={Safe(runtime.OperatorId)}; botProfile={Safe(runtime.BotProfileId)}; window={Safe(windowId)}; grenade={Safe(hazard.GrenadeKey)}; nativeRequested={Bool(nativeRequested)}; nativeSkipped={Bool(skipNative)}; nativeSkippedForFuse={Bool(skipNativeForFuse)}; nativeBypassedForSain={Bool(bypassNativeForSain)}; native={Safe(nativeSummary)}; startEffectiveDistance={hazard.EffectiveDistance:0.00}; actualDistance={hazard.DistanceToGrenade:0.00}; predictedDistance={hazard.DistanceToDangerPoint:0.00}; fallbackIfNoProgress=true; tag={VanguardGrenadeEmergencyPolicy.SafetyContinuityStatusTag}");
 
@@ -538,6 +579,7 @@ internal static class VanguardGrenadeEmergencyEvasionService
 
         VanguardReturnMovementCommandStore.RefreshLeaseWindow(
             runtime.BotProfileId,
+            state.WindowId,
             state.AbsoluteUntilUtc,
             "exact_grenade_window_refresh");
 
@@ -630,10 +672,12 @@ internal static class VanguardGrenadeEmergencyEvasionService
                 state.WindowId,
                 state.StartedAtUtc,
                 "window_recovery:" + failureKind);
-            string physicalCleanup = VanguardGrenadeEmergencyPhysicalDriver.StopAndRelease(
-                runtime.BotOwner,
-                runtime.BotProfileId,
-                "window_recovery:" + failureKind + ":" + failureDetail);
+            string physicalCleanup = IsExactGrenadeWindowCurrent(runtime.BotProfileId, state.WindowId, now)
+                ? VanguardGrenadeEmergencyPhysicalDriver.StopAndRelease(
+                    runtime.BotOwner,
+                    runtime.BotProfileId,
+                    "window_recovery:" + failureKind + ":" + failureDetail)
+                : "stale_window_physical_cleanup_skipped";
             state.Phase = VanguardGrenadeEmergencyPhase.FallbackPlanning;
             state.PhaseStartedAtUtc = now;
             state.LastPlanAtUtc = DateTimeOffset.MinValue;
@@ -655,10 +699,12 @@ internal static class VanguardGrenadeEmergencyEvasionService
             && state.FallbackDestinationKnown)
         {
             state.StickySameAnchorBackendResets++;
-            string physicalCleanup = VanguardGrenadeEmergencyPhysicalDriver.StopAndRelease(
-                runtime.BotOwner,
-                runtime.BotProfileId,
-                "sticky_same_anchor_backend_reset:" + failureKind + ":" + failureDetail);
+            string physicalCleanup = IsExactGrenadeWindowCurrent(runtime.BotProfileId, state.WindowId, now)
+                ? VanguardGrenadeEmergencyPhysicalDriver.StopAndRelease(
+                    runtime.BotOwner,
+                    runtime.BotProfileId,
+                    "sticky_same_anchor_backend_reset:" + failureKind + ":" + failureDetail)
+                : "stale_window_physical_cleanup_skipped";
             if (!TryRetainStickySameAnchorCommand(runtime, state, now, out string commandRecovery))
             {
                 FinishWindowRecoveryAsBackendUnavailable(
@@ -725,6 +771,7 @@ internal static class VanguardGrenadeEmergencyEvasionService
         // the absolute guard, operator death, or a proven backend loss close the emergency window.
         VanguardReturnMovementCommandStore.RefreshLeaseWindow(
             runtime.BotProfileId,
+            state.WindowId,
             state.AbsoluteUntilUtc,
             "sticky_survival_authority");
         state.Phase = VanguardGrenadeEmergencyPhase.FallbackMoving;
@@ -784,6 +831,7 @@ internal static class VanguardGrenadeEmergencyEvasionService
 
         VanguardReturnMovementCommandStore.RefreshLeaseWindow(
             runtime.BotProfileId,
+            state.WindowId,
             state.AbsoluteUntilUtc,
             "sticky_same_anchor_refresh");
         result = "retained_exact_command_same_generation";
@@ -876,7 +924,7 @@ internal static class VanguardGrenadeEmergencyEvasionService
                 state.MovementGeneration = issuedHoldCommand.Generation;
             }
         }
-        VanguardReturnMovementCommandStore.RefreshLeaseWindow(runtime.BotProfileId, state.AbsoluteUntilUtc, "safety_hold");
+        VanguardReturnMovementCommandStore.RefreshLeaseWindow(runtime.BotProfileId, state.WindowId, state.AbsoluteUntilUtc, "safety_hold");
         if (VanguardReturnMovementCommandStore.TryGetExactOwned(runtime.BotProfileId, state.WindowId, VanguardGrenadeEmergencyPolicy.RequestKind, state.MovementGeneration, now, out VanguardReturnMovementCommand holdCommand, out _))
         {
             VanguardGrenadeEmergencyPhysicalDriver.Drive(runtime.BotOwner!, holdCommand, now, "emergency_service_holding", out _);
@@ -979,6 +1027,12 @@ internal static class VanguardGrenadeEmergencyEvasionService
         return "cancellation_requested:lease=" + lease.LeaseId + ":window=" + lease.WindowKind;
     }
 
+    private static bool IsExactGrenadeWindowCurrent(string botProfileId, string windowId, DateTimeOffset now)
+    {
+        return VanguardMainIntentScheduler.TryGetActiveEmergencyWindow(botProfileId, now, out string activeWindow, out _, out _)
+            && string.Equals(activeWindow, windowId, StringComparison.OrdinalIgnoreCase);
+    }
+
     private static void Finish(
         VanguardRaidOperatorRuntimeRecord runtime,
         OperatorDecisionSnapshot? snapshot,
@@ -991,14 +1045,21 @@ internal static class VanguardGrenadeEmergencyEvasionService
     {
         state.Phase = VanguardGrenadeEmergencyPhase.Terminal;
         string movement = VanguardReturnMovementCommandStore.ClearOwned(runtime.BotProfileId, state.WindowId, state.StartedAtUtc, "terminal:" + terminal + ":" + reason);
-        string physicalCleanup = VanguardGrenadeEmergencyPhysicalDriver.StopAndRelease(
-            runtime.BotOwner,
-            runtime.BotProfileId,
-            "terminal:" + terminal + ":" + reason);
-        string externalRelease = VanguardExternalAuthorityAdapter.ReleaseMovementHardReturnPreempt(runtime.BotOwner, runtime.BotProfileId, now, "terminal:" + terminal);
+        // A replaced Grenade window must never stop the mover of its successor.
+        // Driver bookkeeping is only per-profile: do not remove it on a stale callback.
+        bool currentPhysicalOwner = IsExactGrenadeWindowCurrent(runtime.BotProfileId, state.WindowId, now);
+        string physicalCleanup = currentPhysicalOwner
+            ? VanguardGrenadeEmergencyPhysicalDriver.StopAndRelease(
+                runtime.BotOwner,
+                runtime.BotProfileId,
+                "terminal:" + terminal + ":" + reason)
+            : "stale_window_physical_cleanup_skipped";
         string scheduler = finishScheduler
-            ? Bool(VanguardMainIntentScheduler.FinishPrimaryWindow(runtime.BotProfileId, now, outcome, reason, "movement=" + movement + ";physical=" + physicalCleanup + ";external=" + externalRelease, state.WindowId))
+            ? Bool(VanguardMainIntentScheduler.FinishPrimaryWindow(runtime.BotProfileId, now, outcome, reason, "movement=" + movement + ";physical=" + physicalCleanup, state.WindowId))
             : "not_requested";
+        string externalRelease = finishScheduler
+            ? VanguardExternalAuthorityAdapter.ReleaseGrenadeEmergencyPreempt(runtime.BotOwner, runtime.BotProfileId, now, "terminal:" + terminal, state.WindowId)
+            : "deferred_to_scheduler_owner";
 
         if (!state.HostileSourcePropagated
             && snapshot != null

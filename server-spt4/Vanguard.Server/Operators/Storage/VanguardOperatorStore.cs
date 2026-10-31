@@ -30,6 +30,12 @@ public sealed class VanguardOperatorStore
     private const string ExperienceReconciliationBackupFileName = "operators.pre-xp-reconciliation.json";
     private const string VisualIdentityMigrationBackupFileName = "operators.pre-visual-identity-migration.json";
     private const string EnrollmentBaselineMigrationBackupFileName = "operators.pre-enrollment-baseline-v1-migration.json";
+    private const string PopulationLifecycleMigrationJournalFileName = "population-lifecycle-migration-v1.json";
+    private const string PopulationLifecycleOperatorsBackupFileName = "operators.pre-population-lifecycle-v1.json";
+    private const string PopulationLifecycleContractsBackupFileName = "contracts.pre-population-lifecycle-v1.json";
+    private const string PopulationLifecycleActiveServiceBackupFileName = "active-service.pre-population-lifecycle-v1.json";
+    private const string PopulationLifecycleContactsBackupFileName = "contacts.pre-population-lifecycle-v1.json";
+    private const string PopulationLifecycleIdentityRegistryBackupFileName = "identity-registry.pre-population-lifecycle-v1.json";
 
     private static readonly JsonSerializerOptions SerializerOptions = new()
     {
@@ -740,6 +746,155 @@ public sealed class VanguardOperatorStore
     public Task SaveIdentityRegistryAsync(IReadOnlyList<VanguardOperatorIdentityReservation> reservations) =>
         SaveListAsync(GetIdentityRegistryPath(), reservations);
 
+    public bool HasPopulationLifecycleMigrationJournal(string profileId) =>
+        File.Exists(GetPopulationLifecycleMigrationJournalPath(profileId));
+
+    public async Task<VanguardOperatorPopulationLifecycleMigrationJournal?> LoadPopulationLifecycleMigrationJournalAsync(string profileId)
+    {
+        string path = GetPopulationLifecycleMigrationJournalPath(profileId);
+        if (!File.Exists(path)) return null;
+        try
+        {
+            string json = await File.ReadAllTextAsync(path);
+            return JsonSerializer.Deserialize<VanguardOperatorPopulationLifecycleMigrationJournal>(json, SerializerOptions);
+        }
+        catch (Exception exception) when (exception is JsonException or IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
+
+    public Task SavePopulationLifecycleMigrationJournalAsync(string profileId, VanguardOperatorPopulationLifecycleMigrationJournal journal) =>
+        SaveTextAtomicAsync(GetPopulationLifecycleMigrationJournalPath(profileId), JsonSerializer.Serialize(journal, SerializerOptions) + Environment.NewLine);
+
+    public bool HasBillingLedgerQuarantineEvidence(string profileId) =>
+        HasQuarantineEvidence(GetBillingLedgerPath(profileId));
+
+    public bool HasPopulationMigrationEvidenceQuarantine(string profileId) =>
+        HasQuarantineEvidence(GetOperatorsPath(profileId))
+        || HasQuarantineEvidence(GetActiveServicePath(profileId))
+        || HasQuarantineEvidence(GetContactsPath(profileId))
+        || HasQuarantineEvidence(GetMedicalPath(profileId))
+        || HasQuarantineEvidence(GetBillingLedgerPath(profileId))
+        || HasQuarantineEvidence(GetCareerRaidLedgerPath(profileId))
+        || HasQuarantineEvidence(GetIdentityRegistryPath());
+
+    public async Task<VanguardOperatorPopulationLifecycleMigrationWriteResult> CommitPopulationLifecycleMigrationAsync(
+        string profileId,
+        IReadOnlyList<VanguardOperatorProfile> expectedOperators,
+        IReadOnlyList<VanguardOperatorProfile> afterOperators,
+        IReadOnlyList<VanguardOperatorContractOffer> expectedContracts,
+        IReadOnlyList<VanguardOperatorContractOffer> afterContracts,
+        IReadOnlyList<VanguardActiveServiceRecord> expectedActiveService,
+        IReadOnlyList<VanguardActiveServiceRecord> afterActiveService,
+        IReadOnlyList<VanguardOperatorContactRecord> expectedContacts,
+        IReadOnlyList<VanguardOperatorContactRecord> afterContacts,
+        IReadOnlyList<VanguardOperatorIdentityReservation> expectedIdentityRegistry,
+        IReadOnlyList<VanguardOperatorIdentityReservation> afterIdentityRegistry)
+    {
+        string operatorsPath = GetOperatorsPath(profileId);
+        string contractsPath = GetContractsPath(profileId);
+        string activeServicePath = GetActiveServicePath(profileId);
+        string contactsPath = GetContactsPath(profileId);
+        string identityRegistryPath = GetIdentityRegistryPath();
+
+        var paths = new[] { operatorsPath, contractsPath, activeServicePath, contactsPath, identityRegistryPath };
+        var existedBefore = paths.ToDictionary(path => path, File.Exists, StringComparer.OrdinalIgnoreCase);
+        var textBefore = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+        foreach (string path in paths)
+        {
+            textBefore[path] = File.Exists(path) ? await File.ReadAllTextAsync(path) : null;
+        }
+
+        bool backupsPresent = false;
+        try
+        {
+            IReadOnlyList<VanguardOperatorProfile> currentOperators = await LoadListAsync<VanguardOperatorProfile>(operatorsPath);
+            IReadOnlyList<VanguardOperatorContractOffer> currentContracts = await LoadListAsync<VanguardOperatorContractOffer>(contractsPath);
+            IReadOnlyList<VanguardActiveServiceRecord> currentActiveService = await LoadListAsync<VanguardActiveServiceRecord>(activeServicePath);
+            IReadOnlyList<VanguardOperatorContactRecord> currentContacts = await LoadListAsync<VanguardOperatorContactRecord>(contactsPath);
+            IReadOnlyList<VanguardOperatorIdentityReservation> currentIdentityRegistry = await LoadListAsync<VanguardOperatorIdentityReservation>(identityRegistryPath);
+
+            if (!JsonEquivalent(currentOperators, expectedOperators)
+                || !JsonEquivalent(currentContracts, expectedContracts)
+                || !JsonEquivalent(currentActiveService, expectedActiveService)
+                || !JsonEquivalent(currentContacts, expectedContacts)
+                || !JsonEquivalent(currentIdentityRegistry, expectedIdentityRegistry))
+            {
+                return VanguardOperatorPopulationLifecycleMigrationWriteResult.Failed("expected_before_mismatch", false, false);
+            }
+
+            string profileDirectory = GetProfileDirectory(profileId);
+            Directory.CreateDirectory(profileDirectory);
+            await EnsurePermanentJsonBackupAsync(Path.Combine(profileDirectory, PopulationLifecycleOperatorsBackupFileName), expectedOperators);
+            await EnsurePermanentJsonBackupAsync(Path.Combine(profileDirectory, PopulationLifecycleContractsBackupFileName), expectedContracts);
+            await EnsurePermanentJsonBackupAsync(Path.Combine(profileDirectory, PopulationLifecycleActiveServiceBackupFileName), expectedActiveService);
+            await EnsurePermanentJsonBackupAsync(Path.Combine(profileDirectory, PopulationLifecycleContactsBackupFileName), expectedContacts);
+            await EnsurePermanentJsonBackupAsync(Path.Combine(profileDirectory, PopulationLifecycleIdentityRegistryBackupFileName), expectedIdentityRegistry);
+            backupsPresent = true;
+
+            await SaveListAtomicAsync(operatorsPath, afterOperators);
+            await SaveListAtomicAsync(contractsPath, afterContracts);
+            await SaveListAtomicAsync(activeServicePath, afterActiveService);
+            await SaveListAtomicAsync(contactsPath, afterContacts);
+            await SaveListAtomicAsync(identityRegistryPath, afterIdentityRegistry);
+
+            bool readBackVerified = JsonEquivalent(await LoadListAsync<VanguardOperatorProfile>(operatorsPath), afterOperators)
+                && JsonEquivalent(await LoadListAsync<VanguardOperatorContractOffer>(contractsPath), afterContracts)
+                && JsonEquivalent(await LoadListAsync<VanguardActiveServiceRecord>(activeServicePath), afterActiveService)
+                && JsonEquivalent(await LoadListAsync<VanguardOperatorContactRecord>(contactsPath), afterContacts)
+                && JsonEquivalent(await LoadListAsync<VanguardOperatorIdentityReservation>(identityRegistryPath), afterIdentityRegistry);
+
+            if (!readBackVerified)
+            {
+                bool rolledBack = await RestorePopulationLifecycleSnapshotsAsync(paths, existedBefore, textBefore);
+                return VanguardOperatorPopulationLifecycleMigrationWriteResult.Failed("readback_mismatch", backupsPresent, rolledBack);
+            }
+
+            return new VanguardOperatorPopulationLifecycleMigrationWriteResult(
+                true, "committed_readback_verified", true, true, true, true, true, true, false);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException)
+        {
+            bool rolledBack = await RestorePopulationLifecycleSnapshotsAsync(paths, existedBefore, textBefore);
+            return VanguardOperatorPopulationLifecycleMigrationWriteResult.Failed("exception_" + exception.GetType().Name, backupsPresent, rolledBack);
+        }
+    }
+
+    private static async Task EnsurePermanentJsonBackupAsync<T>(string path, IReadOnlyList<T> values)
+    {
+        if (File.Exists(path)) return;
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        await SaveTextAtomicAsync(path, JsonSerializer.Serialize(values, SerializerOptions) + Environment.NewLine);
+    }
+
+    private static async Task<bool> RestorePopulationLifecycleSnapshotsAsync(
+        IEnumerable<string> paths,
+        IReadOnlyDictionary<string, bool> existedBefore,
+        IReadOnlyDictionary<string, string?> textBefore)
+    {
+        bool success = true;
+        foreach (string path in paths)
+        {
+            try
+            {
+                if (existedBefore.TryGetValue(path, out bool existed) && existed)
+                {
+                    await SaveTextAtomicAsync(path, textBefore[path] ?? string.Empty);
+                }
+                else if (File.Exists(path))
+                {
+                    File.Delete(path);
+                }
+            }
+            catch
+            {
+                success = false;
+            }
+        }
+        return success;
+    }
+
     public bool HasProfileNormalizationBackup(string profileId) =>
         File.Exists(Path.Combine(GetProfileDirectory(profileId), ProfileNormalizationBackupFileName))
         || HasLegacyBackupMatching(profileId, "operators.pre-*.json", "xp-reconciliation");
@@ -1325,8 +1480,19 @@ public sealed class VanguardOperatorStore
         return safeOperatorId;
     }
 
-    private static string NormalizeProfileId(string profileId) =>
-        string.IsNullOrWhiteSpace(profileId) ? "unknown-profile" : profileId.Trim();
+    private static string NormalizeProfileId(string profileId)
+    {
+        string normalized = string.IsNullOrWhiteSpace(profileId) ? "unknown-profile" : profileId.Trim();
+        // A storage owner is one directory segment, never a caller-supplied path.
+        // Keep existing valid identifiers unchanged, including the legacy fallback.
+        if (normalized is "." or ".."
+            || normalized.Contains('/') || normalized.Contains('\\') || normalized.Contains(':'))
+        {
+            throw new ArgumentException("The storage profile ID must be a single directory name.", nameof(profileId));
+        }
+
+        return normalized;
+    }
 
     private static string ResolveDefaultRootDirectory()
     {
@@ -1429,8 +1595,37 @@ public sealed class VanguardOperatorStore
     private string GetCareerRaidLedgerPath(string profileId) => Path.Combine(GetProfileDirectory(profileId), CareerRaidLedgerFileName);
 
     private string GetBillingLedgerPath(string profileId) => Path.Combine(GetProfileDirectory(profileId), BillingLedgerFileName);
+
+    private string GetPopulationLifecycleMigrationJournalPath(string profileId) =>
+        Path.Combine(GetProfileDirectory(profileId), PopulationLifecycleMigrationJournalFileName);
 }
 
+
+public sealed record VanguardOperatorPopulationLifecycleMigrationJournal(
+    int PolicyVersion,
+    DateTimeOffset CompletedAtUtc,
+    int BeforeWorldPopulation,
+    int AfterWorldPopulation,
+    int PurgedNeverHired,
+    int PreservedEverHired,
+    int PreservedAmbiguous,
+    int MigratedSyntheticCallsigns,
+    string ResultFingerprint);
+
+public sealed record VanguardOperatorPopulationLifecycleMigrationWriteResult(
+    bool Success,
+    string Reason,
+    bool OperatorsPermanentBackupPresent,
+    bool ContractsPermanentBackupPresent,
+    bool ActiveServicePermanentBackupPresent,
+    bool ContactsPermanentBackupPresent,
+    bool IdentityRegistryPermanentBackupPresent,
+    bool ReadBackVerified,
+    bool RolledBack)
+{
+    public static VanguardOperatorPopulationLifecycleMigrationWriteResult Failed(string reason, bool backupsPresent, bool rolledBack) =>
+        new(false, reason, backupsPresent, backupsPresent, backupsPresent, backupsPresent, backupsPresent, false, rolledBack);
+}
 
 public sealed record VanguardOperatorExperienceReconciliationWriteResult(
     bool Success,

@@ -1,9 +1,9 @@
 #if SPT_CLIENT
 
-// Responsibility: Provides Awareness Stimulus Kind support for the combat-awareness runtime.
-// Flow: The file encapsulates one bounded piece of the subsystem and exchanges explicit inputs/results with neighboring services instead of relying on hidden cross-system state.
-// Authority boundary: Authority remains with the owning subsystem and any external EFT/SPT/Fika/SAIN component explicitly referenced by its call path.
-// Invariant: Behavior stays scoped to the current profile/raid/process contract and preserves existing safety and compatibility boundaries.
+// Responsibility: Define the discriminants used to classify Operator combat-awareness stimuli.
+// Flow: Carry distinct enum values for threats, incoming fire, visibility, stale contacts, death and scanner availability.
+// Authority boundary: This enum is shared vocabulary for awareness consumers and owns no threat detection or combat decisions.
+// Invariant: Existing numeric values remain stable for producers and consumers of awareness snapshots.
 namespace Vanguard.Client.Runtime.Awareness;
 
 internal enum VanguardAwarenessStimulusKind

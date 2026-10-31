@@ -11,7 +11,8 @@ namespace Vanguard.Client.Runtime.SquadCohesion;
 internal static class VanguardSquadCohesionDoctrine
 {
     public const string StatusTag = "VANGUARD_COHESION_READONLY_OK";
-    public static float TacticalBubbleRadiusMeters => VanguardMovementAuthorityDoctrine.TacticalBubbleMeters;
+    public static float TacticalBubbleRadiusMeters => VanguardMovementAuthorityDoctrine.DefaultTacticalBubbleMeters;
+    public static float TacticalBubbleRadiusMetersForOwner(string? ownerProfileId) => VanguardMovementAuthorityDoctrine.ForOwner(ownerProfileId).TacticalBubbleMeters;
     public const float CoreBandMeters = 12f;
     public const float InnerBandMeters = 35f;
     public const float RearGuardArcDegrees = 55f;
@@ -20,7 +21,7 @@ internal static class VanguardSquadCohesionDoctrine
     public const float UsefulStationarySpeed = 0.15f;
     public const int MaxRearGuards = 1;
 
-    public static string BubbleBand(float distance)
+    public static string BubbleBand(float distance, float tacticalBubbleRadiusMeters)
     {
         if (distance <= CoreBandMeters)
         {
@@ -32,7 +33,7 @@ internal static class VanguardSquadCohesionDoctrine
             return "inner";
         }
 
-        if (distance <= TacticalBubbleRadiusMeters)
+        if (distance <= tacticalBubbleRadiusMeters)
         {
             return "extended";
         }

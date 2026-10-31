@@ -3,10 +3,10 @@ using System;
 using System.Collections.Generic;
 using Vanguard.Client.Runtime.Decision;
 
-// Responsibility: Provides Awareness Intent Producer support for the intent production pipeline.
-// Flow: The file encapsulates one bounded piece of the subsystem and exchanges explicit inputs/results with neighboring services instead of relying on hidden cross-system state.
-// Authority boundary: Authority remains with the owning subsystem and any external EFT/SPT/Fika/SAIN component explicitly referenced by its call path.
-// Invariant: Behavior stays scoped to the current profile/raid/process contract and preserves existing safety and compatibility boundaries.
+// Responsibility: Translate awareness snapshot evaluations into read-only candidate intents.
+// Flow: Evaluate confirmed threats, formation release, propagation, orientation and formation retention in descending priority.
+// Authority boundary: Awareness scores propose decisions; SAIN target promotion and combat execution remain outside this producer.
+// Invariant: Disabled awareness or a dead Operator emits no candidate, and emitted candidates carry read-only gate identities.
 namespace Vanguard.Client.Runtime.Intents;
 
 internal sealed class VanguardAwarenessIntentProducer : IVanguardIntentProducer

@@ -33,6 +33,20 @@ internal static class VanguardInteriorSecurityOrientationExecutor
             $"VANGUARD_INTERIOR_ORIENTATION_RESET reason={Safe(reason)}; state=cleared; tag={VanguardPrimaryExecutionContract.InteriorVolumeSecurityStatusTag}; legacyTag={VanguardPrimaryExecutionContract.InteriorCoverageStatusTag}");
     }
 
+    public static void ForgetRuntimePresence(string? botProfileId)
+    {
+        string key = string.IsNullOrWhiteSpace(botProfileId) ? string.Empty : botProfileId.Trim();
+        if (string.IsNullOrWhiteSpace(key))
+        {
+            return;
+        }
+
+        lock (Sync)
+        {
+            LastApplyAtByBot.Remove(key);
+        }
+    }
+
     public static void Tick()
     {
         DateTimeOffset now = DateTimeOffset.UtcNow;

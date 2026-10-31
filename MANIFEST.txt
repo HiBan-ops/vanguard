@@ -1,16 +1,23 @@
-﻿Vanguard 0.8.1 hotfix source manifest
-Public predecessor: Vanguard 0.8.0
-Functional source base: Vanguard 0.8.0
-Current status: 0.8.1 hotfix line derived directly from public 0.8.0; persistent Operator lifecycle, cumulative schema/marker migration, native Squad Preview, Vanilla/Menu Overhaul hosts, unavailable-state presentation, startup health checks and historical 0.7.8/0.7.9 migration qualification remain inherited. HF-080-001 adds Hideout lifecycle suppression for Squad Preview.
+Vanguard 0.8.7 — public source manifest
+Target SPT: 4.0.13
+License: Mozilla Public License 2.0 (MPL-2.0)
+Repository: https://github.com/HiBan-ops/vanguard
+
+Build identity:
+- The semantic runtime version is defined in build/Vanguard.Version.props.
+- The build label may retain an engineering-line identifier; it is not the public release version.
+- Final public binaries must be built from the matching clean source snapshot and independently verified by SHA-256.
 
 Core source contracts:
-- persistent Operator world identity remains independent from transient contract offers and ActiveService membership
-- migration is driven by persisted schema/markers, supports cumulative convergence from supported historical 0.7.x states, and fails closed on unsupported/newer/conflicting shapes
-- renderer projection is read-only and uses persistent VisualIdentity/equipment truth without becoming a second gameplay authority
-- Vanilla and Menu Overhaul preview hosts share the same reconciler while preserving external host ownership boundaries
-- raid/Fika materialization consumes the same persistent Operator identity, progression, medical and equipment truth
-- release/rehire remains non-destructive and preserves the same Operator person/profile/history
-- startup health checks use isolated/sandbox verification and never mutate production data
+- Persistent Operator world identity is independent of transient contract offers and ActiveService membership.
+- Cumulative migration is driven by persisted schema and markers; unsupported states fail closed.
+- Main-menu squad presentation is read-only and does not create a second gameplay authority.
+- Standalone, Fika Host and Fika Headless consume the same persistent Operator identity and data contracts.
+- Off-Raid Operator sessions have explicit entry and exit boundaries and preserve player-profile isolation.
+- SAIN owns combat movement and individual combat decisions; Vanguard arbitrates compatible squad-level capabilities.
+- Tactical Authoring automatically admits available HOLD slots on owner entry into a saved zone, and releases them on exit.
+- Grenade safety, medical care and admissible looting may interrupt out-of-combat positioning under their own rules.
+- Loot excursions can restore the applicable HOLD when the owner remains in the zone; otherwise Cohesion resumes.
 
 Canonical source roots:
 - client-spt4/Vanguard.Client
@@ -19,17 +26,55 @@ Canonical source roots:
 - build/Vanguard.Version.props
 
 Repository documentation/configuration:
-- README.md
+- README.md (build prerequisites and commands for all three shipping projects)
 - LICENSE
 - MANIFEST.txt
 - .gitignore
 - client-spt4/Directory.Build.props.example
 
-Local-only file:
-- client-spt4/Directory.Build.props (developer machine paths; do not publish)
+Source build boundary:
+- Client: Release/netstandard2.1; Server: Release/net9.0; MoreBotsPrePatch: Release/netstandard2.1.
+- Client and pre-patch resolve proprietary/game and integration assemblies from an independently installed local SPT/dependency stack.
+- Do not publish the machine-specific client-spt4/Directory.Build.props or local game/dependency binaries.
+- A local compilation is not a runtime qualification or a release reproducibility proof.
 
-Policy:
-- public 0.8.0 functionality is inherited semantically by 0.8.1; HF-080-001 is the maintenance delta
-- current public 0.8.0 lifecycle/enrollment/VisualIdentity architecture remains authoritative for unchanged hotfix surfaces
-- historical development evidence remains outside the active/public source tree
-- local development pipeline and knowledge base are not part of the public source repository
+Local-only file excluded from public distribution:
+- client-spt4/Directory.Build.props (contains developer-machine build paths)
+
+Expected binary archive entries relative to the ZIP root (no versioned wrapper directory):
+- BepInEx/plugins/Vanguard.Client/Vanguard.Client.dll
+- BepInEx/patchers/Vanguard.MoreBotsPrePatch/Vanguard.MoreBotsPrePatch.dll
+- SPT/user/mods/Vanguard.Server/Vanguard.Server.dll
+- LICENSE and SOURCE.md
+
+Embedded artwork — exact file inventory (publication gate):
+- 14 Operator role portraits (JPEG), embedded through the client project glob.
+- 2 interface images (PNG), embedded with explicit logical names.
+- Each entry below identifies a source asset by SHA-256 and repository-relative path.
+- Rights holder, authorship, asset-specific license, required attribution and redistribution permissions: NOT YET EVIDENCED by the source materials reviewed.
+- These hashes do not constitute licensing evidence. Do not infer permission to publish, bundle or redistribute from inclusion in the source tree or MPL-2.0 licensing of Vanguard code.
+- Before public release, document and verify the applicable permission and attribution for each of the 16 exact assets, or replace it with a demonstrably licensed equivalent through a separately authorized change.
+SHA-256 (asset) | repository-relative path:
+- 720E6F0BBDDF8D04A17BB13F1C9837FED8533CD186AED90577E2B6E47B53867B | client-spt4/Vanguard.Client/Assets/Operators/Portraits/Role/vanguard_operator_assault_bear_01.jpg
+- 40B1F1E44F31CF336BDEF0988ED86760BED503E0CAA4438B6063C8D064839847 | client-spt4/Vanguard.Client/Assets/Operators/Portraits/Role/vanguard_operator_assault_usec_01.jpg
+- 89B8F67C6FCE73A90EE0AF177D0FE7FB369C694DE8A30F086292F5078335D7B1 | client-spt4/Vanguard.Client/Assets/Operators/Portraits/Role/vanguard_operator_breacher_bear_01.jpg
+- 8759A8F37FD8C10CEA06174C6AD2B7DAB1852685C4C148D03FE0CEBB66C7C939 | client-spt4/Vanguard.Client/Assets/Operators/Portraits/Role/vanguard_operator_breacher_usec_01.jpg
+- CDB61554E23464902E5676CCA9A9C8A35EFA4D68B22F9E524472206064AB0CAF | client-spt4/Vanguard.Client/Assets/Operators/Portraits/Role/vanguard_operator_marksman_bear_01.jpg
+- 9B815971E3BD249436FF3A5929FA364E7F83874416747863B61A80F4449ECB59 | client-spt4/Vanguard.Client/Assets/Operators/Portraits/Role/vanguard_operator_marksman_usec_01.jpg
+- 4DA04B3575B2B58534329F8DECC0D1BF2FB41C3A991B18DEF131EE1B2EE103CE | client-spt4/Vanguard.Client/Assets/Operators/Portraits/Role/vanguard_operator_medic_bear_01.jpg
+- 6706BD221B2F81107E58987EBB706A961F16A5DF88D10AB9A830D412584DC992 | client-spt4/Vanguard.Client/Assets/Operators/Portraits/Role/vanguard_operator_medic_usec_01.jpg
+- DD3D6B324B48F1B6B0AD570436AA971569A48F047003A2AF7479092DC644297B | client-spt4/Vanguard.Client/Assets/Operators/Portraits/Role/vanguard_operator_recon_bear_01.jpg
+- 46E62AD685BE9A0AC682C13FFDC9AB2499C79294BA7514BBF506CF7C5FE8825A | client-spt4/Vanguard.Client/Assets/Operators/Portraits/Role/vanguard_operator_recon_usec_01.jpg
+- 245267C1B77B8567109BC7BEF401CBB6769E09561A4D759175D56F3C1DC5EF19 | client-spt4/Vanguard.Client/Assets/Operators/Portraits/Role/vanguard_operator_support_bear_01.jpg
+- 086FE05DA5415610607550CC702C20FB847DAC7B22864EDDABD85F85A877260E | client-spt4/Vanguard.Client/Assets/Operators/Portraits/Role/vanguard_operator_support_usec_01.jpg
+- 320F394C786A580E7C3CC3F0A6B31081642DEED3D7166624FD74D9A01344A7DF | client-spt4/Vanguard.Client/Assets/Operators/Portraits/Role/vanguard_operator_veteran_bear_01.jpg
+- 04F7ECC462486D4D0E1AF403BA8AB8393E14801DB247E9A88FF09CA9349F8087 | client-spt4/Vanguard.Client/Assets/Operators/Portraits/Role/vanguard_operator_veteran_usec_01.jpg
+- 470651D41F03B18E6253B279AE5B6F9B4A429BF1E16C1E8F73418568763A70FF | client-spt4/Vanguard.Client/UI/OffRaid/Assets/vanguard_menu_icon_mask.png
+- 8B15C74D85B1AE904ABE1C6CCF92D56FBAB6D39B77DC301D85ABE129C677C567 | client-spt4/Vanguard.Client/UI/OffRaid/Assets/vanguard_offraid_command_surface.png
+
+Release publication prerequisites:
+- Runtime semantic identity 0.8.7 and clean source comments.
+- All three assemblies rebuilt and source-contract validation passed.
+- Public binary and source packages from a frozen matching snapshot, with SHA-256 and license.
+- Version, dependencies and installation paths verified against shipping package.
+- Embedded portrait and interface asset provenance/redistribution permissions separately checked.

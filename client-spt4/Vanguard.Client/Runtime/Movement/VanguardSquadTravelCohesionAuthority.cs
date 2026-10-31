@@ -5,10 +5,10 @@ using System.Globalization;
 using System.Linq;
 using Vanguard.Client.Diagnostics;
 
-// Responsibility: Provides Squad Travel Cohesion Authority support for the movement/cohesion runtime.
-// Flow: The file encapsulates one bounded piece of the subsystem and exchanges explicit inputs/results with neighboring services instead of relying on hidden cross-system state.
-// Authority boundary: Authority remains with the owning subsystem and any external EFT/SPT/Fika/SAIN component explicitly referenced by its call path.
-// Invariant: Behavior stays scoped to the current profile/raid/process contract and preserves existing safety and compatibility boundaries.
+// Responsibility: Track short post-return and travel cohesion holds to prevent repeated return/release oscillation.
+// Flow: Record bounded per-Operator hold windows, query active holds, clear them or expire them during ticks.
+// Authority boundary: This hold memory informs TravelCohesion arbitration and does not itself take movement authority.
+// Invariant: Hold records are time-bounded and keyed by the Operator bot profile; expired records cease to authorize follow-through.
 namespace Vanguard.Client.Runtime.Movement;
 
 /// <summary>

@@ -3,10 +3,10 @@ using System.Collections.Generic;
 using EFT;
 using Vanguard.Client.Raid.Interop;
 
-// Responsibility: Provides Operator Bots Group support for the raid-runtime state.
-// Flow: The file encapsulates one bounded piece of the subsystem and exchanges explicit inputs/results with neighboring services instead of relying on hidden cross-system state.
-// Authority boundary: Authority remains with the owning subsystem and any external EFT/SPT/Fika/SAIN component explicitly referenced by its call path.
-// Invariant: Behavior stays scoped to the current profile/raid/process contract and preserves existing safety and compatibility boundaries.
+// Responsibility: Associate an EFT BotsGroup for Vanguard Operators with its player owner.
+// Flow: Construct the group, retain the owner profile ID, update ally/enemy relations through EFT reflection, and align the side.
+// Authority boundary: EFT BotsGroup owns group relations; this subclass initializes the Operator-to-player association.
+// Invariant: The owner identity is retained and the player is requested as an ally without assuming optional method signatures.
 namespace Vanguard.Client.Raid.Runtime;
 
 internal sealed class VanguardOperatorBotsGroup : BotsGroup

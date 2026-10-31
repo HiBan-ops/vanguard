@@ -1,8 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project>
   <PropertyGroup>
-    <VanguardVersion>0.8.1</VanguardVersion>
-    <VanguardBuildLabel>vanguard-0-8-1</VanguardBuildLabel>
+    <!-- Numeric runtime version is consumed by BepInEx/SPT metadata.
+         DevelopmentLine and BuildLabel preserve internal build-line compatibility. -->
+    <VanguardVersion>0.8.7</VanguardVersion>
+    <VanguardDevelopmentLine>0.8.x</VanguardDevelopmentLine>
+    <VanguardBuildLabel>vanguard-0-8-x</VanguardBuildLabel>
     <VanguardBuildVersionGeneratedDir>$(BaseIntermediateOutputPath)$(Configuration)\$(TargetFramework)\</VanguardBuildVersionGeneratedDir>
     <VanguardBuildVersionGeneratedFile>$(VanguardBuildVersionGeneratedDir)VanguardBuildVersion.g.cs</VanguardBuildVersionGeneratedFile>
   </PropertyGroup>
@@ -14,6 +17,7 @@
     <VanguardBuildVersionLines Include="    public static class VanguardBuildVersion" />
     <VanguardBuildVersionLines Include="    {" />
     <VanguardBuildVersionLines Include="        public const string Value = &quot;$(VanguardVersion)&quot;%3B" />
+    <VanguardBuildVersionLines Include="        public const string DevelopmentLine = &quot;$(VanguardDevelopmentLine)&quot;%3B" />
     <VanguardBuildVersionLines Include="        public const string AssemblyValue = &quot;$(VanguardVersion).0&quot;%3B" />
     <VanguardBuildVersionLines Include="        public const string BuildLabel = &quot;$(VanguardBuildLabel)&quot;%3B" />
     <VanguardBuildVersionLines Include="        public const string ArmamentDeficitSquadPriorityStatusTag = &quot;VANGUARD_ARMAMENT_DEFICIT_SQUAD_PRIORITY_STATUS&quot;%3B" />

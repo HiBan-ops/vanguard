@@ -55,6 +55,40 @@ internal static class VanguardReturnMovementCommandStore
             $"VANGUARD_MOVE_BRIDGE_RESET reason={Safe(reason)}; bridge=bigbrain_layer; commandStore=cleared; backend=terminal_GoToSomePoint_or_continuous_direct_GoToPoint; singleAuthority=true; continuousTag={VanguardContinuousCohesionLocomotionPolicy.StatusTag}; tag={StatusTag}; goToSomePointTag={GoToSomePointStatusTag}");
     }
 
+    /// <summary>
+    /// Definitive runtime-presence cleanup. Removes every executable/profile feedback artifact for the
+    /// disappearing BotOwner, but deliberately preserves LastGenerationByProfileId so a later incarnation
+    /// of the same profile cannot alias delayed feedback from an older command generation.
+    /// </summary>
+    public static string ForgetRuntimePresence(string? botProfileId, string reason)
+    {
+        string key = string.IsNullOrWhiteSpace(botProfileId) ? string.Empty : botProfileId.Trim();
+        if (string.IsNullOrWhiteSpace(key))
+        {
+            return "missing_identity";
+        }
+
+        bool commandRemoved;
+        bool pathInvalidRemoved;
+        bool backendFailureRemoved;
+        long preservedGeneration;
+        lock (Sync)
+        {
+            commandRemoved = CommandsByProfileId.Remove(key);
+            pathInvalidRemoved = PathInvalidByProfileId.Remove(key);
+            backendFailureRemoved = PhysicalBackendFailureByProfileId.Remove(key);
+            LastGenerationByProfileId.TryGetValue(key, out preservedGeneration);
+        }
+
+        string summary = "commandRemoved=" + Bool(commandRemoved)
+            + ";pathInvalidRemoved=" + Bool(pathInvalidRemoved)
+            + ";backendFailureRemoved=" + Bool(backendFailureRemoved)
+            + ";generationPreserved=" + preservedGeneration.ToString(CultureInfo.InvariantCulture);
+        VanguardClientDiagnosticsLog.Info(StatusTag,
+            $"VANGUARD_MOVE_BRIDGE_RUNTIME_PRESENCE_FORGOTTEN botProfile={Safe(key)}; reason={Safe(reason)}; {summary}; staleCommandResume=false; generationCounterReset=false; doctrine=profile_generation_remains_monotonic_across_runtime_incarnations; tag={StatusTag}");
+        return summary;
+    }
+
     public static bool Issue(
         string leaseId,
         string operatorId,
@@ -190,9 +224,11 @@ internal static class VanguardReturnMovementCommandStore
         result = $"bigbrain_command_stored;generation={command.Generation.ToString(CultureInfo.InvariantCulture)};expires={(expiresAtUtc - now).TotalSeconds:0.00}";
         string backend = IsGrenadeEmergencyRequest(command.RequestKind)
             ? "shared_emergency_physical_driver_direct_GoToPoint"
-            : VanguardContinuousCohesionLocomotionPolicy.IsContinuousTravelRequest(command.RequestKind)
-                ? "direct_GoToPoint_slowAtEnd_false"
-                : "GoToSomePointData_terminal";
+            : VanguardContinuousCohesionLocomotionPolicy.IsTacticalCoordinatorSainPathRequest(command.RequestKind)
+                ? "SAIN_BotPathDataManual_tc_destination"
+                : VanguardContinuousCohesionLocomotionPolicy.IsContinuousTravelRequest(command.RequestKind)
+                    ? "direct_GoToPoint_slowAtEnd_false"
+                    : "GoToSomePointData_terminal";
         VanguardClientDiagnosticsLog.Operational(StatusTag, () =>
             $"VANGUARD_MOVE_BRIDGE_COMMAND_ACCEPTED lease={Safe(command.LeaseId)}; operator={Safe(command.OperatorId)}; botProfile={Safe(command.BotProfileId)}; request={Safe(command.RequestKind)}; generation={command.Generation}; anchorRadius={command.AnchorRadiusMeters:0.00}; pathDist={pathDistanceMeters:0.00}; sprint={Bool(sprint)}; expiresIn={(expiresAtUtc - now).TotalSeconds:0.00}; backend={backend}; fullCommandPayload=false; pathPayload=false; continuousTag={VanguardContinuousCohesionLocomotionPolicy.StatusTag}; Tag={VanguardMovementAuthorityDoctrine.MovementCommandQueueStatusTag}; tag={StatusTag}");
         VanguardClientDiagnosticsLog.Trace(StatusTag, () =>
@@ -407,9 +443,10 @@ internal static class VanguardReturnMovementCommandStore
                 return false;
             }
 
-            if (VanguardContinuousCohesionLocomotionPolicy.IsContinuousTravelRequest(command.RequestKind))
+            if (VanguardContinuousCohesionLocomotionPolicy.IsContinuousTravelRequest(command.RequestKind)
+                || VanguardContinuousCohesionLocomotionPolicy.IsTacticalCoordinatorSainPathRequest(command.RequestKind))
             {
-                result = "continuous_travel_restart_forbidden";
+                result = "continuous_or_tc_alt_develop_restart_forbidden"; // Legacy diagnostic token retained for AltDevelop contract compatibility; DirectCommit shares the same no-restart rule.
                 return false;
             }
 
@@ -428,6 +465,30 @@ internal static class VanguardReturnMovementCommandStore
         VanguardClientDiagnosticsLog.Info(VanguardPrimaryExecutionContract.PhysicalMovementProgressStatusTag,
             $"VANGUARD_MOVE_COMMAND_PHYSICAL_RESTART {command.Summary}; reason={Safe(reason)}; sameLease=true; newGeneration=true; boundedOnceByExecutor=true; doctrine=world_delta_not_animation_speed_proves_progress; tag={VanguardPrimaryExecutionContract.PhysicalMovementProgressStatusTag}; moveBridgeTag={StatusTag}");
         return true;
+    }
+
+    // Read-only HardReturn snapshot: unlike TryGetActive, this does not evict expired commands.
+    // It deliberately accepts only the existing HardReturn lease namespace.
+    internal static bool TryPeekHardReturnForNativeTickObservation(
+        string botProfileId, DateTimeOffset now, out VanguardReturnMovementCommand command)
+    {
+        command = VanguardReturnMovementCommand.Empty;
+        if (string.IsNullOrWhiteSpace(botProfileId))
+        {
+            return false;
+        }
+        lock (Sync)
+        {
+            if (!CommandsByProfileId.TryGetValue(botProfileId, out VanguardReturnMovementCommand existing)
+                || existing.ExpiresAtUtc <= now
+                || string.IsNullOrEmpty(existing.LeaseId)
+                || !existing.LeaseId.StartsWith("return_bridge_", StringComparison.Ordinal))
+            {
+                return false;
+            }
+            command = existing; // value-type snapshot, no store mutation.
+            return true;
+        }
     }
 
     public static bool TryGetActive(string botProfileId, DateTimeOffset now, out VanguardReturnMovementCommand command)
@@ -499,19 +560,93 @@ internal static class VanguardReturnMovementCommandStore
         return TryGetActive(botProfileId, DateTimeOffset.UtcNow, out _);
     }
 
-    public static void RefreshLeaseWindow(string botProfileId, DateTimeOffset expiresAtUtc, string reason)
+    public static bool TryYieldSupersedableForTacticalCoordinatorSearchHandoff(
+        string botProfileId,
+        DateTimeOffset now,
+        out string previousLeaseId,
+        out string previousRequestKind,
+        out string result)
     {
+        previousLeaseId = "none";
+        previousRequestKind = "none";
+        result = "none";
+        if (string.IsNullOrWhiteSpace(botProfileId))
+        {
+            result = "missing_bot_profile";
+            return false;
+        }
+
+        VanguardReturnMovementCommand command = VanguardReturnMovementCommand.Empty;
+        bool removed = false;
         lock (Sync)
         {
-            if (CommandsByProfileId.TryGetValue(botProfileId, out var command) && expiresAtUtc > command.ExpiresAtUtc)
+            if (!CommandsByProfileId.TryGetValue(botProfileId, out command) || command.ExpiresAtUtc <= now)
+            {
+                if (CommandsByProfileId.ContainsKey(botProfileId))
+                {
+                    CommandsByProfileId.Remove(botProfileId);
+                }
+                result = "no_active_command";
+                return true;
+            }
+
+            previousLeaseId = Safe(command.LeaseId);
+            previousRequestKind = Safe(command.RequestKind);
+            string request = NormalizeRequest(command.RequestKind);
+            bool supersedable = string.Equals(request, VanguardMovementContractPolicy.TravelCohesionFollowThrough, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(request, "TacticalAuthoringLivePreview", StringComparison.OrdinalIgnoreCase);
+            if (!supersedable)
+            {
+                result = "active_command_not_supersedable:" + Safe(command.RequestKind);
+                return false;
+            }
+
+            CommandsByProfileId.Remove(botProfileId);
+            removed = true;
+            result = "yielded:" + Safe(command.RequestKind) + ":" + Safe(command.LeaseId);
+        }
+
+        if (removed)
+        {
+            VanguardClientDiagnosticsLog.Info(StatusTag,
+                $"TC_ALT_DEVELOP_SEARCH_HANDOFF_COMMAND_YIELDED botProfile={Safe(botProfileId)}; previousLease={Safe(command.LeaseId)}; previousRequest={Safe(command.RequestKind)}; generation={command.Generation}; mutation=exact_supersedable_command_removed; nextAuthority=SAIN; physicalTranslation=false; grenadeMedicalReloadPreservedByCaller=true; doctrine=release_non_survival_vanguard_motion_before_search_translation_admission; tag={StatusTag}");
+        }
+        return true;
+    }
+
+    // A lease may only extend the command it still owns. The comparison and the
+    // expiry mutation share the command-store lock so a late executor cannot
+    // prolong a successor's generation after a scheduler handoff.
+    public static bool RefreshLeaseWindow(string botProfileId, string expectedLeaseId, DateTimeOffset expiresAtUtc, string reason)
+    {
+        if (string.IsNullOrWhiteSpace(botProfileId) || string.IsNullOrWhiteSpace(expectedLeaseId))
+        {
+            return false;
+        }
+
+        bool updated = false;
+        lock (Sync)
+        {
+            if (!CommandsByProfileId.TryGetValue(botProfileId, out var command)
+                || !string.Equals(command.LeaseId, expectedLeaseId, StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            if (expiresAtUtc > command.ExpiresAtUtc)
             {
                 command.ExpiresAtUtc = expiresAtUtc;
                 CommandsByProfileId[botProfileId] = command;
+                updated = true;
             }
         }
 
-        LogThrottled("refresh|" + botProfileId, DateTimeOffset.UtcNow,
-            () => $"VANGUARD_MOVE_BRIDGE_COMMAND_REFRESHED botProfile={Safe(botProfileId)}; reason={Safe(reason)}; expires={expiresAtUtc:O}; tag={StatusTag}; goToSomePointTag={GoToSomePointStatusTag}");
+        if (updated)
+        {
+            LogThrottled("refresh|" + botProfileId + "|" + expectedLeaseId, DateTimeOffset.UtcNow,
+                () => $"VANGUARD_MOVE_BRIDGE_COMMAND_REFRESHED botProfile={Safe(botProfileId)}; lease={Safe(expectedLeaseId)}; reason={Safe(reason)}; expires={expiresAtUtc:O}; exactOwner=true; tag={StatusTag}; goToSomePointTag={GoToSomePointStatusTag}");
+        }
+        return true;
     }
 
     public static string ClearOwned(string botProfileId, string leaseId, DateTimeOffset leaseStartedAtUtc, string reason)
@@ -611,9 +746,13 @@ internal static class VanguardReturnMovementCommandStore
             ? "emergency_safety_hold_no_destination"
             : grenadeEmergency
                 ? "atomic_stop_then_direct_emergency_GoToPoint_slowAtEnd_false"
-                : VanguardContinuousCohesionLocomotionPolicy.IsContinuousTravelRequest(command.RequestKind)
-                ? "direct_GoToPoint_slowAtEnd_false"
-                : "GoToSomePointData_SetPoint_UpdateToGo";
+                : IsTacticalCoordinatorAntiCongaHoldRequest(command.RequestKind)
+                    ? "tc_anti_conga_stationary_hold_no_path"
+                    : VanguardContinuousCohesionLocomotionPolicy.IsTacticalCoordinatorSainPathRequest(command.RequestKind)
+                        ? "SAIN_BotPathDataManual_tc_destination"
+                        : VanguardContinuousCohesionLocomotionPolicy.IsContinuousTravelRequest(command.RequestKind)
+                            ? "direct_GoToPoint_slowAtEnd_false"
+                            : "GoToSomePointData_SetPoint_UpdateToGo";
         LogThrottled("drive|" + botProfileId + "|" + phase + "|" + result, DateTimeOffset.UtcNow, TimeSpan.FromSeconds(6.0d),
             $"VANGUARD_GOTOSOMEPOINT_DRIVE {command.Summary}; phase={Safe(phase)}; result={Safe(result)}; backend={backend}; continuousTag={VanguardContinuousCohesionLocomotionPolicy.StatusTag}; tag={GoToSomePointStatusTag}; moveBridgeTag={StatusTag}");
     }
@@ -813,6 +952,11 @@ internal static class VanguardReturnMovementCommandStore
             : 1L;
         LastGenerationByProfileId[botProfileId] = next;
         return next;
+    }
+
+    public static bool IsTacticalCoordinatorAntiCongaHoldRequest(string? requestKind)
+    {
+        return string.Equals(NormalizeRequest(requestKind), "TacticalCoordinatorAntiCongaHold", StringComparison.OrdinalIgnoreCase);
     }
 
     public static bool IsGrenadeEmergencyRequest(string? requestKind)

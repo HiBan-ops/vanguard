@@ -11,7 +11,7 @@ namespace Vanguard.Client.Runtime.Inventory;
 
 /// <summary>
 /// Reads direct items held by EFT special equipment slots without assuming that those dynamic
-/// slot identifiers are members of <see cref="EquipmentSlot"/>. In SPT 4 / EFT 0.16 the slots
+/// slot identifiers are members of <see cref="EquipmentSlot"/>. In SPT / EFT the slots
 /// exist as root <see cref="Slot"/> instances whose IDs start with "SpecialSlot", while the
 /// EquipmentSlot enum intentionally exposes only canonical equipment slots.
 /// </summary>

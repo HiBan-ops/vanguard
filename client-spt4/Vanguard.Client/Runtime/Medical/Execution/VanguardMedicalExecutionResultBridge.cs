@@ -4,10 +4,10 @@ using System.Collections.Generic;
 using System.Linq;
 using Vanguard.Client.Runtime.Execution;
 
-// Responsibility: Provides Medical Execution Result Bridge support for the medical runtime.
-// Flow: The file encapsulates one bounded piece of the subsystem and exchanges explicit inputs/results with neighboring services instead of relying on hidden cross-system state.
-// Authority boundary: Authority remains with the owning subsystem and any external EFT/SPT/Fika/SAIN component explicitly referenced by its call path.
-// Invariant: Behavior stays scoped to the current profile/raid/process contract and preserves existing safety and compatibility boundaries.
+// Responsibility: Deliver terminal medical-execution outcomes into the scheduler-owned decision window.
+// Flow: Publish short-lived outcomes under Operator and execution-lease keys, then consume only matching live records.
+// Authority boundary: The executor publishes results while the scheduler owns consumption and follow-up arbitration.
+// Invariant: A stale or different lease cannot consume or overwrite the terminal outcome of another procedure.
 namespace Vanguard.Client.Runtime.Medical.Execution;
 
 /// <summary>
@@ -28,6 +28,28 @@ internal static class VanguardMedicalExecutionResultBridge
         {
             ByBotAndLease.Clear();
         }
+    }
+
+    public static int ForgetRuntimePresence(string? botProfileId, string reason)
+    {
+        string bot = Normalize(botProfileId);
+        if (string.Equals(bot, "none", StringComparison.OrdinalIgnoreCase))
+        {
+            return 0;
+        }
+
+        int removed = 0;
+        lock (Sync)
+        {
+            foreach (string key in ByBotAndLease.Keys
+                .Where(key => key.StartsWith(bot + "|", StringComparison.OrdinalIgnoreCase))
+                .ToArray())
+            {
+                if (ByBotAndLease.Remove(key)) removed++;
+            }
+        }
+
+        return removed;
     }
 
     public static void Publish(VanguardExecutionLeaseState lease, VanguardMedicalActionOutcomeKind outcome, string reason, string backendSummary, DateTimeOffset now)

@@ -12,6 +12,7 @@ internal static class VanguardMovementLeasePlanBuilder
 {
     public static VanguardMovementLeasePlanSnapshot Build(OperatorDecisionSnapshot snapshot, VanguardMovementContractSnapshot contract)
     {
+        var ownerPolicy = VanguardMovementAuthorityDoctrine.ForOwner(snapshot.OwnerProfileId);
         if (!contract.MovementLeaseEligible)
         {
             return NoLease(contract, "contract_not_movement_eligible");
@@ -55,16 +56,16 @@ internal static class VanguardMovementLeasePlanBuilder
                     ? VanguardMovementAuthorityDoctrine.TravelCohesionMaxDurationSeconds
                     : tacticalVolumeJoin
                         ? VanguardMovementAuthorityDoctrine.TacticalVolumeJoinMaxDurationSeconds
-                        : VanguardMovementAuthorityDoctrine.MovementLeaseMaxDurationSeconds;
+                        : ownerPolicy.MovementLeaseMaxDurationSeconds;
         float noProgress = contract.RequestKind == VanguardMovementContractPolicy.TacticalRepositionToUsefulSector
-            ? VanguardMovementAuthorityDoctrine.TacticalRepositionNoProgressSeconds
+            ? ownerPolicy.TacticalRepositionNoProgressSeconds
             : closeCohesion
                 ? VanguardMovementAuthorityDoctrine.CloseCohesionNoProgressSeconds
                 : travelCohesion
                     ? VanguardMovementAuthorityDoctrine.TravelCohesionNoProgressSeconds
                     : tacticalVolumeJoin
                         ? VanguardMovementAuthorityDoctrine.TacticalVolumeJoinNoProgressSeconds
-                        : VanguardMovementAuthorityDoctrine.MovementLeaseNoProgressSeconds;
+                        : ownerPolicy.MovementLeaseNoProgressSeconds;
         string completionRule = contract.RequestKind == VanguardMovementContractPolicy.TacticalRepositionToUsefulSector
             ? "anchor_reached_or_useful_sector_stable"
             : closeCohesion
@@ -123,26 +124,27 @@ internal static class VanguardMovementLeasePlanBuilder
 
     private static bool IsActiveApplyContract(OperatorDecisionSnapshot snapshot, VanguardMovementContractSnapshot contract)
     {
+        var ownerPolicy = VanguardMovementAuthorityDoctrine.ForOwner(snapshot.OwnerProfileId);
         if (contract.RequestKind == VanguardMovementContractPolicy.SuppressExternalAndReturn
             || contract.RequestKind == VanguardMovementContractPolicy.ReturnToBubbleHard)
         {
-            return VanguardMovementAuthorityDoctrine.ActiveBackendApplyEnabled;
+            return ownerPolicy.ActiveBackendApplyEnabled;
         }
 
         if (contract.RequestKind == VanguardMovementContractPolicy.TacticalRepositionToUsefulSector)
         {
-            return VanguardMovementAuthorityDoctrine.TacticalRepositionActiveEnabled;
+            return ownerPolicy.TacticalRepositionActiveEnabled;
         }
 
         if (contract.RequestKind == VanguardMovementContractPolicy.CloseCohesionMicroAdjust
             || contract.RequestKind == VanguardMovementContractPolicy.TravelCohesionFollowThrough
             || contract.RequestKind == VanguardMovementContractPolicy.TacticalVolumeJoin)
         {
-            return VanguardMovementAuthorityDoctrine.TacticalRepositionActiveEnabled && VanguardMovementAuthorityDoctrine.ActiveBackendApplyEnabled;
+            return ownerPolicy.TacticalRepositionActiveEnabled && ownerPolicy.ActiveBackendApplyEnabled;
         }
 
         if (contract.RequestKind == VanguardMovementContractPolicy.BreakSainSearchReturnBubble
-            && VanguardMovementAuthorityDoctrine.ActiveSainBoundaryReturnEnabled
+            && ownerPolicy.ActiveSainBoundaryReturnEnabled
             && VanguardMovementAuthorityDoctrine.IsSainBoundaryReturnEligible(snapshot, out _))
         {
             return true;

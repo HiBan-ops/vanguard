@@ -9,16 +9,18 @@ using Vanguard.Server.Operators.TacticalAuthoring.Responses;
 namespace Vanguard.Server.Operators.TacticalAuthoring.Services;
 
 /// <summary>
-/// Transient in-memory relay for Vanguard authoring preview. It is deliberately not persistence:
-/// saved tactical authoring JSON remains authoring-only and runtime consumption stays disabled.
+/// Transient in-memory relay for Vanguard authoring preview plus revisioned Tactical Coordination topology snapshots.
+/// It is deliberately not persistence: HOLD preview remains non-runtime data while TC topology is relayed read-only for raid-scoped runtime queries.
 /// </summary>
 [Injectable(InjectionType.Singleton)]
 public sealed class VanguardTacticalAuthoringLiveRelayService
 {
     private static readonly TimeSpan AuthorTtl = TimeSpan.FromSeconds(4);
     private static readonly TimeSpan ResultTtl = TimeSpan.FromSeconds(6);
+    private static readonly TimeSpan TopologyTtl = TimeSpan.FromSeconds(8);
     private readonly object sync = new();
     private readonly Dictionary<string, VanguardTacticalAuthoringLiveAuthorSnapshot> authors = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, VanguardTacticalCoordinationTopologySnapshot> topologies = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, VanguardTacticalAuthoringLiveHeadlessResult> results = new(StringComparer.OrdinalIgnoreCase);
 
     public VanguardTacticalAuthoringLiveExchangeResponse Exchange(VanguardTacticalAuthoringLiveExchangeRequest? request)
@@ -32,12 +34,18 @@ public sealed class VanguardTacticalAuthoringLiveRelayService
             if (string.Equals(role, "author", StringComparison.OrdinalIgnoreCase))
             {
                 ApplyAuthor(request.Author, now);
+                ApplyTopology(request.Topology, now);
                 var owner = Normalize(request.Author?.OwnerProfileId);
+                if (owner.Length == 0)
+                {
+                    owner = Normalize(request.Topology?.OwnerProfileId);
+                }
                 return new VanguardTacticalAuthoringLiveExchangeResponse
                 {
                     Success = true,
                     Reason = "author_exchange_ok",
                     Authors = owner.Length > 0 && authors.TryGetValue(owner, out var author) ? [author] : [],
+                    Topologies = owner.Length > 0 && topologies.TryGetValue(owner, out var topology) ? [topology] : [],
                     HeadlessResults = owner.Length > 0 && results.TryGetValue(owner, out var result) ? [result] : [],
                     ServerTimeUtc = now
                 };
@@ -61,6 +69,10 @@ public sealed class VanguardTacticalAuthoringLiveRelayService
                         .Where(author => author.Active && (knownOwners.Count == 0 || knownOwners.Contains(author.OwnerProfileId)))
                         .OrderBy(author => author.OwnerProfileId, StringComparer.OrdinalIgnoreCase)
                         .ToList(),
+                    Topologies = topologies.Values
+                        .Where(topology => topology.Active && (knownOwners.Count == 0 || knownOwners.Contains(topology.OwnerProfileId)))
+                        .OrderBy(topology => topology.OwnerProfileId, StringComparer.OrdinalIgnoreCase)
+                        .ToList(),
                     HeadlessResults = [],
                     ServerTimeUtc = now
                 };
@@ -72,6 +84,7 @@ public sealed class VanguardTacticalAuthoringLiveRelayService
                 // author and the consumer of the complete active-author set for this raid.
                 // Persisted tactical-authoring state is not touched here: this remains a transient relay.
                 ApplyAuthor(request.Author, now);
+                ApplyTopology(request.Topology, now);
                 foreach (var result in request.HeadlessResults ?? [])
                 {
                     ApplyResult(result, now);
@@ -81,6 +94,10 @@ public sealed class VanguardTacticalAuthoringLiveRelayService
                     (request.KnownOwnerProfileIds ?? []).Select(Normalize).Where(value => value.Length > 0),
                     StringComparer.OrdinalIgnoreCase);
                 var localOwner = Normalize(request.Author?.OwnerProfileId);
+                if (localOwner.Length == 0)
+                {
+                    localOwner = Normalize(request.Topology?.OwnerProfileId);
+                }
                 if (localOwner.Length > 0)
                 {
                     knownOwners.Add(localOwner);
@@ -93,6 +110,10 @@ public sealed class VanguardTacticalAuthoringLiveRelayService
                     Authors = authors.Values
                         .Where(author => author.Active && (knownOwners.Count == 0 || knownOwners.Contains(author.OwnerProfileId)))
                         .OrderBy(author => author.OwnerProfileId, StringComparer.OrdinalIgnoreCase)
+                        .ToList(),
+                    Topologies = topologies.Values
+                        .Where(topology => topology.Active && (knownOwners.Count == 0 || knownOwners.Contains(topology.OwnerProfileId)))
+                        .OrderBy(topology => topology.OwnerProfileId, StringComparer.OrdinalIgnoreCase)
                         .ToList(),
                     HeadlessResults = [],
                     ServerTimeUtc = now
@@ -149,6 +170,69 @@ public sealed class VanguardTacticalAuthoringLiveRelayService
         };
     }
 
+    private void ApplyTopology(VanguardTacticalCoordinationTopologySnapshot? incoming, DateTimeOffset now)
+    {
+        if (incoming == null)
+        {
+            return;
+        }
+
+        var owner = Normalize(incoming.OwnerProfileId);
+        var session = Normalize(incoming.RaidSessionId);
+        var map = Normalize(incoming.MapId);
+        if (owner.Length == 0 || session.Length == 0 || map.Length == 0 || incoming.Revision <= 0)
+        {
+            return;
+        }
+
+        if (!incoming.Active)
+        {
+            topologies.Remove(owner);
+            return;
+        }
+
+        var mapJson = incoming.MapJson ?? string.Empty;
+        var contentHash = Normalize(incoming.ContentHash);
+        if (topologies.TryGetValue(owner, out var previous)
+            && string.Equals(previous.RaidSessionId, session, StringComparison.Ordinal)
+            && string.Equals(previous.MapId, map, StringComparison.OrdinalIgnoreCase))
+        {
+            if (incoming.Revision < previous.Revision)
+            {
+                return;
+            }
+
+            if (incoming.Revision == previous.Revision)
+            {
+                // Same-revision traffic is heartbeat-only: the already accepted payload/hash
+                // remain authoritative until the raid-scope writer advances the revision.
+                mapJson = previous.MapJson;
+                contentHash = previous.ContentHash;
+            }
+            else if (mapJson.Length == 0 || contentHash.Length == 0)
+            {
+                // A new topology revision must be self-contained. Only same-revision
+                // heartbeats may omit the body/hash.
+                return;
+            }
+        }
+
+        if (mapJson.Length == 0 || contentHash.Length == 0)
+        {
+            return;
+        }
+
+        topologies[owner] = incoming with
+        {
+            OwnerProfileId = owner,
+            RaidSessionId = session,
+            MapId = map,
+            ContentHash = contentHash,
+            MapJson = mapJson,
+            UpdatedAtUtc = now
+        };
+    }
+
     private void ApplyResult(VanguardTacticalAuthoringLiveHeadlessResult? incoming, DateTimeOffset now)
     {
         if (incoming == null)
@@ -188,6 +272,11 @@ public sealed class VanguardTacticalAuthoringLiveRelayService
         foreach (var owner in results.Where(pair => now - pair.Value.UpdatedAtUtc > ResultTtl).Select(pair => pair.Key).ToArray())
         {
             results.Remove(owner);
+        }
+
+        foreach (var owner in topologies.Where(pair => now - pair.Value.UpdatedAtUtc > TopologyTtl).Select(pair => pair.Key).ToArray())
+        {
+            topologies.Remove(owner);
         }
     }
 

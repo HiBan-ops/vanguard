@@ -21,6 +21,7 @@ namespace Vanguard.Client.Runtime.Medical.Execution;
 internal static class VanguardMedicalIsolationController
 {
     public const string StatusTag = "VANGUARD_MEDICAL_ISOLATION_OK";
+    public const string StationaryFractureConvergenceStatusTag = "VANGUARD_STATIONARY_FRACTURE_AUTHORITY_CONVERGENCE_OK";
     private const string AuthorityLeaseStatusTag = VanguardOperatorAuthorityLeaseController.StatusTag;
     private const string GoCoverOnlyStatusTag = "VANGUARD_SURGERY_GO_COVER_ONLY_OK";
     private const string HardOrbitExitStatusTag = "VANGUARD_MEDICAL_HARD_ORBIT_EXIT_OK";
@@ -39,6 +40,7 @@ internal static class VanguardMedicalIsolationController
     private static readonly TimeSpan QuiesceRetryInterval = TimeSpan.FromSeconds(0.45d);
     private static readonly TimeSpan ReadyTtl = TimeSpan.FromSeconds(45.00d);
     private static readonly TimeSpan IsolationMaxDuration = TimeSpan.FromSeconds(65.00d);
+    private static readonly TimeSpan StationaryFractureConvergenceMaxDuration = TimeSpan.FromSeconds(8.00d);
     private static readonly TimeSpan LogInterval = TimeSpan.FromSeconds(1.50d);
     private const float SurgeryCrouchPoseLevel = 0.00f;
     private const float SurgeryObservedCrouchPoseMax = 0.20f;
@@ -55,6 +57,255 @@ internal static class VanguardMedicalIsolationController
         VanguardClientDiagnosticsLog.Info(StatusTag, $"VANGUARD_MEDICAL_ISOLATION_RESET reason={Safe(reason)}; patientOnly=true; externalBrainQuiesce=true; singleMovementAuthority=true; strictOrbitPathResidueLock=true; hardOrbitExit=true; combatOwnerDeferStrict=true; orbitLayerIdleQuiesce=true; coverArrivalGrant=true; medicalAuthorityHold=true; coverCommit=true; releaseRequired=true; authorityTag={AuthorityLeaseStatusTag}; externalAdapterTag={ExternalAuthorityAdapterStatusTag}; externalMovementTag={ExternalMovementPreemptStatusTag}; combatGateTag={CombatAwareGateStatusTag}; orbitLayerTag={OrbitLayerQuiesceStatusTag}; coverArrivalTag={CoverArrivalGrantStatusTag}; authorityHoldTag={MedicalAuthorityHoldStatusTag}; coverCommitTag={MedicalCoverCommitStatusTag}; hardOrbitExitTag={HardOrbitExitStatusTag}; goCoverOnlyTag={GoCoverOnlyStatusTag}; orbitLockTag={OrbitLocalHoldLockStatusTag}; tag={StatusTag}");
     }
 
+    public static int ForgetRuntimePresence(string? botProfileId, string reason)
+    {
+        string key = Normalize(botProfileId);
+        if (string.Equals(key, "none", StringComparison.OrdinalIgnoreCase))
+        {
+            return 0;
+        }
+
+        int removed = IsolationByBotProfileId.Remove(key) ? 1 : 0;
+        foreach (string logKey in new List<string>(LastLogAtByKey.Keys))
+        {
+            if (logKey.IndexOf(key, StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                LastLogAtByKey.Remove(logKey);
+                removed++;
+            }
+        }
+
+        return removed;
+    }
+
+    public static void ReconcilePendingStationaryFractureConvergence(BotOwner? botOwner, OperatorDecisionSnapshot snapshot, DateTimeOffset now)
+    {
+        snapshot ??= OperatorDecisionSnapshot.Empty;
+        string key = Normalize(snapshot.BotProfileId);
+        if (!IsolationByBotProfileId.TryGetValue(key, out var state)
+            || !string.Equals(state.Purpose, "StationaryFractureConvergence", StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        if (botOwner == null || !snapshot.Alive)
+        {
+            Release(snapshot.BotProfileId, botOwner, now, "stationary_fracture_convergence_runtime_missing", keepReady: false);
+            return;
+        }
+
+        if (state.ExpiresAtUtc <= now || now - state.StartedAtUtc > StationaryFractureConvergenceMaxDuration)
+        {
+            Release(snapshot.BotProfileId, botOwner, now, "stationary_fracture_convergence_expired", keepReady: false);
+            return;
+        }
+
+        string currentTarget = !string.IsNullOrWhiteSpace(snapshot.Medical.Actionability.TargetPart)
+            && !string.Equals(snapshot.Medical.Actionability.TargetPart, "none", StringComparison.OrdinalIgnoreCase)
+                ? snapshot.Medical.Actionability.TargetPart
+                : snapshot.Medical.Need.TargetPart;
+        string currentItem = snapshot.Medical.Actionability.SelectedItemTemplateId;
+        bool sameFractureSelection = snapshot.Medical.Need.DominantNeed == Vanguard.Client.Runtime.Medical.VanguardMedicalNeed.Fracture
+            && snapshot.Medical.Actionability.CanApplyItem == true
+            && string.Equals(Normalize(state.TargetPart), Normalize(currentTarget), StringComparison.OrdinalIgnoreCase)
+            && string.Equals(Normalize(state.ItemTemplateId), Normalize(currentItem), StringComparison.OrdinalIgnoreCase);
+        if (!sameFractureSelection)
+        {
+            Release(snapshot.BotProfileId, botOwner, now, "stationary_fracture_convergence_selection_changed", keepReady: false);
+            return;
+        }
+
+        if (HasCriticalThreat(snapshot, out var threatReason))
+        {
+            Release(snapshot.BotProfileId, botOwner, now, "stationary_fracture_convergence_critical_threat:" + threatReason, keepReady: false);
+            return;
+        }
+
+        if (VanguardExternalAuthorityAdapter.ShouldDeferMedicalMovementForCombat(botOwner, snapshot, now, "stationary_fracture_convergence_reconcile", out _, out var combatSummary))
+        {
+            Release(snapshot.BotProfileId, botOwner, now, "stationary_fracture_convergence_combat_owner:" + Safe(combatSummary), keepReady: false);
+        }
+    }
+
+    public static bool HasPendingStationaryFractureConvergence(
+        string? botProfileId,
+        string? targetPart,
+        string? itemTemplateId,
+        DateTimeOffset now,
+        out string summary)
+    {
+        summary = "fractureConvergencePending=false;reason=state_missing";
+        string key = Normalize(botProfileId);
+        if (!IsolationByBotProfileId.TryGetValue(key, out var state)
+            || !string.Equals(state.Purpose, "StationaryFractureConvergence", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        if (state.ExpiresAtUtc <= now || now - state.StartedAtUtc > StationaryFractureConvergenceMaxDuration)
+        {
+            summary = "fractureConvergencePending=false;reason=expired";
+            return false;
+        }
+
+        if (!string.Equals(Normalize(state.TargetPart), Normalize(targetPart), StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(Normalize(state.ItemTemplateId), Normalize(itemTemplateId), StringComparison.OrdinalIgnoreCase))
+        {
+            summary = "fractureConvergencePending=false;reason=target_or_item_changed"
+                + ";stateTarget=" + Safe(state.TargetPart)
+                + ";requestedTarget=" + Safe(targetPart)
+                + ";stateItem=" + Safe(state.ItemTemplateId)
+                + ";requestedItem=" + Safe(itemTemplateId);
+            return false;
+        }
+
+        summary = "fractureConvergencePending=true"
+            + ";phase=" + Safe(state.Phase)
+            + ";age=" + (now - state.StartedAtUtc).TotalSeconds.ToString("0.00", CultureInfo.InvariantCulture)
+            + ";expiresIn=" + Math.Max(0d, (state.ExpiresAtUtc - now).TotalSeconds).ToString("0.00", CultureInfo.InvariantCulture);
+        return true;
+    }
+
+    // A pending fracture convergence is one bounded medical admission episode, not a
+    // fresh authority owner every snapshot. Keep its exact receipt through final commit.
+    public static string ResolveStationaryFractureConvergenceLeaseId(
+        string? botProfileId,
+        string? targetPart,
+        string? itemTemplateId,
+        DateTimeOffset now)
+    {
+        if (HasPendingStationaryFractureConvergence(botProfileId, targetPart, itemTemplateId, now, out _)
+            && IsolationByBotProfileId.TryGetValue(Normalize(botProfileId), out var state)
+            && !string.IsNullOrWhiteSpace(state.OwnerLeaseId)
+            && !string.Equals(state.OwnerLeaseId, "none", StringComparison.OrdinalIgnoreCase))
+        {
+            return state.OwnerLeaseId;
+        }
+
+        return "med-fracture-converge-" + now.ToUnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture)
+            + "_" + Normalize(botProfileId);
+    }
+
+    public static void ReleasePendingStationaryFractureConvergence(string? botProfileId, BotOwner? botOwner, DateTimeOffset now, string reason)
+    {
+        string key = Normalize(botProfileId);
+        if (!IsolationByBotProfileId.TryGetValue(key, out var state)
+            || !string.Equals(state.Purpose, "StationaryFractureConvergence", StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        Release(botProfileId, botOwner, now, "stationary_fracture_convergence_released:" + Safe(reason), keepReady: false);
+    }
+
+    public static bool TryConvergeStationaryFractureAuthority(
+        VanguardExecutionLeaseState lease,
+        BotOwner? botOwner,
+        OperatorDecisionSnapshot snapshot,
+        DateTimeOffset now,
+        out string summary)
+    {
+        summary = "fractureConvergence=none";
+        if (lease == null || string.IsNullOrWhiteSpace(lease.BotProfileId) || botOwner == null)
+        {
+            summary = "fractureConvergence=failed;reason=lease_or_botowner_missing";
+            return false;
+        }
+
+        if (lease.MedicalNeed != Vanguard.Client.Runtime.Medical.VanguardMedicalNeed.Fracture)
+        {
+            summary = "fractureConvergence=failed;reason=need_not_fracture";
+            return false;
+        }
+
+        if (HasCriticalThreat(snapshot, out var threatReason))
+        {
+            ReleasePendingStationaryFractureConvergence(lease.BotProfileId, botOwner, now, "critical_threat:" + threatReason);
+            summary = "fractureConvergence=failed;reason=critical_threat:" + Safe(threatReason);
+            return false;
+        }
+
+        if (VanguardExternalAuthorityAdapter.ShouldDeferMedicalMovementForCombat(botOwner, snapshot, now, "stationary_fracture_convergence", out _, out var combatGateSummary))
+        {
+            ReleasePendingStationaryFractureConvergence(lease.BotProfileId, botOwner, now, "deferred_by_combat_owner");
+            summary = "fractureConvergence=failed;reason=deferred_by_combat_owner;" + combatGateSummary;
+            return false;
+        }
+
+        string authoritySummary = VanguardOperatorAuthorityLeaseController.StartOrRefreshMedical(lease, botOwner, snapshot, now, "stationary_fracture_convergence");
+        string key = Normalize(lease.BotProfileId);
+        if (IsolationByBotProfileId.TryGetValue(key, out var priorState)
+            && (priorState.ExpiresAtUtc <= now
+                || !SameMedicalTarget(priorState, lease)
+                || !string.Equals(priorState.OwnerLeaseId, lease.LeaseId, StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(priorState.Purpose, "StationaryFractureConvergence", StringComparison.OrdinalIgnoreCase)))
+        {
+            Release(lease.BotProfileId, botOwner, now, "stationary_fracture_convergence_replace_incompatible_isolation", keepReady: false);
+            VanguardOperatorAuthorityLeaseController.StartOrRefreshMedical(lease, botOwner, snapshot, now, "stationary_fracture_convergence_after_replace");
+        }
+
+        if (!IsolationByBotProfileId.TryGetValue(key, out var state))
+        {
+            state = new IsolationState
+            {
+                OperatorId = lease.OperatorId,
+                BotProfileId = lease.BotProfileId,
+                OwnerLeaseId = lease.LeaseId,
+                TargetPart = lease.TargetPart,
+                ItemTemplateId = lease.ItemTemplateId,
+                Purpose = "StationaryFractureConvergence",
+                Phase = "StabilizingPosture",
+                StartedAtUtc = now,
+                LastProgressAtUtc = now,
+                LastQuiesceAtUtc = DateTimeOffset.MinValue,
+                ExpiresAtUtc = now + StationaryFractureConvergenceMaxDuration
+            };
+            IsolationByBotProfileId[key] = state;
+            LogThrottled(key + "|fracture_convergence_start", now,
+                $"VANGUARD_STATIONARY_FRACTURE_CONVERGENCE_STARTED {lease.Summary}; phase={state.Phase}; max={StationaryFractureConvergenceMaxDuration.TotalSeconds:0.00}; patientOnly=true; nativeApply=false; commitGateStillRequired=true; {authoritySummary}; tag={StationaryFractureConvergenceStatusTag}; isolationTag={StatusTag}");
+        }
+
+        if (now - state.StartedAtUtc > StationaryFractureConvergenceMaxDuration)
+        {
+            Release(lease.BotProfileId, botOwner, now, "stationary_fracture_convergence_max_duration", keepReady: false);
+            summary = "fractureConvergence=failed;reason=max_duration";
+            return false;
+        }
+
+        if (!VanguardExternalAuthorityAdapter.TrySuppressExternalDuringStationaryMedicalAction(botOwner, snapshot, lease, "stationary_fracture_convergence", now, out var externalSummary))
+        {
+            state.LastProgressAtUtc = now;
+            state.ExpiresAtUtc = state.StartedAtUtc + StationaryFractureConvergenceMaxDuration;
+            summary = "fractureConvergence=waiting;reason=external_suppression_pending;" + externalSummary;
+            LogThrottled(key + "|fracture_convergence_external_wait", now,
+                $"VANGUARD_STATIONARY_FRACTURE_CONVERGENCE_WAIT {lease.Summary}; phase={state.Phase}; external={Safe(externalSummary)}; nativeApply=false; next=quiesce_then_stabilize; tag={StationaryFractureConvergenceStatusTag}; isolationTag={StatusTag}");
+            return true;
+        }
+
+        string movementCommandClear = VanguardReturnMovementCommandStore.Clear(lease.BotProfileId, "stationary_fracture_convergence");
+        bool postureRequested = TryStabilizeStationaryPosture(botOwner, out var postureSummary);
+        string observedPostureSummary;
+        bool stationaryObserved = false;
+        if (postureRequested)
+        {
+            stationaryObserved = TryObserveStationaryPosture(botOwner, snapshot, out observedPostureSummary);
+        }
+        else
+        {
+            observedPostureSummary = "observed=false;reason=posture_request_failed";
+        }
+
+        state.Phase = "StabilizingPosture";
+        state.LastProgressAtUtc = now;
+        state.ExpiresAtUtc = state.StartedAtUtc + StationaryFractureConvergenceMaxDuration;
+        summary = "fractureConvergence=active;stationaryObserved=" + Bool(stationaryObserved)
+            + ";movementCommand=" + Safe(movementCommandClear)
+            + ";" + externalSummary + ";" + postureSummary + ";" + observedPostureSummary;
+        LogThrottled(key + "|fracture_convergence_posture", now,
+            $"VANGUARD_STATIONARY_FRACTURE_CONVERGENCE_POSTURE {lease.Summary}; phase={state.Phase}; movementCommand={Safe(movementCommandClear)}; postureRequested={Bool(postureRequested)}; stationaryObserved={Bool(stationaryObserved)}; nativeApply=false; commitGateStillRequired=true; next={(stationaryObserved ? "commit_readiness_confirmation" : "stabilize_posture")}; tag={StationaryFractureConvergenceStatusTag}; isolationTag={StatusTag}");
+        return true;
+    }
+
     public static VanguardMedicalIsolationTickResult BeginOrUpdatePrepareIsolation(VanguardExecutionLeaseState lease, BotOwner? botOwner, OperatorDecisionSnapshot snapshot, DateTimeOffset now)
     {
         if (lease == null || string.IsNullOrWhiteSpace(lease.BotProfileId))
@@ -69,13 +320,13 @@ internal static class VanguardMedicalIsolationController
 
         if (HasCriticalThreat(snapshot, out var threatReason))
         {
-            Release(lease.BotProfileId, botOwner, now, "critical_threat_before_or_during_isolation:" + threatReason, keepReady: false);
+            ReleaseForLease(lease, botOwner, now, "critical_threat_before_or_during_isolation:" + threatReason);
             return VanguardMedicalIsolationTickResult.Fail("critical_threat:" + threatReason, "isolation=failed;criticalThreat=" + Safe(threatReason));
         }
 
         if (VanguardExternalAuthorityAdapter.ShouldDeferMedicalMovementForCombat(botOwner, snapshot, now, "medical_isolation_prepare", out _, out var combatGateSummary))
         {
-            Release(lease.BotProfileId, botOwner, now, "deferred_by_combat_owner", keepReady: false);
+            ReleaseForLease(lease, botOwner, now, "deferred_by_combat_owner");
             lease.MedicalIsolationPhase = "DeferredByCombatOwner";
             lease.MedicalIsolationAcquired = false;
             lease.LastMedicalIsolationSummary = combatGateSummary;
@@ -87,7 +338,9 @@ internal static class VanguardMedicalIsolationController
         string authoritySummary = VanguardOperatorAuthorityLeaseController.StartOrRefreshMedical(lease, botOwner, snapshot, now, "surgery_go_cover_window");
 
         string key = Normalize(lease.BotProfileId);
-        if (!IsolationByBotProfileId.TryGetValue(key, out var state) || state.ExpiresAtUtc <= now || !SameMedicalTarget(state, lease))
+        if (!IsolationByBotProfileId.TryGetValue(key, out var state) || state.ExpiresAtUtc <= now
+            || !string.Equals(state.OwnerLeaseId, lease.LeaseId, StringComparison.OrdinalIgnoreCase)
+            || !SameMedicalTarget(state, lease))
         {
             state = new IsolationState
             {
@@ -96,6 +349,7 @@ internal static class VanguardMedicalIsolationController
                 OwnerLeaseId = lease.LeaseId,
                 TargetPart = lease.TargetPart,
                 ItemTemplateId = lease.ItemTemplateId,
+                Purpose = "SurgeryPrepare",
                 Phase = "QuiescingExternalSystems",
                 StartedAtUtc = now,
                 LastProgressAtUtc = now,
@@ -142,7 +396,7 @@ internal static class VanguardMedicalIsolationController
             lease.LastProgressAtUtc = now;
             lease.NoProgressUntilUtc = now + TimeSpan.FromSeconds(1.25d);
 
-            bool authorityActive = VanguardOperatorAuthorityLeaseController.HasActiveMedicalAuthority(lease.BotProfileId, lease.TargetPart, lease.ItemTemplateId, now, out var activeAuthoritySummary);
+            bool authorityActive = VanguardOperatorAuthorityLeaseController.HasActiveMedicalAuthority(lease.BotProfileId, lease.TargetPart, lease.ItemTemplateId, now, out var activeAuthoritySummary, ownerLeaseId: lease.LeaseId);
             if (!authorityActive)
             {
                 Release(lease.BotProfileId, botOwner, now, "authority_missing_while_external_active:" + externalReason, keepReady: false);
@@ -237,13 +491,15 @@ internal static class VanguardMedicalIsolationController
 
         if (HasCriticalThreat(snapshot, out var threatReason))
         {
-            Release(lease.BotProfileId, botOwner, now, "critical_threat_before_stationary_action:" + threatReason, keepReady: false);
+            ReleaseForLease(lease, botOwner, now, "critical_threat_before_stationary_action:" + threatReason);
             summary = "isolation=failed;reason=critical_threat:" + Safe(threatReason);
             return false;
         }
 
         string key = Normalize(lease.BotProfileId);
-        if (!IsolationByBotProfileId.TryGetValue(key, out var state) || state.ExpiresAtUtc <= now || !SameMedicalTarget(state, lease))
+        if (!IsolationByBotProfileId.TryGetValue(key, out var state) || state.ExpiresAtUtc <= now
+            || !string.Equals(state.OwnerLeaseId, lease.LeaseId, StringComparison.OrdinalIgnoreCase)
+            || !SameMedicalTarget(state, lease))
         {
             summary = "isolation=failed;reason=go_cover_required_no_direct_stationary_isolation";
             return false;
@@ -267,7 +523,7 @@ internal static class VanguardMedicalIsolationController
 
         if (IsExternalBrainStillActive(snapshot, out var externalReason))
         {
-            bool authorityActive = VanguardOperatorAuthorityLeaseController.HasActiveMedicalAuthority(lease.BotProfileId, lease.TargetPart, lease.ItemTemplateId, now, out var activeAuthoritySummary);
+            bool authorityActive = VanguardOperatorAuthorityLeaseController.HasActiveMedicalAuthority(lease.BotProfileId, lease.TargetPart, lease.ItemTemplateId, now, out var activeAuthoritySummary, ownerLeaseId: lease.LeaseId);
             if (!authorityActive)
             {
                 summary = "isolation=failed;reason=authority_missing_during_stationary_recheck:" + Safe(externalReason);
@@ -346,6 +602,83 @@ internal static class VanguardMedicalIsolationController
         return true;
     }
 
+    // Direct surgical start is an atomic prepare->surgery lease replacement. The old
+    // receipt remains authoritative during all posture/commit preflight checks. Once
+    // the store has committed the new generation, transfer the exact medical receipt.
+    public static bool TryTransferStationarySurgeryAuthority(
+        VanguardExecutionLeaseState prepareLease,
+        VanguardExecutionLeaseState surgeryLease,
+        BotOwner? botOwner,
+        OperatorDecisionSnapshot snapshot,
+        DateTimeOffset now,
+        out string summary)
+    {
+        summary = "medicalDirectTransfer=rejected;mutation=false";
+        if (prepareLease == null || surgeryLease == null || botOwner == null
+            || string.IsNullOrWhiteSpace(prepareLease.LeaseId)
+            || string.IsNullOrWhiteSpace(surgeryLease.LeaseId)
+            || string.Equals(prepareLease.LeaseId, surgeryLease.LeaseId, StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(Normalize(prepareLease.BotProfileId), Normalize(surgeryLease.BotProfileId), StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        string key = Normalize(surgeryLease.BotProfileId);
+        if (!VanguardExecutionLeaseStore.TryGetActive(key, out var activeLease)
+            || !string.Equals(activeLease.LeaseId, surgeryLease.LeaseId, StringComparison.OrdinalIgnoreCase)
+            || !IsolationByBotProfileId.TryGetValue(key, out var state)
+            || !string.Equals(state.OwnerLeaseId, prepareLease.LeaseId, StringComparison.OrdinalIgnoreCase)
+            || state.ExpiresAtUtc <= now
+            || !string.Equals(state.Purpose, "SurgeryPrepare", StringComparison.OrdinalIgnoreCase)
+            || !SameMedicalTarget(state, surgeryLease)
+            || !SameMedicalTarget(state, prepareLease)
+            || !string.Equals(state.Phase, "ExecutingMedicalAction", StringComparison.OrdinalIgnoreCase))
+        {
+            summary = "medicalDirectTransfer=rejected;reason=store_or_prepare_receipt_mismatch;mutation=false";
+            return false;
+        }
+
+        if (HasCriticalThreat(snapshot, out var criticalThreat)
+            || VanguardExternalAuthorityAdapter.ShouldDeferMedicalMovementForCombat(
+                botOwner, snapshot, now, "stationary_surgery_direct_handoff", out _, out _))
+        {
+            summary = "medicalDirectTransfer=rejected;reason=critical_threat_or_combat;detail=" + Safe(criticalThreat) + ";mutation=false";
+            return false;
+        }
+
+        if (!VanguardOperatorAuthorityLeaseController.HasActiveMedicalAuthority(
+                prepareLease.BotProfileId, prepareLease.TargetPart, prepareLease.ItemTemplateId, now,
+                out _, ownerLeaseId: prepareLease.LeaseId))
+        {
+            summary = "medicalDirectTransfer=rejected;reason=prepare_authority_missing;mutation=false";
+            return false;
+        }
+
+        string authority = VanguardOperatorAuthorityLeaseController.StartOrRefreshMedical(
+            surgeryLease, botOwner, snapshot, now, "stationary_surgery_direct_handoff");
+        if (!VanguardOperatorAuthorityLeaseController.HasActiveMedicalAuthority(
+                surgeryLease.BotProfileId, surgeryLease.TargetPart, surgeryLease.ItemTemplateId, now,
+                out _, ownerLeaseId: surgeryLease.LeaseId))
+        {
+            summary = "medicalDirectTransfer=rejected;reason=new_authority_missing;" + authority;
+            return false;
+        }
+
+        state.OwnerLeaseId = surgeryLease.LeaseId;
+        state.LastProgressAtUtc = now;
+        state.ExpiresAtUtc = now + IsolationMaxDuration;
+        surgeryLease.StationaryPostureObserved = prepareLease.StationaryPostureObserved;
+        surgeryLease.SurgeryStationaryAnchorCaptured = prepareLease.SurgeryStationaryAnchorCaptured;
+        surgeryLease.SurgeryStationaryAnchorX = prepareLease.SurgeryStationaryAnchorX;
+        surgeryLease.SurgeryStationaryAnchorZ = prepareLease.SurgeryStationaryAnchorZ;
+        surgeryLease.MedicalIsolationAcquired = prepareLease.MedicalIsolationAcquired;
+        surgeryLease.MedicalIsolationPhase = state.Phase;
+        surgeryLease.LastMedicalIsolationSummary = prepareLease.LastMedicalIsolationSummary;
+        summary = "medicalDirectTransfer=committed;from=" + Safe(prepareLease.LeaseId)
+            + ";to=" + Safe(surgeryLease.LeaseId) + ";" + authority;
+        return true;
+    }
+
     public static void MarkCoverReady(VanguardExecutionLeaseState lease, BotOwner? botOwner, DateTimeOffset now, string reason)
     {
         if (lease == null || string.IsNullOrWhiteSpace(lease.BotProfileId))
@@ -354,7 +687,8 @@ internal static class VanguardMedicalIsolationController
         }
 
         string key = Normalize(lease.BotProfileId);
-        if (!IsolationByBotProfileId.TryGetValue(key, out var state))
+        if (!IsolationByBotProfileId.TryGetValue(key, out var state)
+            || !string.Equals(state.OwnerLeaseId, lease.LeaseId, StringComparison.OrdinalIgnoreCase))
         {
             return;
         }
@@ -381,7 +715,8 @@ internal static class VanguardMedicalIsolationController
             return;
         }
 
-        if (IsolationByBotProfileId.TryGetValue(Normalize(lease.BotProfileId), out var state))
+        if (IsolationByBotProfileId.TryGetValue(Normalize(lease.BotProfileId), out var state)
+            && string.Equals(state.OwnerLeaseId, lease.LeaseId, StringComparison.OrdinalIgnoreCase))
         {
             state.Phase = "MovingToCover";
             state.LastProgressAtUtc = now;
@@ -402,7 +737,9 @@ internal static class VanguardMedicalIsolationController
         }
 
         string key = Normalize(lease.BotProfileId);
-        if (!IsolationByBotProfileId.TryGetValue(key, out var state) || !SameMedicalTarget(state, lease))
+        if (!IsolationByBotProfileId.TryGetValue(key, out var state)
+            || !string.Equals(state.OwnerLeaseId, lease.LeaseId, StringComparison.OrdinalIgnoreCase)
+            || !SameMedicalTarget(state, lease))
         {
             summary = "stationaryHold=failed;reason=isolation_state_missing";
             return false;
@@ -414,7 +751,7 @@ internal static class VanguardMedicalIsolationController
             return false;
         }
 
-        bool authorityActive = VanguardOperatorAuthorityLeaseController.HasActiveMedicalAuthority(lease.BotProfileId, lease.TargetPart, lease.ItemTemplateId, now, out var activeAuthoritySummary);
+        bool authorityActive = VanguardOperatorAuthorityLeaseController.HasActiveMedicalAuthority(lease.BotProfileId, lease.TargetPart, lease.ItemTemplateId, now, out var activeAuthoritySummary, ownerLeaseId: lease.LeaseId);
         if (!authorityActive)
         {
             summary = "stationaryHold=failed;reason=authority_missing;" + activeAuthoritySummary;
@@ -457,6 +794,19 @@ internal static class VanguardMedicalIsolationController
             return;
         }
 
+        string key = Normalize(lease.BotProfileId);
+        if (!IsolationByBotProfileId.TryGetValue(key, out var state)
+            || string.IsNullOrWhiteSpace(lease.LeaseId)
+            || !string.Equals(state.OwnerLeaseId, lease.LeaseId, StringComparison.OrdinalIgnoreCase))
+        {
+            // An admitted medical authority may exist before stationary isolation is committed.
+            // Its own exact lease must still be released, without altering a successor isolation.
+            VanguardOperatorAuthorityLeaseController.ReleaseMedical(lease, botOwner, now, "without_owned_isolation:" + reason);
+            LogThrottled(key + "|stale_isolation_release", now,
+                $"VANGUARD_MEDICAL_ISOLATION_RELEASE_REJECTED botProfile={key}; lease={Safe(lease.LeaseId)}; activeLease={Safe(state?.OwnerLeaseId)}; reason={Safe(reason)}; isolationMutation=false; authorityRelease=exact_lease_only; tag={StatusTag}");
+            return;
+        }
+
         Release(lease.BotProfileId, botOwner, now, reason, keepReady: false);
     }
 
@@ -468,14 +818,24 @@ internal static class VanguardMedicalIsolationController
             return;
         }
 
-        IsolationByBotProfileId.Remove(key);
-        string releaseSummary = ReleaseExternalSystems(botOwner, botProfileId, now, reason);
-        if (!string.IsNullOrWhiteSpace(botProfileId))
+        if (!IsolationByBotProfileId.TryGetValue(key, out var state))
         {
-            var pseudoLease = new VanguardExecutionLeaseState { BotProfileId = botProfileId };
-            VanguardOperatorAuthorityLeaseController.ReleaseMedical(pseudoLease, botOwner, now, reason);
+            return;
         }
-        LogThrottled(key + "|release|" + Safe(reason), now, $"VANGUARD_MEDICAL_ISOLATION_RELEASED botProfile={key}; reason={Safe(reason)}; {releaseSummary}; externalAuthority=returned; tag={StatusTag}");
+
+        IsolationByBotProfileId.Remove(key);
+        // A single lease-bound Authority release owns the sole external handback.
+        // Never issue a second profile-wide release from isolation itself.
+        var releasingLease = new VanguardExecutionLeaseState
+        {
+            BotProfileId = state.BotProfileId,
+            LeaseId = state.OwnerLeaseId,
+            TargetPart = state.TargetPart,
+            ItemTemplateId = state.ItemTemplateId
+        };
+        VanguardOperatorAuthorityLeaseController.ReleaseMedical(releasingLease, botOwner, now, reason);
+        LogThrottled(key + "|release|" + Safe(reason), now,
+            $"VANGUARD_MEDICAL_ISOLATION_RELEASED botProfile={key}; lease={Safe(state.OwnerLeaseId)}; reason={Safe(reason)}; externalRelease=delegated_exact_authority_once; tag={StatusTag}");
     }
 
     private static bool SameMedicalTarget(IsolationState state, VanguardExecutionLeaseState lease)
@@ -570,11 +930,6 @@ internal static class VanguardMedicalIsolationController
             + ",dist=" + FloatText(dist)
             + ",targetSpeed=" + FloatText(targetSpeed);
         return observed;
-    }
-
-    private static string ReleaseExternalSystems(BotOwner? botOwner, string? botProfileId, DateTimeOffset now, string reason)
-    {
-        return VanguardExternalAuthorityAdapter.ReleaseMedicalPreempt(botOwner, botProfileId, now, "medical_isolation_release:" + Safe(reason));
     }
 
     private static string SnapshotExternalSummary(OperatorDecisionSnapshot snapshot)
@@ -737,9 +1092,10 @@ internal static class VanguardMedicalIsolationController
     {
         public string OperatorId { get; init; } = "none";
         public string BotProfileId { get; init; } = "none";
-        public string OwnerLeaseId { get; init; } = "none";
+        public string OwnerLeaseId { get; set; } = "none";
         public string TargetPart { get; init; } = "none";
         public string ItemTemplateId { get; init; } = "none";
+        public string Purpose { get; init; } = "Unknown";
         public string Phase { get; set; } = "None";
         public DateTimeOffset StartedAtUtc { get; init; }
         public DateTimeOffset LastProgressAtUtc { get; set; }

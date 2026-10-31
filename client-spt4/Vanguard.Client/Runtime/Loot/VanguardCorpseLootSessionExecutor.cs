@@ -30,6 +30,22 @@ internal static class VanguardCorpseLootSessionExecutor
     private static readonly object Sync = new();
     private static readonly Dictionary<string, SessionLease> ActiveByBotProfileId = new(StringComparer.OrdinalIgnoreCase);
 
+    // A scheduler window can finish before EFT/Fika has reconciled an already submitted
+    // inventory transaction. The original session owns that terminal; this lookup
+    // only reports its current in-flight state for the exact Operator.
+    public static bool HasInFlightNativeTransaction(string botProfileId)
+    {
+        if (string.IsNullOrWhiteSpace(botProfileId))
+        {
+            return false;
+        }
+
+        lock (Sync)
+        {
+            return ActiveByBotProfileId.TryGetValue(botProfileId, out var session) && session.TransactionSubmitted;
+        }
+    }
+
     public static bool HasInFlightNativeTransaction(out string summary)
     {
         lock (Sync)
@@ -72,6 +88,29 @@ internal static class VanguardCorpseLootSessionExecutor
                 preflight: lease.Prepared?.Preflight,
                 transaction: outcome);
         }
+    }
+
+    public static string ForgetRuntimePresence(string? botProfileId, string reason)
+    {
+        string key = string.IsNullOrWhiteSpace(botProfileId) ? "none" : botProfileId.Trim();
+        if (string.Equals(key, "none", StringComparison.OrdinalIgnoreCase))
+        {
+            return "corpseSession=ignored_missing_profile";
+        }
+
+        SessionLease? lease = null;
+        lock (Sync)
+        {
+            if (ActiveByBotProfileId.TryGetValue(key, out SessionLease? active))
+            {
+                lease = active;
+                ActiveByBotProfileId.Remove(key);
+            }
+        }
+
+        return "corpseSession=" + (lease == null ? "none" : "forgotten")
+            + ";submitted=" + Bool(lease?.TransactionSubmitted == true)
+            + ";lateCallbackLookupDisabled=true;normalTerminal=false;outcomeMemoryMutation=false;reason=" + Safe(reason);
     }
 
     public static bool TryBegin(VanguardCorpseLootSessionStart start, OperatorDecisionSnapshot snapshot, DateTimeOffset now, out string summary)
@@ -434,6 +473,11 @@ internal static class VanguardCorpseLootSessionExecutor
 
         VanguardClientDiagnosticsLog.Operational(StatusTag, () =>
             $"VANGUARD_CORPSE_LOOT_TRANSACTION_SUBMIT_ATTEMPTED {lease.Summary}; {prepared.Preflight.Summary}; claimStillHeld=true; itemClaim={Safe(prepared.ItemClaim.ClaimId)}; itemClaimHeld=true; claimRefreshedBeforeSubmit=true; transactionOrdinal={lease.Progress.CommittedTransactions + 1}; fikaViaInventoryController=true; callbackPending=true; operatorCorpsePersistenceArmed={Bool(victimWasOperator && VanguardRaidOperatorPersistenceService.IsArmedForOperatorCorpseTransactions)}; persistenceMode={(victimWasOperator ? "raid_close_batch" : "not_applicable")}");
+        if (prepared.Preflight.MagazineReplacementSwap)
+        {
+            VanguardClientDiagnosticsLog.Diagnostic(VanguardMagazineReplacementSwapPreflight.StatusTag, () =>
+                $"VANGUARD_MAGAZINE_DISCARD_MUTATION_SUBMIT source=corpse; bot={Safe(lease.BotProfileId)}; item={Safe(prepared.Item.Id)}; displaced={Safe(prepared.DisplacedItem?.Id)}; preparedNativeSwap=true; networkTransactionSubmitted=true; callbackPending=true; noThrowItemFirst=true; parallelWriter=false");
+        }
 
         try
         {
@@ -482,6 +526,11 @@ internal static class VanguardCorpseLootSessionExecutor
         {
             VanguardClientDiagnosticsLog.Operational(StatusTag, () =>
                 $"VANGUARD_CORPSE_LOOT_TRANSACTION_CALLBACK {lease.Summary}; callbackSucceeded={Bool(lease.CallbackSucceeded)}; callbackReason={Safe(lease.CallbackReason)}; claimStillHeld=true; mutationRequiresReconciliation=true");
+            if (lease.Prepared?.Preflight.MagazineReplacementSwap == true)
+            {
+                VanguardClientDiagnosticsLog.Diagnostic(VanguardMagazineReplacementSwapPreflight.StatusTag, () =>
+                    $"VANGUARD_MAGAZINE_DISCARD_MUTATION_CALLBACK source=corpse; bot={Safe(lease.BotProfileId)}; callbackReceived=true; callbackSucceeded={Bool(lease.CallbackSucceeded)}; callbackReason={Safe(lease.CallbackReason)}; readbackPending=true");
+            }
         }
     }
 
@@ -689,6 +738,11 @@ internal static class VanguardCorpseLootSessionExecutor
         }
 
         VanguardCorpseLootPostCommitReadBackResult readBack = VanguardCorpseLootPostCommitReadBack.RefreshAndVerify(prepared, lease.BotOwner);
+        if (prepared.Preflight.MagazineReplacementSwap)
+        {
+            VanguardClientDiagnosticsLog.Diagnostic(VanguardMagazineReplacementSwapPreflight.StatusTag, () =>
+                $"VANGUARD_MAGAZINE_DISCARD_MUTATION_READBACK source=corpse; bot={Safe(lease.BotProfileId)}; success={Bool(readBack.Success)}; replacementInOperatorInventory={Bool(readBack.ItemInOperatorInventory)}; oldAtCandidateSource={Bool(readBack.MagazineReplacementSourceRestored)}; displacedObserved={Bool(readBack.MagazineReplacementDisplacedItemObserved)}; uncertainFailClosed={Bool(!readBack.Success)}");
+        }
         lease.Progress.Record(prepared.Preflight);
         lease.LastReadBack = readBack;
         RecordCurrentTransactionTelemetry(lease, outcome);

@@ -1,4 +1,4 @@
-#if SPT_CLIENT
+﻿#if SPT_CLIENT
 using System;
 using System.Diagnostics;
 using System.Globalization;
@@ -119,6 +119,9 @@ internal static class VanguardHeadlessRuntimeStallGuard
                 + ";tag=" + StatusTag);
     }
 
+    public static bool IsOptionalRecoveryActive(DateTimeOffset now)
+        => recoveryUntilUtc != DateTimeOffset.MinValue && now < recoveryUntilUtc;
+
     public static bool IsOptionalRecoveryActive(DateTimeOffset now, out string reason)
     {
         if (recoveryUntilUtc == DateTimeOffset.MinValue || now >= recoveryUntilUtc)
@@ -176,6 +179,7 @@ internal static class VanguardHeadlessRuntimeStallGuard
     public static void BeginFrame(System.DateTimeOffset now) { }
     public static void EndFrame(System.DateTimeOffset now) { }
     public static bool IsOptionalRecoveryActive(System.DateTimeOffset now, out string reason) { reason = "none"; return false; }
+    public static bool IsOptionalRecoveryActive(System.DateTimeOffset now) => false;
     public static void Reset(string reason) { }
 }
 #endif

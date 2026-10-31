@@ -11,7 +11,7 @@ namespace Vanguard.Client.Runtime.Loot;
 
 /// <summary>
 /// The persistence path fail-closed network-safety boundary for multi-count inventory stacks.
-/// Fika 2.3.9 broadcasts an inventory descriptor before the authoritative bot executes it locally,
+/// Fika broadcasts an inventory descriptor before the authoritative bot executes it locally,
 /// while Vanguard's callback/readback only proves that authoritative local execution. Until a peer
 /// replay acknowledgement exists, a multi-count stack must not be submitted through Vanguard under
 /// Fika because a remote peer can reject CreateOperationFromDescriptor while the authority succeeds.

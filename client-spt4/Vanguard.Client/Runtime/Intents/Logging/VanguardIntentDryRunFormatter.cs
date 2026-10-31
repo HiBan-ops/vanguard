@@ -6,10 +6,10 @@ using Vanguard.Client.Diagnostics;
 using Vanguard.Client.Options;
 using Vanguard.Client.Runtime.Decision;
 
-// Responsibility: Provides Intent Dry Run Formatter support for the intent production pipeline.
-// Flow: The file encapsulates one bounded piece of the subsystem and exchanges explicit inputs/results with neighboring services instead of relying on hidden cross-system state.
-// Authority boundary: Authority remains with the owning subsystem and any external EFT/SPT/Fika/SAIN component explicitly referenced by its call path.
-// Invariant: Behavior stays scoped to the current profile/raid/process contract and preserves existing safety and compatibility boundaries.
+// Responsibility: Format read-only intent-board and threat-scan telemetry for Operator diagnostics.
+// Flow: Serialize selected candidates, scan summaries, optional numbers and medical/threat/cohesion snapshot fields into diagnostic strings.
+// Authority boundary: The intent board supplies observations; formatting does not select an action or command EFT/SAIN.
+// Invariant: Missing optional numbers and tri-state flags retain explicit none or unknown representations.
 namespace Vanguard.Client.Runtime.Intents;
 
 internal static partial class VanguardOperatorIntentDryRunService

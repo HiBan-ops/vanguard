@@ -36,11 +36,7 @@ internal static class VanguardPostLootCombatReadinessAuditService
             return;
         }
 
-        if (!VanguardOperatorRuntimeAuditSyncService.EffectiveEnabled && !VanguardOperatorRuntimeAuditOptions.GetFirstActiveMobileMedicalLeaseEnabled())
-        {
-            return;
-        }
-
+        bool auditEnabled = VanguardOperatorRuntimeAuditSyncService.EffectiveEnabled;
         LogBootOnce();
         var now = DateTimeOffset.UtcNow;
         foreach (var record in VanguardRaidOperatorRuntimeRegistry.GetAllRuntimeOperators())
@@ -51,6 +47,14 @@ internal static class VanguardPostLootCombatReadinessAuditService
             }
 
             if (!VanguardOperatorDecisionSnapshotService.TryGetLatestSnapshot(record.BotProfileId, out var snapshot))
+            {
+                continue;
+            }
+
+            bool ownerMedicalEnabled = VanguardRuntimeSettingsAuthorityResolver
+                .ResolvePlayerScoped(snapshot.OwnerProfileId, "post_loot_medical_readiness_audit")
+                .FirstActiveMobileMedicalLeaseEnabled;
+            if (!auditEnabled && !ownerMedicalEnabled)
             {
                 continue;
             }

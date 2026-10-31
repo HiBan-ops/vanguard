@@ -1,8 +1,8 @@
 using Vanguard.Server.Operators.Models;
 
-// Responsibility: Provides Operator Profile Migrator support for the Operator domain services.
-// Flow: The file encapsulates one bounded piece of the subsystem and exchanges explicit inputs/results with neighboring services instead of relying on hidden cross-system state.
-// Authority boundary: Authority remains with the owning subsystem and any external EFT/SPT/Fika/SAIN component explicitly referenced by its call path.
+// Responsibility: Normalize admitted legacy Operator profiles and their versioned subrecords while preserving enrollment state.
+// Flow: Check migration admission, normalize career and core component schemas, then flag only actual changes.
+// Authority boundary: The cumulative migration policy controls admission; this normalizer does not enroll Operators or change gameplay.
 // Invariant: Pre-enrollment world Operators may legitimately have Career == null; only legacy enrolled/service profiles are synthesized into MigratedLegacy career state.
 namespace Vanguard.Server.Operators.Services;
 

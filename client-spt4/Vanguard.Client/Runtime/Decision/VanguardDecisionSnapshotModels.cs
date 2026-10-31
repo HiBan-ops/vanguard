@@ -7,6 +7,7 @@ using Vanguard.Client.Runtime.Loot;
 using Vanguard.Client.Runtime.Grenades;
 using Vanguard.Client.Runtime.SquadCohesion;
 using Vanguard.Client.Runtime.Execution;
+using Vanguard.Client.Runtime.Movement;
 
 // Responsibility: Defines the normalized decision snapshot graph shared by runtime readers, intent producers, authority arbitration and executors.
 // Flow: Specialized readers capture current combat, movement, medical, loot, grenade, external and lifecycle evidence into immutable/bounded snapshots that the scheduler evaluates as one coherent decision frame.
@@ -166,6 +167,9 @@ internal sealed class VanguardThreatDecisionSnapshot
     public float? TimeSinceKnownUpdated { get; init; }
     public float? PathLength { get; init; }
     public float? BotDistanceFromLastKnown { get; init; }
+    public Vector3? ThreatAnchorPosition { get; init; }
+    public string ThreatAnchorSource { get; init; } = "none";
+    public string ThreatAnchorConfidence { get; init; } = "none";
     public bool? ShotMeRecently { get; init; }
     public bool? ShotAtMeRecently { get; init; }
     public string EnemyAction { get; init; } = "none";
@@ -200,6 +204,7 @@ internal sealed class VanguardThreatScanDecisionSnapshot
     public bool CandidateIncomingFireFresh { get; init; }
     public bool CandidateIncomingFireStale { get; init; }
     public float? CandidateDistance { get; init; }
+    public Vector3? CandidatePosition { get; init; }
     public float? CandidateTimeSinceSeen { get; init; }
     public float? CandidateAngleDegrees { get; init; }
     public string CandidateArc { get; init; } = "none";
@@ -404,7 +409,7 @@ internal sealed class VanguardSquadCohesionSnapshot
     public Vector3? OwnerForward { get; init; }
     public float OperatorDistanceToOwner { get; init; }
     public float VerticalDelta { get; init; }
-    public float BubbleRadius { get; init; } = VanguardSquadCohesionDoctrine.TacticalBubbleRadiusMeters;
+    public float BubbleRadius { get; init; } = VanguardMovementAuthorityDoctrine.DefaultTacticalBubbleMeters;
     public string BubbleBand { get; init; } = "unknown";
     public bool InBubble { get; init; }
     public string Sector { get; init; } = "unknown";

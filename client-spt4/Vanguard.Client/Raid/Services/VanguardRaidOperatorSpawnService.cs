@@ -482,6 +482,14 @@ internal sealed class VanguardRaidOperatorSpawnService
             return;
         }
 
+        if (!VanguardRaidOperatorRuntimeRegistry.IsPendingBindCandidateAuthorized(snapshot, spawnedOwner, out string bindAuthorizationReason))
+        {
+            VanguardClientDiagnosticsLog.Warning(
+                "VANGUARD_OPERATOR_RUNTIME_REPLACEMENT",
+                $"bind mutation rejected before friendly/group preparation operator={snapshot.OperatorId ?? "<none>"}; owner={snapshot.OwnerProfileId ?? "<none>"}; botProfile={spawnedOwner.ProfileId}; reason={bindAuthorizationReason}; exactReplacementRequired=true; staleStateInheritance=false");
+            return;
+        }
+
         PrepareFriendlyOwner(spawnedOwner, ownerPlayer);
         if (spawnedOwner.Profile is not null)
         {
@@ -604,16 +612,17 @@ internal sealed class VanguardRaidOperatorSpawnService
     {
         if (profile.Info is null || ownerPlayer.Profile?.Info is null)
         {
-            return;
+            throw new InvalidOperationException("Vanguard Operator spawn rejected: profile or owner identity missing before activation");
         }
 
         profile.Info.Side = ownerPlayer.Side;
         profile.Info.GroupId = ownerPlayer.GroupId;
         profile.Info.TeamId = ownerPlayer.Profile.Info.TeamId;
-        ApplyOperatorProfileRole(profile, ownerPlayer.Side, "profile_identity");
+        // Admission is fail-closed: no vanilla PMC activation when MoreBots custom roles are missing.
+        ApplyOperatorProfileRole(profile, ownerPlayer.Side, "profile_identity", required: true);
     }
 
-    private static void ApplyOperatorProfileRole(Profile profile, EPlayerSide side, string stage)
+    private static void ApplyOperatorProfileRole(Profile profile, EPlayerSide side, string stage, bool required = false)
     {
         try
         {
@@ -622,6 +631,7 @@ internal sealed class VanguardRaidOperatorSpawnService
                 VanguardClientDiagnosticsLog.Warning(
                     VanguardOperatorBotTypes.StatusTag,
                     $"VANGUARD_OPERATOR_ROLE_APPLY_SKIPPED stage={stage}; profile={profile.ProfileId ?? "<none>"}; reason=settings_missing; tag={VanguardOperatorBotTypes.StatusTag}");
+                if (required) throw new InvalidOperationException("Vanguard Operator role admission rejected: profile settings missing");
                 return;
             }
 
@@ -630,6 +640,7 @@ internal sealed class VanguardRaidOperatorSpawnService
                 VanguardClientDiagnosticsLog.Warning(
                     VanguardOperatorBotTypes.StatusTag,
                     $"VANGUARD_OPERATOR_ROLE_APPLY_FALLBACK stage={stage}; profile={profile.ProfileId ?? "<none>"}; diagnostic={diagnostic}; tag={VanguardOperatorBotTypes.StatusTag}");
+                if (required) throw new InvalidOperationException("Vanguard Operator role admission rejected: " + diagnostic);
                 return;
             }
 
@@ -643,6 +654,7 @@ internal sealed class VanguardRaidOperatorSpawnService
             VanguardClientDiagnosticsLog.Warning(
                 VanguardOperatorBotTypes.StatusTag,
                 $"VANGUARD_OPERATOR_ROLE_APPLY_FAILED stage={stage}; profile={profile.ProfileId ?? "<none>"}; reason={exception.GetType().Name}:{exception.Message}; tag={VanguardOperatorBotTypes.StatusTag}");
+            if (required) throw;
         }
     }
 
@@ -1566,6 +1578,14 @@ internal sealed class VanguardRaidOperatorSpawnService
 
         if (!string.Equals(owner.ProfileId, expectedProfileId, StringComparison.OrdinalIgnoreCase))
         {
+            return false;
+        }
+
+        if (!VanguardRaidOperatorRuntimeRegistry.IsPendingBindCandidateAuthorized(snapshot, owner, out string bindAuthorizationReason))
+        {
+            VanguardClientDiagnosticsLog.Warning(
+                "VANGUARD_COMBAT_BIND_COHESION_RECOVERY_STATUS",
+                $"VANGUARD_RUNTIME_BIND_ADOPT_REJECTED operator={snapshot.OperatorId ?? "<none>"}; expectedProfile={expectedProfileId}; botProfile={owner.ProfileId}; source={source}; reason={bindAuthorizationReason}; exactReplacementRequired=true; mutationBeforeAdmission=false; tag=VANGUARD_COMBAT_BIND_COHESION_RECOVERY_STATUS");
             return false;
         }
 

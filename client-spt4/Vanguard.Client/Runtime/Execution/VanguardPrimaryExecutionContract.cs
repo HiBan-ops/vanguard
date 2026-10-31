@@ -375,7 +375,7 @@ internal static class VanguardPrimaryExecutionContract
         }
 
         if (snapshot.MovementAuthority.HardOutsideBubble
-            && snapshot.SquadCohesion.OperatorDistanceToOwner >= VanguardMovementAuthorityDoctrine.HardCorrectionMeters + 18.0f)
+            && snapshot.SquadCohesion.OperatorDistanceToOwner >= VanguardMovementAuthorityDoctrine.ForOwner(snapshot.OwnerProfileId).HardCorrectionMeters + 18.0f)
         {
             reason = "extreme_distance_interrupt_allowed:" + snapshot.SquadCohesion.OperatorDistanceToOwner.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture);
             return false;

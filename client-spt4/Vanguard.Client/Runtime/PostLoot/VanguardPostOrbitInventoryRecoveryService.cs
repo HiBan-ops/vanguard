@@ -43,6 +43,17 @@ internal static class VanguardPostOrbitInventoryRecoveryService
         VanguardClientDiagnosticsLog.Info(StatusTag, $"post-ORBIT inventory recovery reset reason={Safe(reason)}; scope=inventory_controller_medical_item_addresses_backpack_rig_pockets_slots; mutatesMedical=guarded_ghost_recover_and_cache_refresh; mutatesInventory=medical_cache_refresh_only; mutatesLoot=false; mutatesSain=false; refreshTag={InventoryRefreshStatusTag}; tag={StatusTag}");
     }
 
+    public static int ForgetRuntimePresence(string? botProfileId, string reason)
+    {
+        string key = string.IsNullOrWhiteSpace(botProfileId) ? "none" : botProfileId.Trim();
+        if (string.Equals(key, "none", StringComparison.OrdinalIgnoreCase))
+        {
+            return 0;
+        }
+
+        return States.Remove(key) ? 1 : 0;
+    }
+
     public static void Tick(IReadOnlyList<OperatorDecisionSnapshot> snapshots)
     {
         LogBootOnce();

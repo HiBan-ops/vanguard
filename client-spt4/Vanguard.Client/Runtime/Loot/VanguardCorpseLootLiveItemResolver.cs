@@ -5,10 +5,10 @@ using System.Linq;
 using EFT.Interactive;
 using EFT.InventoryLogic;
 
-// Responsibility: Provides Corpse Loot Live Item Resolver support for the loot runtime.
-// Flow: The file encapsulates one bounded piece of the subsystem and exchanges explicit inputs/results with neighboring services instead of relying on hidden cross-system state.
-// Authority boundary: Authority remains with the owning subsystem and any external EFT/SPT/Fika/SAIN component explicitly referenced by its call path.
-// Invariant: Behavior stays scoped to the current profile/raid/process contract and preserves existing safety and compatibility boundaries.
+// Responsibility: Resolve a selected corpse item by identity against the current live EFT inventory tree.
+// Flow: Traverse corpse equipment with a bounded item budget and return the item with its source path and address.
+// Authority boundary: This resolver only reads live inventory structure; inventory transfer or commitment belongs to the executor.
+// Invariant: A missing identity or exhausted inspection budget fails resolution rather than substituting another item.
 namespace Vanguard.Client.Runtime.Loot;
 
 internal static class VanguardCorpseLootLiveItemResolver

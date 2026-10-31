@@ -138,7 +138,14 @@ internal static class VanguardGrenadeEmergencyPolicy
         {
             return false;
         }
-        bool distanceSafe = hazard.DistanceToGrenade >= hazard.SafeDistance + SafeDistanceHysteresisMeters
+        // A grenade in flight can still close inside the safety envelope even when both its
+        // current position and the last reported danger point are outside it. Do not park the
+        // emergency movement lease on distance alone when the live velocity projection predicts
+        // a closer approach. Verified dual solid cover remains an independent safe hold reason.
+        bool approachingIntoUnsafeRange = hazard.ApproachingOperator
+            && hazard.PredictedClosestDistance < hazard.SafeDistance + SafeDistanceHysteresisMeters;
+        bool distanceSafe = !approachingIntoUnsafeRange
+            && hazard.DistanceToGrenade >= hazard.SafeDistance + SafeDistanceHysteresisMeters
             && (!hazard.DangerPointKnown || hazard.DistanceToDangerPoint >= hazard.SafeDistance + SafeDistanceHysteresisMeters);
         bool coverSafe = hazard.DualSolidCover
             && hazard.DistanceToGrenade >= SolidCoverMinimumDistanceMeters

@@ -31,7 +31,6 @@ internal static class VanguardRuntimeSettingsScopeCatalog
         "DecisionSnapshotLogEnabled",
         "IntentDryRunEnabled",
         "ThreatScannerDryRunEnabled",
-        "FirstActiveMobileMedicalLeaseEnabled",
         "OperatorPostRaidPersistenceEnabled",
         "HeadlessKeepGcEnabledInRaid",
         "VerboseTransitionLogEnabled",
@@ -39,10 +38,15 @@ internal static class VanguardRuntimeSettingsScopeCatalog
         "SummaryIntervalSeconds",
         "TransitionLogMinIntervalSeconds",
         "ThreatScannerIntervalSeconds",
+        "MovementVerboseDoctrineLogEnabled"
+    ];
+
+    public static readonly string[] PlayerScoped =
+    [
+        "FirstActiveMobileMedicalLeaseEnabled",
         "MovementOutsideBubbleRecallEnabled",
         "MovementSainBoundaryReturnEnabled",
         "MovementSuppressExternalDuringRecallEnabled",
-        "MovementVerboseDoctrineLogEnabled",
         "MovementTacticalRepositionEnabled",
         "MovementTacticalRepositionCooldownSeconds",
         "MovementTacticalRepositionMinDeltaMeters",
@@ -60,13 +64,26 @@ internal static class VanguardRuntimeSettingsScopeCatalog
         "MovementLeaseFailureCooldownSeconds",
         "MovementLeaseNoProgressSeconds",
         "MovementLeaseMaxDurationSeconds",
-        "MovementActionRallyMaxReanchors"
-    ];
-
-    public static readonly string[] PlayerScoped =
-    [
+        "MovementActionRallyMaxReanchors",
         "MovementOpportunisticLootBrokerEnabled",
         "MovementOpportunisticLootMaxDistanceMeters",
+        "MovementOpportunisticLootScanCooldownSeconds",
+        "MovementOpportunisticLootGrantSeconds",
+        "TacticalCoordinationDangerCloseWeaponMeters",
+        "TacticalCoordinationProactiveWeaponMeters",
+        "TacticalCoordinationOverwatchMinimumThreatMeters",
+        "TacticalCoordinationOverwatchStandoffMeters",
+        "TacticalCoordinationBuddyIsolationMeters",
+        "TacticalCoordinationBuddyHelperMaxMeters",
+        "TacticalCoordinationFlankLeadCloseMeters",
+        "TacticalCoordinationFlankLeadFarMeters",
+        "TacticalCoordinationBoundAdvanceDistanceMeters",
+        "TacticalSearchShadowComparisonEnabled",
+        "TacticalSearchShadowOwnerLimitMeters",
+        "TacticalSearchShadowRequireOwnerDistanceImprovement",
+        "TacticalSearchShadowRetreatStepMeters",
+        "TacticalSearchShadowLateralOffsetMeters",
+        "TacticalSearchShadowMaxPathMeters",
         "LootOperationalSessionEnabled",
         "LootBackupLongWeaponEnabled",
         "LootBackupPistolEnabled",
@@ -84,8 +101,6 @@ internal static class VanguardRuntimeSettingsScopeCatalog
 
     public static readonly string[] LegacyUnused =
     [
-        "MovementOpportunisticLootScanCooldownSeconds",
-        "MovementOpportunisticLootGrantSeconds"
     ];
 }
 #endif

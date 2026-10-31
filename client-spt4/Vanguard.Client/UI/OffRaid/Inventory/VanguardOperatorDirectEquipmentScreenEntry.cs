@@ -1793,7 +1793,7 @@ internal static class VanguardOperatorDirectEquipmentScreenEntry
     private static Type? ResolveInventoryScreenControllerType()
     {
         // Resolve the qualified outer type without AccessTools.TypeByName so stale candidate names
-        // cannot generate Harmony warnings. The supported SPT 4.0.13 controller is the private
+        // cannot generate Harmony warnings. The supported SPT controller is the private
         // GClass3872 nested under EFT.UI.InventoryScreen; retain a bounded structural fallback for
         // obfuscation drift while requiring the same declaring-type relationship.
         Type? inventoryScreenType = AppDomain.CurrentDomain.GetAssemblies()

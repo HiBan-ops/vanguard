@@ -6,8 +6,8 @@ using Vanguard.Client.Diagnostics;
 using BepInEx.Configuration;
 #endif
 
-// Responsibility: defines the F12-facing runtime diagnostics and raid-scoped behavioral tuning surface, then projects settings into the authority synchronization DTOs.
-// Flow: BepInEx/F12 values are bound, normalized and exposed through getters/snapshots; raid-scoped settings are synchronized to the process that owns runtime execution.
+// Responsibility: defines the F12-facing runtime diagnostics plus PLAYER_SCOPED and RAID_SCOPED behavioral tuning surfaces, then projects settings into the authority synchronization DTOs.
+// Flow: BepInEx/F12 values are bound, normalized and exposed through getters/snapshots; scoped settings are synchronized to the process that owns runtime execution and resolved by OwnerProfileId where required.
 // Authority boundary: diagnostic switches control observability only; behavioral settings become authoritative only through their documented player/raid synchronization path.
 // Invariant: defaults preserve the established public behavior, including Headless GC troubleshooting disabled by default and combat-pursuit cohesion at 32 m.
 
@@ -81,6 +81,21 @@ internal static class VanguardOperatorRuntimeAuditOptions
     private static ConfigEntry<float>? movementOpportunisticLootMaxDistanceMeters;
     private static ConfigEntry<float>? movementOpportunisticLootScanCooldownSeconds;
     private static ConfigEntry<float>? movementOpportunisticLootGrantSeconds;
+    private static ConfigEntry<float>? tacticalCoordinationDangerCloseWeaponMeters;
+    private static ConfigEntry<float>? tacticalCoordinationProactiveWeaponMeters;
+    private static ConfigEntry<float>? tacticalCoordinationOverwatchMinimumThreatMeters;
+    private static ConfigEntry<float>? tacticalCoordinationOverwatchStandoffMeters;
+    private static ConfigEntry<float>? tacticalCoordinationBuddyIsolationMeters;
+    private static ConfigEntry<float>? tacticalCoordinationBuddyHelperMaxMeters;
+    private static ConfigEntry<float>? tacticalCoordinationFlankLeadCloseMeters;
+    private static ConfigEntry<float>? tacticalCoordinationFlankLeadFarMeters;
+    private static ConfigEntry<float>? tacticalCoordinationBoundAdvanceDistanceMeters;
+    private static ConfigEntry<bool>? tacticalSearchShadowComparisonEnabled;
+    private static ConfigEntry<float>? tacticalSearchShadowOwnerLimitMeters;
+    private static ConfigEntry<bool>? tacticalSearchShadowRequireOwnerDistanceImprovement;
+    private static ConfigEntry<float>? tacticalSearchShadowRetreatStepMeters;
+    private static ConfigEntry<float>? tacticalSearchShadowLateralOffsetMeters;
+    private static ConfigEntry<float>? tacticalSearchShadowMaxPathMeters;
     private static ConfigEntry<bool>? lootOperationalSessionEnabled;
     private static ConfigEntry<bool>? lootBackupLongWeaponEnabled;
     private static ConfigEntry<bool>? lootBackupPistolEnabled;
@@ -154,7 +169,7 @@ internal static class VanguardOperatorRuntimeAuditOptions
         movementTacticalBubbleMeters = config.Bind(movementSection, "Tactical bubble meters", 75.0f, new ConfigDescription("Distance around the player that defines the normal Vanguard action bubble.", new AcceptableValueRange<float>(35.0f, 120.0f)));
         movementSoftCorrectionMeters = config.Bind(movementSection, "Soft correction meters", 80.0f, new ConfigDescription("Distance where Vanguard starts monitoring a soft bubble breach without necessarily commanding movement.", new AcceptableValueRange<float>(40.0f, 135.0f)));
         movementHardCorrectionMeters = config.Bind(movementSection, "Hard recall meters", 88.0f, new ConfigDescription("Distance where Vanguard may start a hard action-rally return, if combat/medical gates allow it.", new AcceptableValueRange<float>(45.0f, 150.0f)));
-        movementCombatCohesionForcedCatchupMeters = config.Bind(movementSection, "Combat pursuit cohesion limit meters", 32.0f, new ConfigDescription("Owner distance beyond which Vanguard stops renewing stale or non-direct distant pursuit and forces combat cohesion return. Direct or recently actionable threats can still qualify combat. This raid-scoped value is synchronized from the player raid authority to Headless and clients.", new AcceptableValueRange<float>(16.0f, 80.0f)));
+        movementCombatCohesionForcedCatchupMeters = config.Bind(movementSection, "Combat pursuit cohesion limit meters", 32.0f, new ConfigDescription("Owner distance beyond which Vanguard stops renewing stale or non-direct distant pursuit and forces combat cohesion return. Direct or recently actionable threats can still qualify combat. This player-scoped value follows OwnerProfileId through the server/headless settings authority path.", new AcceptableValueRange<float>(16.0f, 80.0f)));
         movementTravelCatchUpEnterMeters = config.Bind(movementSection, "Travel catch-up enter meters", 28.0f, new ConfigDescription("Distance that must persist before FormationTravel enters CatchUp. Effective value remains below Hard recall meters.", new AcceptableValueRange<float>(18.0f, 60.0f)));
         movementTravelCatchUpExitMeters = config.Bind(movementSection, "Travel catch-up exit meters", 22.0f, new ConfigDescription("Lower distance that must persist before CatchUp returns to FormationTravel. Effective value remains at least 2 m below the enter threshold.", new AcceptableValueRange<float>(10.0f, 55.0f)));
         movementTravelModeDwellSeconds = config.Bind(movementSection, "Travel mode dwell seconds", 1.25f, new ConfigDescription("Time a non-critical mode transition must remain true. EmergencyCatchUp entry is immediate; its exit uses Soft correction meters plus this dwell.", new AcceptableValueRange<float>(0.25f, 5.0f)));
@@ -170,6 +185,41 @@ internal static class VanguardOperatorRuntimeAuditOptions
         movementOpportunisticLootMaxDistanceMeters = config.Bind(movementSection, "Opportunistic loot max distance meters", 38.0f, new ConfigDescription("Maximum direct Operator-to-opportunistic-loot-target distance used by Vanguard corpse and world-container qualification/approach planning.", new AcceptableValueRange<float>(6.0f, 42.0f)));
         movementOpportunisticLootScanCooldownSeconds = config.Bind(movementSection, "Opportunistic loot scan cooldown seconds", 18.0f, new ConfigDescription("Compatibility value retained for existing configurations. Vanguard claim-and-approach never invokes the autonomous LootingBots scan driver.", new AcceptableValueRange<float>(8.0f, 60.0f)));
         movementOpportunisticLootGrantSeconds = config.Bind(movementSection, "Opportunistic loot grant seconds", 8.0f, new ConfigDescription("Compatibility value retained for existing configurations. Vanguard uses its own bounded loot window and keeps LootingBots suppressed for Operators.", new AcceptableValueRange<float>(4.0f, 20.0f)));
+
+        const string tacticalCoordinationSection = "Vanguard - Tactical Coordination";
+        tacticalCoordinationDangerCloseWeaponMeters = config.Bind(tacticalCoordinationSection, "Danger-close weapon distance meters", 15.0f, new ConfigDescription("Distance where sniper-to-close-weapon suitability is classified as danger-close. Effective value remains below the proactive weapon threshold.", new AcceptableValueRange<float>(5.0f, 20.0f)));
+        tacticalCoordinationProactiveWeaponMeters = config.Bind(tacticalCoordinationSection, "Proactive close-weapon distance meters", 25.0f, new ConfigDescription("Distance where a loaded sniper may proactively prefer a loaded close-combat weapon. Effective value remains above danger-close and below Overwatch eligibility.", new AcceptableValueRange<float>(10.0f, 35.0f)));
+        tacticalCoordinationOverwatchMinimumThreatMeters = config.Bind(tacticalCoordinationSection, "Overwatch minimum threat distance meters", 35.0f, new ConfigDescription("Minimum threat distance for Overwatch opportunity and the release edge of close-weapon hysteresis. Effective value remains above proactive close-weapon distance.", new AcceptableValueRange<float>(25.0f, 80.0f)));
+        tacticalCoordinationOverwatchStandoffMeters = config.Bind(tacticalCoordinationSection, "Overwatch minimum placement standoff meters", 32.0f, new ConfigDescription("Minimum target standoff accepted by the existing Overwatch placement solver. Effective value remains below the Overwatch threat-distance threshold; it changes placement admission only and never target/aim/fire authority.", new AcceptableValueRange<float>(20.0f, 80.0f)));
+        tacticalCoordinationBuddyIsolationMeters = config.Bind(tacticalCoordinationSection, "Buddy-support isolation distance meters", 26.0f, new ConfigDescription("Owner distance where a danger-exposed Operator may qualify as isolated for Buddy Support.", new AcceptableValueRange<float>(15.0f, 45.0f)));
+        tacticalCoordinationBuddyHelperMaxMeters = config.Bind(tacticalCoordinationSection, "Buddy-support helper max distance meters", 42.0f, new ConfigDescription("Maximum helper-to-isolated-Operator distance considered for Buddy Support. Effective value remains above the isolation threshold.", new AcceptableValueRange<float>(20.0f, 70.0f)));
+        tacticalCoordinationFlankLeadCloseMeters = config.Bind(tacticalCoordinationSection, "Flank-lead close threat distance meters", 20.0f, new ConfigDescription("Close-threat boundary used only to prefer tactical roles for FlankLead assignment. It never hard-rejects a viable route candidate.", new AcceptableValueRange<float>(10.0f, 35.0f)));
+        tacticalCoordinationFlankLeadFarMeters = config.Bind(tacticalCoordinationSection, "Flank-lead far threat distance meters", 60.0f, new ConfigDescription("Far-threat boundary used only to prefer tactical roles for FlankLead assignment. Effective value remains materially above the close boundary.", new AcceptableValueRange<float>(35.0f, 100.0f)));
+        tacticalCoordinationBoundAdvanceDistanceMeters = config.Bind(tacticalCoordinationSection, "Bound advance distance meters", 7.0f, new ConfigDescription("Primary distance scale for opportunistic BoundAdvance leapfrogging. Default 7 m preserves the qualified baseline; increasing it expands the mover hop and derives wider covering-lead requirements while threat standoff, SAIN authority and path safety remain mandatory.", new AcceptableValueRange<float>(5.0f, 20.0f)));
+
+        const string searchExperimentSection = "Vanguard - Tactical Search Experiment";
+        tacticalSearchShadowComparisonEnabled = config.Bind(searchExperimentSection,
+            "Compare tactical search limits (shadow only)", false,
+            "Compare the existing Tactical Search route admission with experimental owner-distance values, on the process running your Operators. Diagnostic only: never authorizes movement or changes SAIN authority.");
+        tacticalSearchShadowOwnerLimitMeters = config.Bind(searchExperimentSection,
+            "Experimental distance to owner meters", 60.0f,
+            new ConfigDescription("Owner-distance bound for additional shadow route evaluation only. The actual Tactical Search admission retains its established limit.",
+                new AcceptableValueRange<float>(42.0f, 90.0f)));
+        tacticalSearchShadowRequireOwnerDistanceImprovement = config.Bind(searchExperimentSection,
+            "Outside normal limit: require improved cohesion", true,
+            "When already beyond the normal owner limit, only count experimental routes that bring the Operator closer to its owner. Applies only to diagnostic comparison.");
+        tacticalSearchShadowRetreatStepMeters = config.Bind(searchExperimentSection,
+            "Experimental retreat step meters", 22.0f,
+            new ConfigDescription("Shadow-only backward displacement from the Operator relative to the qualified threat. The existing Search movement and strict candidates are unchanged.",
+                new AcceptableValueRange<float>(5.0f, 45.0f)));
+        tacticalSearchShadowLateralOffsetMeters = config.Bind(searchExperimentSection,
+            "Experimental lateral offset meters", 12.0f,
+            new ConfigDescription("Shadow-only sideways displacement for the two flank candidates. Zero compares a straight retreat. No movement is executed.",
+                new AcceptableValueRange<float>(0.0f, 25.0f)));
+        tacticalSearchShadowMaxPathMeters = config.Bind(searchExperimentSection,
+            "Experimental maximum path length meters", 55.0f,
+            new ConfigDescription("Shadow-only NavMesh path-length cap for the experimental candidates. The strict path cap and corner/safety guards remain unchanged.",
+                new AcceptableValueRange<float>(26.0f, 90.0f)));
 
         const string lootSection = "Vanguard - Opportunistic Loot";
         lootOperationalSessionEnabled = config.Bind(lootSection, "Enable operational opportunistic loot", true, "Master runtime switch for Vanguard opportunistic-loot execution. Per-Operator Cadavres/Conteneurs permissions still decide which target kinds are allowed; runtime/F12 can only narrow them. Combat and medical remain superior authorities.");
@@ -236,6 +286,21 @@ internal static class VanguardOperatorRuntimeAuditOptions
         Subscribe(movementOpportunisticLootMaxDistanceMeters);
         Subscribe(movementOpportunisticLootScanCooldownSeconds);
         Subscribe(movementOpportunisticLootGrantSeconds);
+        Subscribe(tacticalCoordinationDangerCloseWeaponMeters);
+        Subscribe(tacticalCoordinationProactiveWeaponMeters);
+        Subscribe(tacticalCoordinationOverwatchMinimumThreatMeters);
+        Subscribe(tacticalCoordinationOverwatchStandoffMeters);
+        Subscribe(tacticalCoordinationBuddyIsolationMeters);
+        Subscribe(tacticalCoordinationBuddyHelperMaxMeters);
+        Subscribe(tacticalCoordinationFlankLeadCloseMeters);
+        Subscribe(tacticalCoordinationFlankLeadFarMeters);
+        Subscribe(tacticalCoordinationBoundAdvanceDistanceMeters);
+        Subscribe(tacticalSearchShadowComparisonEnabled);
+        Subscribe(tacticalSearchShadowOwnerLimitMeters);
+        Subscribe(tacticalSearchShadowRequireOwnerDistanceImprovement);
+        Subscribe(tacticalSearchShadowRetreatStepMeters);
+        Subscribe(tacticalSearchShadowLateralOffsetMeters);
+        Subscribe(tacticalSearchShadowMaxPathMeters);
         Subscribe(lootOperationalSessionEnabled);
         Subscribe(lootBackupLongWeaponEnabled);
         Subscribe(lootBackupPistolEnabled);
@@ -325,6 +390,21 @@ internal static class VanguardOperatorRuntimeAuditOptions
             MovementOpportunisticLootMaxDistanceMeters = Clamp(GetMovementOpportunisticLootMaxDistanceMeters(), 6.0f, 42.0f),
             MovementOpportunisticLootScanCooldownSeconds = Clamp(GetMovementOpportunisticLootScanCooldownSeconds(), 8.0f, 60.0f),
             MovementOpportunisticLootGrantSeconds = Clamp(GetMovementOpportunisticLootGrantSeconds(), 4.0f, 20.0f),
+            TacticalCoordinationDangerCloseWeaponMeters = GetTacticalCoordinationDangerCloseWeaponMeters(),
+            TacticalCoordinationProactiveWeaponMeters = GetTacticalCoordinationProactiveWeaponMeters(),
+            TacticalCoordinationOverwatchMinimumThreatMeters = GetTacticalCoordinationOverwatchMinimumThreatMeters(),
+            TacticalCoordinationOverwatchStandoffMeters = GetTacticalCoordinationOverwatchStandoffMeters(),
+            TacticalCoordinationBuddyIsolationMeters = GetTacticalCoordinationBuddyIsolationMeters(),
+            TacticalCoordinationBuddyHelperMaxMeters = GetTacticalCoordinationBuddyHelperMaxMeters(),
+            TacticalCoordinationFlankLeadCloseMeters = GetTacticalCoordinationFlankLeadCloseMeters(),
+            TacticalCoordinationFlankLeadFarMeters = GetTacticalCoordinationFlankLeadFarMeters(),
+            TacticalCoordinationBoundAdvanceDistanceMeters = GetTacticalCoordinationBoundAdvanceDistanceMeters(),
+            TacticalSearchShadowComparisonEnabled = GetTacticalSearchShadowComparisonEnabled(),
+            TacticalSearchShadowOwnerLimitMeters = GetTacticalSearchShadowOwnerLimitMeters(),
+            TacticalSearchShadowRequireOwnerDistanceImprovement = GetTacticalSearchShadowRequireOwnerDistanceImprovement(),
+            TacticalSearchShadowRetreatStepMeters = GetTacticalSearchShadowRetreatStepMeters(),
+            TacticalSearchShadowLateralOffsetMeters = GetTacticalSearchShadowLateralOffsetMeters(),
+            TacticalSearchShadowMaxPathMeters = GetTacticalSearchShadowMaxPathMeters(),
             LootOperationalSessionEnabled = GetLootOperationalSessionEnabled(),
             LootBackupLongWeaponEnabled = GetLootBackupLongWeaponEnabled(),
             LootBackupPistolEnabled = GetLootBackupPistolEnabled(),
@@ -375,7 +455,6 @@ internal static class VanguardOperatorRuntimeAuditOptions
             decisionSnapshotLog!.Value = settings.DecisionSnapshotLogEnabled;
             intentDryRun!.Value = settings.IntentDryRunEnabled;
             threatScannerDryRun!.Value = settings.ThreatScannerDryRunEnabled;
-            firstActiveMobileMedicalLease!.Value = settings.FirstActiveMobileMedicalLeaseEnabled;
             operatorPostRaidPersistenceEnabled!.Value = settings.OperatorPostRaidPersistenceEnabled;
             headlessKeepGcEnabledInRaid!.Value = settings.HeadlessKeepGcEnabledInRaid;
             verboseTransitionLog!.Value = settings.VerboseTransitionLogEnabled;
@@ -383,28 +462,7 @@ internal static class VanguardOperatorRuntimeAuditOptions
             summaryInterval!.Value = Clamp(settings.SummaryIntervalSeconds, 30.0f, 120.0f);
             transitionLogMinInterval!.Value = Clamp(settings.TransitionLogMinIntervalSeconds, 0.5f, 10.0f);
             threatScannerInterval!.Value = Clamp(settings.ThreatScannerIntervalSeconds, 0.5f, 3.0f);
-            movementOutsideBubbleRecallEnabled!.Value = settings.MovementOutsideBubbleRecallEnabled;
-            movementSainBoundaryReturnEnabled!.Value = settings.MovementSainBoundaryReturnEnabled;
-            movementSuppressExternalDuringRecallEnabled!.Value = settings.MovementSuppressExternalDuringRecallEnabled;
             movementVerboseDoctrineLogEnabled!.Value = settings.MovementVerboseDoctrineLogEnabled;
-            movementTacticalRepositionEnabled!.Value = settings.MovementTacticalRepositionEnabled;
-            movementTacticalRepositionCooldownSeconds!.Value = Clamp(settings.MovementTacticalRepositionCooldownSeconds, 3.0f, 30.0f);
-            movementTacticalRepositionMinDeltaMeters!.Value = Clamp(settings.MovementTacticalRepositionMinDeltaMeters, 3.0f, 18.0f);
-            movementTacticalBubbleMeters!.Value = Clamp(settings.MovementTacticalBubbleMeters, 35.0f, 120.0f);
-            movementSoftCorrectionMeters!.Value = Clamp(settings.MovementSoftCorrectionMeters, 40.0f, 135.0f);
-            movementHardCorrectionMeters!.Value = Clamp(settings.MovementHardCorrectionMeters, 45.0f, 150.0f);
-            movementCombatCohesionForcedCatchupMeters!.Value = Clamp(settings.MovementCombatCohesionForcedCatchupMeters, 16.0f, 80.0f);
-            movementTravelCatchUpEnterMeters!.Value = Clamp(settings.MovementTravelCatchUpEnterMeters, 18.0f, 60.0f);
-            movementTravelCatchUpExitMeters!.Value = Clamp(settings.MovementTravelCatchUpExitMeters, 10.0f, 55.0f);
-            movementTravelModeDwellSeconds!.Value = Clamp(settings.MovementTravelModeDwellSeconds, 0.25f, 5.0f);
-            movementActionRallyClearMeters!.Value = Clamp(settings.MovementActionRallyClearMeters, 12.0f, 70.0f);
-            movementActionRallyAcceptMeters!.Value = Clamp(settings.MovementActionRallyAcceptMeters, 15.0f, 80.0f);
-            movementActionRallyPreferredMeters!.Value = Clamp(settings.MovementActionRallyPreferredMeters, 8.0f, 55.0f);
-            movementLeaseStartCooldownSeconds!.Value = Clamp(settings.MovementLeaseStartCooldownSeconds, 2.0f, 30.0f);
-            movementLeaseFailureCooldownSeconds!.Value = Clamp(settings.MovementLeaseFailureCooldownSeconds, 4.0f, 45.0f);
-            movementLeaseNoProgressSeconds!.Value = Clamp(settings.MovementLeaseNoProgressSeconds, 3.0f, 20.0f);
-            movementLeaseMaxDurationSeconds!.Value = Clamp(settings.MovementLeaseMaxDurationSeconds, 18.0f, 90.0f);
-            movementActionRallyMaxReanchors!.Value = ClampInt(settings.MovementActionRallyMaxReanchors, 0, 5);
         }
         finally
         {
@@ -414,90 +472,10 @@ internal static class VanguardOperatorRuntimeAuditOptions
 #endif
     }
 
-    // Legacy monolithic application is retained for source compatibility only. The persistence path sync no longer
-    // calls it on headless because PLAYER_SCOPED values must never be projected globally.
+    // Compatibility alias deliberately applies RAID_SCOPED values only. PLAYER_SCOPED gameplay
+    // policy must flow through VanguardRuntimeSettingsAuthorityResolver keyed by OwnerProfileId.
     public static void ApplyRemote(VanguardOperatorRuntimeAuditSettingsDto? settings)
-    {
-        if (settings == null)
-        {
-            return;
-        }
-
-#if SPT_CLIENT
-        if (auditLevel == null)
-        {
-            return;
-        }
-
-        suppressChangedEvents = true;
-        try
-        {
-            auditLevel!.Value = NormalizeAuditLevel(settings.AuditLevel);
-            combatDiagnosticsScope!.Value = NormalizeCombatDiagnosticsScope(settings.CombatDiagnosticsScope);
-            performanceTelemetry!.Value = NormalizePerformanceTelemetry(settings.PerformanceTelemetry);
-            detailedDiagnosticPayloads!.Value = settings.DetailedDiagnosticPayloads;
-            VanguardClientDiagnosticsLog.SetAuditLevel(auditLevel.Value, "remote_sync");
-            movementProbe!.Value = settings.MovementProbeEnabled;
-            brainProbe!.Value = settings.BrainProbeEnabled;
-            sainProbe!.Value = settings.SainProbeEnabled;
-            lootingBotsProbe!.Value = settings.LootingBotsProbeEnabled;
-            orbitProbe!.Value = settings.OrbitProbeEnabled;
-            summaryLog!.Value = settings.SummaryLogEnabled;
-            decisionSnapshotLog!.Value = settings.DecisionSnapshotLogEnabled;
-            intentDryRun!.Value = settings.IntentDryRunEnabled;
-            threatScannerDryRun!.Value = settings.ThreatScannerDryRunEnabled;
-            verboseTransitionLog!.Value = settings.VerboseTransitionLogEnabled;
-            snapshotInterval!.Value = Clamp(settings.SnapshotIntervalSeconds, 0.5f, 5.0f);
-            summaryInterval!.Value = Clamp(settings.SummaryIntervalSeconds, 30.0f, 120.0f);
-            transitionLogMinInterval!.Value = Clamp(settings.TransitionLogMinIntervalSeconds, 0.5f, 10.0f);
-            threatScannerInterval!.Value = Clamp(settings.ThreatScannerIntervalSeconds, 0.5f, 3.0f);
-            movementOutsideBubbleRecallEnabled!.Value = settings.MovementOutsideBubbleRecallEnabled;
-            movementSainBoundaryReturnEnabled!.Value = settings.MovementSainBoundaryReturnEnabled;
-            movementSuppressExternalDuringRecallEnabled!.Value = settings.MovementSuppressExternalDuringRecallEnabled;
-            movementVerboseDoctrineLogEnabled!.Value = settings.MovementVerboseDoctrineLogEnabled;
-            movementTacticalRepositionEnabled!.Value = settings.MovementTacticalRepositionEnabled;
-            movementTacticalRepositionCooldownSeconds!.Value = Clamp(settings.MovementTacticalRepositionCooldownSeconds, 3.0f, 30.0f);
-            movementTacticalRepositionMinDeltaMeters!.Value = Clamp(settings.MovementTacticalRepositionMinDeltaMeters, 3.0f, 18.0f);
-            movementTacticalBubbleMeters!.Value = Clamp(settings.MovementTacticalBubbleMeters, 35.0f, 120.0f);
-            movementSoftCorrectionMeters!.Value = Clamp(settings.MovementSoftCorrectionMeters, 40.0f, 135.0f);
-            movementHardCorrectionMeters!.Value = Clamp(settings.MovementHardCorrectionMeters, 45.0f, 150.0f);
-            movementCombatCohesionForcedCatchupMeters!.Value = Clamp(settings.MovementCombatCohesionForcedCatchupMeters, 16.0f, 80.0f);
-            movementTravelCatchUpEnterMeters!.Value = Clamp(settings.MovementTravelCatchUpEnterMeters, 18.0f, 60.0f);
-            movementTravelCatchUpExitMeters!.Value = Clamp(settings.MovementTravelCatchUpExitMeters, 10.0f, 55.0f);
-            movementTravelModeDwellSeconds!.Value = Clamp(settings.MovementTravelModeDwellSeconds, 0.25f, 5.0f);
-            movementActionRallyClearMeters!.Value = Clamp(settings.MovementActionRallyClearMeters, 12.0f, 70.0f);
-            movementActionRallyAcceptMeters!.Value = Clamp(settings.MovementActionRallyAcceptMeters, 15.0f, 80.0f);
-            movementActionRallyPreferredMeters!.Value = Clamp(settings.MovementActionRallyPreferredMeters, 8.0f, 55.0f);
-            movementLeaseStartCooldownSeconds!.Value = Clamp(settings.MovementLeaseStartCooldownSeconds, 2.0f, 30.0f);
-            movementLeaseFailureCooldownSeconds!.Value = Clamp(settings.MovementLeaseFailureCooldownSeconds, 4.0f, 45.0f);
-            movementLeaseNoProgressSeconds!.Value = Clamp(settings.MovementLeaseNoProgressSeconds, 3.0f, 20.0f);
-            movementLeaseMaxDurationSeconds!.Value = Clamp(settings.MovementLeaseMaxDurationSeconds, 18.0f, 90.0f);
-            movementActionRallyMaxReanchors!.Value = ClampInt(settings.MovementActionRallyMaxReanchors, 0, 5);
-            movementOpportunisticLootBrokerEnabled!.Value = settings.MovementOpportunisticLootBrokerEnabled;
-            movementOpportunisticLootMaxDistanceMeters!.Value = Clamp(settings.MovementOpportunisticLootMaxDistanceMeters, 6.0f, 42.0f);
-            movementOpportunisticLootScanCooldownSeconds!.Value = Clamp(settings.MovementOpportunisticLootScanCooldownSeconds, 8.0f, 60.0f);
-            movementOpportunisticLootGrantSeconds!.Value = Clamp(settings.MovementOpportunisticLootGrantSeconds, 4.0f, 20.0f);
-            lootOperationalSessionEnabled!.Value = settings.LootOperationalSessionEnabled;
-            lootBackupLongWeaponEnabled!.Value = settings.LootBackupLongWeaponEnabled;
-            lootBackupPistolEnabled!.Value = settings.LootBackupPistolEnabled;
-            lootMedicalItemsEnabled!.Value = settings.LootMedicalItemsEnabled;
-            lootCompatibleMagazinesEnabled!.Value = settings.LootCompatibleMagazinesEnabled;
-            lootCompatibleLooseAmmunitionEnabled!.Value = settings.LootCompatibleLooseAmmunitionEnabled;
-            lootGrenadesEnabled!.Value = settings.LootGrenadesEnabled;
-            lootMaximumTransactionsPerCorpse!.Value = ClampInt(settings.LootMaximumTransactionsPerCorpse, 1, 12);
-            lootMaximumSessionSeconds!.Value = Clamp(settings.LootMaximumSessionSeconds, 3.0f, 20.0f);
-            lootMaximumMedicalItemsPerSession!.Value = ClampInt(settings.LootMaximumMedicalItemsPerSession, 0, 8);
-            lootMaximumMagazinesPerSession!.Value = ClampInt(settings.LootMaximumMagazinesPerSession, 0, 8);
-            lootMaximumLooseAmmunitionRoundsPerSession!.Value = ClampInt(settings.LootMaximumLooseAmmunitionRoundsPerSession, 0, 600);
-            lootMaximumWeaponsPerSession!.Value = ClampInt(settings.LootMaximumWeaponsPerSession, 0, 2);
-        }
-        finally
-        {
-            suppressChangedEvents = false;
-            RefreshDiagnosticRuntimePolicy();
-        }
-#endif
-    }
+        => ApplyRemoteRaidScoped(settings);
 
     public static string GetAuditLevelName()
     {
@@ -885,6 +863,144 @@ internal static class VanguardOperatorRuntimeAuditOptions
         8.0f,
 #endif
         4.0f, 20.0f);
+
+    public static float GetTacticalCoordinationDangerCloseWeaponMeters() => Clamp(
+#if SPT_CLIENT
+        tacticalCoordinationDangerCloseWeaponMeters?.Value ?? 15.0f,
+#else
+        15.0f,
+#endif
+        5.0f, 20.0f);
+
+    public static float GetTacticalCoordinationProactiveWeaponMeters()
+    {
+        float configured = Clamp(
+#if SPT_CLIENT
+            tacticalCoordinationProactiveWeaponMeters?.Value ?? 25.0f,
+#else
+            25.0f,
+#endif
+            10.0f, 35.0f);
+        return Math.Max(configured, GetTacticalCoordinationDangerCloseWeaponMeters() + 2.0f);
+    }
+
+    public static float GetTacticalCoordinationOverwatchMinimumThreatMeters()
+    {
+        float configured = Clamp(
+#if SPT_CLIENT
+            tacticalCoordinationOverwatchMinimumThreatMeters?.Value ?? 35.0f,
+#else
+            35.0f,
+#endif
+            25.0f, 80.0f);
+        return Math.Max(configured, GetTacticalCoordinationProactiveWeaponMeters() + 2.0f);
+    }
+
+    public static float GetTacticalCoordinationOverwatchStandoffMeters()
+    {
+        float configured = Clamp(
+#if SPT_CLIENT
+            tacticalCoordinationOverwatchStandoffMeters?.Value ?? 32.0f,
+#else
+            32.0f,
+#endif
+            20.0f, 80.0f);
+        return Math.Min(configured, Math.Max(20.0f, GetTacticalCoordinationOverwatchMinimumThreatMeters() - 2.0f));
+    }
+
+    public static float GetTacticalCoordinationBuddyIsolationMeters() => Clamp(
+#if SPT_CLIENT
+        tacticalCoordinationBuddyIsolationMeters?.Value ?? 26.0f,
+#else
+        26.0f,
+#endif
+        15.0f, 45.0f);
+
+    public static float GetTacticalCoordinationBuddyHelperMaxMeters()
+    {
+        float configured = Clamp(
+#if SPT_CLIENT
+            tacticalCoordinationBuddyHelperMaxMeters?.Value ?? 42.0f,
+#else
+            42.0f,
+#endif
+            20.0f, 70.0f);
+        return Math.Max(configured, GetTacticalCoordinationBuddyIsolationMeters() + 4.0f);
+    }
+
+    public static float GetTacticalCoordinationFlankLeadCloseMeters() => Clamp(
+#if SPT_CLIENT
+        tacticalCoordinationFlankLeadCloseMeters?.Value ?? 20.0f,
+#else
+        20.0f,
+#endif
+        10.0f, 35.0f);
+
+    public static float GetTacticalCoordinationFlankLeadFarMeters()
+    {
+        float configured = Clamp(
+#if SPT_CLIENT
+            tacticalCoordinationFlankLeadFarMeters?.Value ?? 60.0f,
+#else
+            60.0f,
+#endif
+            35.0f, 100.0f);
+        return Math.Max(configured, GetTacticalCoordinationFlankLeadCloseMeters() + 15.0f);
+    }
+
+    public static bool GetTacticalSearchShadowComparisonEnabled() =>
+#if SPT_CLIENT
+        tacticalSearchShadowComparisonEnabled?.Value ?? false;
+#else
+        false;
+#endif
+
+    public static float GetTacticalSearchShadowOwnerLimitMeters() => Clamp(
+#if SPT_CLIENT
+        tacticalSearchShadowOwnerLimitMeters?.Value ?? 60.0f,
+#else
+        60.0f,
+#endif
+        42.0f, 90.0f);
+
+    public static bool GetTacticalSearchShadowRequireOwnerDistanceImprovement() =>
+#if SPT_CLIENT
+        tacticalSearchShadowRequireOwnerDistanceImprovement?.Value ?? true;
+#else
+        true;
+#endif
+
+    public static float GetTacticalSearchShadowRetreatStepMeters() => Clamp(
+#if SPT_CLIENT
+        tacticalSearchShadowRetreatStepMeters?.Value ?? 22.0f,
+#else
+        22.0f,
+#endif
+        5.0f, 45.0f);
+
+    public static float GetTacticalSearchShadowLateralOffsetMeters() => Clamp(
+#if SPT_CLIENT
+        tacticalSearchShadowLateralOffsetMeters?.Value ?? 12.0f,
+#else
+        12.0f,
+#endif
+        0.0f, 25.0f);
+
+    public static float GetTacticalSearchShadowMaxPathMeters() => Clamp(
+#if SPT_CLIENT
+        tacticalSearchShadowMaxPathMeters?.Value ?? 55.0f,
+#else
+        55.0f,
+#endif
+        26.0f, 90.0f);
+
+    public static float GetTacticalCoordinationBoundAdvanceDistanceMeters() => Clamp(
+#if SPT_CLIENT
+        tacticalCoordinationBoundAdvanceDistanceMeters?.Value ?? 7.0f,
+#else
+        7.0f,
+#endif
+        5.0f, 20.0f);
 
     public static bool GetLootOperationalSessionEnabled() =>
 #if SPT_CLIENT

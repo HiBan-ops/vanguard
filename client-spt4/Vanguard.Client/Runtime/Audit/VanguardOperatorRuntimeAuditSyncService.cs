@@ -536,6 +536,21 @@ internal static class VanguardOperatorRuntimeAuditSyncService
             MovementOpportunisticLootMaxDistanceMeters = local.MovementOpportunisticLootMaxDistanceMeters,
             MovementOpportunisticLootScanCooldownSeconds = local.MovementOpportunisticLootScanCooldownSeconds,
             MovementOpportunisticLootGrantSeconds = local.MovementOpportunisticLootGrantSeconds,
+            TacticalCoordinationDangerCloseWeaponMeters = local.TacticalCoordinationDangerCloseWeaponMeters,
+            TacticalCoordinationProactiveWeaponMeters = local.TacticalCoordinationProactiveWeaponMeters,
+            TacticalCoordinationOverwatchMinimumThreatMeters = local.TacticalCoordinationOverwatchMinimumThreatMeters,
+            TacticalCoordinationOverwatchStandoffMeters = local.TacticalCoordinationOverwatchStandoffMeters,
+            TacticalCoordinationBuddyIsolationMeters = local.TacticalCoordinationBuddyIsolationMeters,
+            TacticalCoordinationBuddyHelperMaxMeters = local.TacticalCoordinationBuddyHelperMaxMeters,
+            TacticalCoordinationFlankLeadCloseMeters = local.TacticalCoordinationFlankLeadCloseMeters,
+            TacticalCoordinationFlankLeadFarMeters = local.TacticalCoordinationFlankLeadFarMeters,
+            TacticalCoordinationBoundAdvanceDistanceMeters = local.TacticalCoordinationBoundAdvanceDistanceMeters,
+            TacticalSearchShadowComparisonEnabled = local.TacticalSearchShadowComparisonEnabled,
+            TacticalSearchShadowOwnerLimitMeters = local.TacticalSearchShadowOwnerLimitMeters,
+            TacticalSearchShadowRequireOwnerDistanceImprovement = local.TacticalSearchShadowRequireOwnerDistanceImprovement,
+            TacticalSearchShadowRetreatStepMeters = local.TacticalSearchShadowRetreatStepMeters,
+            TacticalSearchShadowLateralOffsetMeters = local.TacticalSearchShadowLateralOffsetMeters,
+            TacticalSearchShadowMaxPathMeters = local.TacticalSearchShadowMaxPathMeters,
             LootOperationalSessionEnabled = local.LootOperationalSessionEnabled,
             LootBackupLongWeaponEnabled = local.LootBackupLongWeaponEnabled,
             LootBackupPistolEnabled = local.LootBackupPistolEnabled,
@@ -603,6 +618,21 @@ internal static class VanguardOperatorRuntimeAuditSyncService
             settings.MovementCombatCohesionForcedCatchupMeters.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture),
             settings.MovementOpportunisticLootBrokerEnabled,
             settings.MovementOpportunisticLootMaxDistanceMeters.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture),
+            settings.TacticalCoordinationDangerCloseWeaponMeters.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture),
+            settings.TacticalCoordinationProactiveWeaponMeters.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture),
+            settings.TacticalCoordinationOverwatchMinimumThreatMeters.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture),
+            settings.TacticalCoordinationOverwatchStandoffMeters.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture),
+            settings.TacticalCoordinationBuddyIsolationMeters.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture),
+            settings.TacticalCoordinationBuddyHelperMaxMeters.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture),
+            settings.TacticalCoordinationFlankLeadCloseMeters.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture),
+            settings.TacticalCoordinationFlankLeadFarMeters.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture),
+            settings.TacticalCoordinationBoundAdvanceDistanceMeters.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture),
+            settings.TacticalSearchShadowComparisonEnabled,
+            settings.TacticalSearchShadowOwnerLimitMeters.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture),
+            settings.TacticalSearchShadowRequireOwnerDistanceImprovement,
+            settings.TacticalSearchShadowRetreatStepMeters.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture),
+            settings.TacticalSearchShadowLateralOffsetMeters.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture),
+            settings.TacticalSearchShadowMaxPathMeters.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture),
             settings.LootOperationalSessionEnabled,
             settings.LootMaximumTransactionsPerCorpse,
             settings.RaidAuthorityProfileId,
@@ -619,7 +649,7 @@ internal static class VanguardOperatorRuntimeAuditSyncService
         RemoteSignatureByOwner[owner] = signature;
         VanguardClientDiagnosticsLog.Info(
             VanguardBuildVersion.F12AuthorityConvergenceStatusTag,
-            $"VANGUARD_F12_OWNER_SETTINGS_APPLIED owner={Safe(owner)}; raidAuthority={Safe(settings.RaidAuthorityProfileId)}; playerSource={Safe(settings.PlayerScopedSource)}; raidSource={Safe(settings.RaidScopedSource)}; auditLevel={Safe(settings.AuditLevel)}; firstMedicalLease={settings.FirstActiveMobileMedicalLeaseEnabled}; postRaidPersistence={settings.OperatorPostRaidPersistenceEnabled}; headlessGcEnabledInRaid={settings.HeadlessKeepGcEnabledInRaid}; bubble={settings.MovementTacticalBubbleMeters:0.0}; hard={settings.MovementHardCorrectionMeters:0.0}; combatPursuitCohesion={settings.MovementCombatCohesionForcedCatchupMeters:0.0}; lootBroker={settings.MovementOpportunisticLootBrokerEnabled}; lootRadius={settings.MovementOpportunisticLootMaxDistanceMeters:0.0}; lootSession={settings.LootOperationalSessionEnabled}; lootTx={settings.LootMaximumTransactionsPerCorpse}; reason={Safe(reason)}; governance={Safe(settings.GovernanceVersion)}");
+            $"VANGUARD_F12_OWNER_SETTINGS_APPLIED owner={Safe(owner)}; raidAuthority={Safe(settings.RaidAuthorityProfileId)}; playerSource={Safe(settings.PlayerScopedSource)}; raidSource={Safe(settings.RaidScopedSource)}; auditLevel={Safe(settings.AuditLevel)}; firstMedicalLease={settings.FirstActiveMobileMedicalLeaseEnabled}; postRaidPersistence={settings.OperatorPostRaidPersistenceEnabled}; headlessGcEnabledInRaid={settings.HeadlessKeepGcEnabledInRaid}; bubble={settings.MovementTacticalBubbleMeters:0.0}; hard={settings.MovementHardCorrectionMeters:0.0}; combatPursuitCohesion={settings.MovementCombatCohesionForcedCatchupMeters:0.0}; lootBroker={settings.MovementOpportunisticLootBrokerEnabled}; lootRadius={settings.MovementOpportunisticLootMaxDistanceMeters:0.0}; tcWeapon={settings.TacticalCoordinationDangerCloseWeaponMeters:0.0}/{settings.TacticalCoordinationProactiveWeaponMeters:0.0}/{settings.TacticalCoordinationOverwatchMinimumThreatMeters:0.0}; tcOverwatchStandoff={settings.TacticalCoordinationOverwatchStandoffMeters:0.0}; tcBuddy={settings.TacticalCoordinationBuddyIsolationMeters:0.0}/{settings.TacticalCoordinationBuddyHelperMaxMeters:0.0}; tcFlank={settings.TacticalCoordinationFlankLeadCloseMeters:0.0}/{settings.TacticalCoordinationFlankLeadFarMeters:0.0}; tcBoundAdvance={settings.TacticalCoordinationBoundAdvanceDistanceMeters:0.0}; lootSession={settings.LootOperationalSessionEnabled}; lootTx={settings.LootMaximumTransactionsPerCorpse}; reason={Safe(reason)}; governance={Safe(settings.GovernanceVersion)}");
         return true;
     }
 

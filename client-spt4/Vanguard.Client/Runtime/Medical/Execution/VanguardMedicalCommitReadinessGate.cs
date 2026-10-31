@@ -7,16 +7,17 @@ using EFT;
 using Vanguard.Client.Runtime.Medical;
 using Vanguard.Client.Runtime.PostLoot;
 
-// Responsibility: Provides Medical Commit Readiness Gate support for the medical runtime.
-// Flow: The file encapsulates one bounded piece of the subsystem and exchanges explicit inputs/results with neighboring services instead of relying on hidden cross-system state.
-// Authority boundary: Authority remains with the owning subsystem and any external EFT/SPT/Fika/SAIN component explicitly referenced by its call path.
-// Invariant: Behavior stays scoped to the current profile/raid/process contract and preserves existing safety and compatibility boundaries.
+// Responsibility: Check medical-controller readiness immediately before a native treatment commit.
+// Flow: Compare fresh coherent decision snapshots and hands/item safety before allowing the applicable commit path.
+// Authority boundary: The gate only evaluates readiness; it does not acquire a lease, manipulate hands or record treatment failure.
+// Invariant: Ordinary commits require stable evidence; prepared direct surgery preserves its separate live-item safety check.
 namespace Vanguard.Client.Runtime.Medical.Execution;
 
 /// <summary>
-/// Read-only pre-commit gate for non-urgent medical controller starts. It requires two
-/// distinct, coherent snapshots before the first native apply call. It never opens a lease,
-/// mutates hands, moves the Operator or writes a failed medical outcome.
+/// Read-only pre-commit gate for medical controller starts. Standard HP, fracture and
+/// unprepared surgery commits require two distinct coherent snapshots. A prepared direct
+/// surgery can reuse its live EFT item check while retaining hands and stationary safety.
+/// This gate never opens a lease, mutates hands, moves or records a failed outcome.
 /// </summary>
 internal static class VanguardMedicalCommitReadinessGate
 {
@@ -32,7 +33,28 @@ internal static class VanguardMedicalCommitReadinessGate
         StateByBotProfile.Clear();
         LastLogAtByKey.Clear();
         VanguardClientDiagnosticsLog.Info(StatusTag,
-            $"VANGUARD_MEDICAL_COMMIT_READINESS_RESET reason={Safe(reason)}; twoDistinctSnapshots=true; urgentBleedUnchanged=true; surgeryCommitIncluded=true; hpFractureCommitIncluded=true; movementMutation=false; handsMutation=false; outcomeMutation=false; tag={StatusTag}");
+            $"VANGUARD_MEDICAL_COMMIT_READINESS_RESET reason={Safe(reason)}; twoDistinctSnapshotsForStandardCommit=true; directPreparedSurgeryUsesLiveCheck=true; urgentBleedUnchanged=true; surgeryCommitIncluded=true; hpFractureCommitIncluded=true; movementMutation=false; handsMutation=false; outcomeMutation=false; tag={StatusTag}");
+    }
+
+    public static int ForgetRuntimePresence(string? botProfileId, string reason)
+    {
+        string key = Safe(botProfileId);
+        if (string.Equals(key, "none", StringComparison.OrdinalIgnoreCase))
+        {
+            return 0;
+        }
+
+        int removed = StateByBotProfile.Remove(key) ? 1 : 0;
+        foreach (string logKey in new List<string>(LastLogAtByKey.Keys))
+        {
+            if (logKey.IndexOf(key, StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                LastLogAtByKey.Remove(logKey);
+                removed++;
+            }
+        }
+
+        return removed;
     }
 
     public static bool CanCommit(
@@ -40,11 +62,19 @@ internal static class VanguardMedicalCommitReadinessGate
         OperatorDecisionSnapshot snapshot,
         VanguardMobileMedicalActionSelection selection,
         DateTimeOffset now,
-        out string reason)
+        out string reason,
+        bool preparedSurgeryLiveSelection = false)
     {
         snapshot ??= OperatorDecisionSnapshot.Empty;
         string bot = Safe(snapshot.BotProfileId);
         string signature = BuildSignature(selection);
+        // Only the already-prepared direct surgery path supplies this signal. Its exact
+        // kit/target was just verified by EFT's live CanApplyItem, and this call is
+        // immediately followed by two native surgical-commit validations.
+        // No second read-only snapshot confirmation is useful for this same start.
+        bool livePreparedSurgery = preparedSurgeryLiveSelection
+            && VanguardMedicalSurgeryTargetPolicy.IsSurgeryNeed(selection.Need)
+            && string.Equals(selection.ExecutionLane, "stationary_surgery_direct_chain", StringComparison.OrdinalIgnoreCase);
 
         if (!RequiresStableCommit(selection))
         {
@@ -53,13 +83,22 @@ internal static class VanguardMedicalCommitReadinessGate
             return true;
         }
 
-        if (!IsReady(botOwner, snapshot, selection, out string readinessReason, out string handsSignature))
+        if (!IsReady(botOwner, snapshot, selection, requireSnapshotCanApply: !livePreparedSurgery, out string readinessReason, out string handsSignature))
         {
             StateByBotProfile.Remove(bot);
             reason = "not_ready:" + readinessReason;
             LogThrottled(bot + "|not_ready|" + readinessReason, now,
                 $"VANGUARD_MEDICAL_COMMIT_DEFERRED operator={Safe(snapshot.OperatorId)}; botProfile={bot}; signature={Safe(signature)}; reason={Safe(readinessReason)}; leaseStarted=false; nativeApply=false; failedOutcome=false; tag={StatusTag}");
             return false;
+        }
+
+        if (livePreparedSurgery)
+        {
+            // The medical hands, threat, and stationary checks above still apply.
+            // Avoid carrying an old two-snapshot confirmation into the next action.
+            StateByBotProfile.Remove(bot);
+            reason = "prepared_surgery_live_commit_ready";
+            return true;
         }
 
         DateTimeOffset observationUtc = snapshot.CapturedAtUtc == DateTimeOffset.MinValue ? now : snapshot.CapturedAtUtc;
@@ -95,11 +134,44 @@ internal static class VanguardMedicalCommitReadinessGate
             return false;
         }
 
-        StateByBotProfile.Remove(bot);
+        bool retainForFinalFractureSettle = selection.Need == VanguardMedicalNeed.Fracture;
+        if (retainForFinalFractureSettle)
+        {
+            // The final stationary settle happens after this two-snapshot gate. Keep the exact
+            // ready proof alive while every live readiness/identity check above remains true,
+            // then consume it only when the native fracture lease actually starts.
+            state.FirstObservedUtc = now;
+            StateByBotProfile[bot] = state;
+        }
+        else
+        {
+            StateByBotProfile.Remove(bot);
+        }
+
         LogThrottled(bot + "|ready|" + signature, now,
-            $"VANGUARD_MEDICAL_COMMIT_READY operator={Safe(snapshot.OperatorId)}; botProfile={bot}; signature={Safe(signature)}; hands={Safe(handsSignature)}; consecutiveReady={state.ConsecutiveReady}; leaseMayStart=true; nativeApplyMayStart=true; tag={StatusTag}");
-        reason = "stable_commit_ready";
+            $"VANGUARD_MEDICAL_COMMIT_READY operator={Safe(snapshot.OperatorId)}; botProfile={bot}; signature={Safe(signature)}; hands={Safe(handsSignature)}; consecutiveReady={state.ConsecutiveReady}; retainedForFinalFractureSettle={retainForFinalFractureSettle.ToString().ToLowerInvariant()}; leaseMayStart=true; nativeApplyMayStart=true; tag={StatusTag}");
+        reason = retainForFinalFractureSettle ? "stable_commit_ready_retained_for_final_fracture_settle" : "stable_commit_ready";
         return true;
+    }
+
+    public static void ConsumeStableCommit(string? botProfileId, VanguardMobileMedicalActionSelection selection, string reason)
+    {
+        if (selection.Need != VanguardMedicalNeed.Fracture)
+        {
+            return;
+        }
+
+        string bot = Safe(botProfileId);
+        if (string.Equals(bot, "none", StringComparison.OrdinalIgnoreCase)
+            || !StateByBotProfile.TryGetValue(bot, out ReadyState state)
+            || !string.Equals(state.Signature, BuildSignature(selection), StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        StateByBotProfile.Remove(bot);
+        VanguardClientDiagnosticsLog.Diagnostic(StatusTag, () =>
+            $"VANGUARD_MEDICAL_COMMIT_READY_CONSUMED botProfile={bot}; signature={Safe(state.Signature)}; reason={Safe(reason)}; fracture=true; nativeLeaseStarted=true; tag={StatusTag}");
     }
 
     private static bool RequiresStableCommit(VanguardMobileMedicalActionSelection selection)
@@ -113,6 +185,7 @@ internal static class VanguardMedicalCommitReadinessGate
         BotOwner? botOwner,
         OperatorDecisionSnapshot snapshot,
         VanguardMobileMedicalActionSelection selection,
+        bool requireSnapshotCanApply,
         out string reason,
         out string handsSignature)
     {
@@ -130,7 +203,7 @@ internal static class VanguardMedicalCommitReadinessGate
             return false;
         }
 
-        if (actionability.CanApplyItem != true)
+        if (requireSnapshotCanApply && actionability.CanApplyItem != true)
         {
             reason = "can_apply_not_true";
             return false;

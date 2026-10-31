@@ -101,8 +101,6 @@ internal static class VanguardMobileMedicalLeaseExecutor
     private static readonly TimeSpan MobileControllerUsingGrace = TimeSpan.FromSeconds(3.50d);
     private static readonly TimeSpan SurgeryControllerUsingGrace = TimeSpan.FromSeconds(6.00d);
     private static readonly TimeSpan SurgeryNativeHandsCommitTimeout = TimeSpan.FromSeconds(6.00d);
-    private static readonly TimeSpan SurgeryCmsNativeStartStallTimeout = TimeSpan.FromSeconds(24.00d);
-    private static readonly TimeSpan SurgerySurv12NativeStartStallTimeout = TimeSpan.FromSeconds(32.00d);
     private static readonly TimeSpan FirstAidNativeStartStallTimeout = TimeSpan.FromSeconds(8.50d);
     private static readonly TimeSpan NativeStartRetryHandsDrainTimeout = TimeSpan.FromSeconds(8.00d);
     private static readonly TimeSpan SurgeryNativeHandsMismatchStableWindow = TimeSpan.FromSeconds(0.50d);
@@ -154,6 +152,61 @@ internal static class VanguardMobileMedicalLeaseExecutor
         VanguardClientDiagnosticsLog.Info(StatusTag, $"first active medical lease reset reason={reason}; scope=heavy_light_bleed_hp_heal_stationary_fracture_stationary_surgery_prepare_surgery_cover_medical_isolation_post_orbit_inventory_recovery; active=true; completionRecheck=true; effectGuard=true; activeSurgery=true; prepareSurgeryCover=true; medicalIsolation=true; postOrbitInventoryRecovery=true; controllerBusyRecovery=true; surgeryDebtRetry=true; singleSurgeryApply=true; noEffectCooldown={NoEffectCooldown.TotalSeconds:0.00}; surgeryDebtRetryCooldown={SurgeryDebtRetryCooldown.TotalSeconds:0.00}; tag={ActiveMedicalHpFractureStatusTag}; effectTag={MedicalEffectGuardStatusTag}; surgeryTag={ActiveSurgeryStatusTag}; surgerySafetyTag={SainLikeSurgerySafetyStatusTag}; Tag={SurgeryCoverCompletionGuardStatusTag}; Tag={SurgeryCoverPrepareStatusTag}; Tag={PostOrbitInventoryRecoveryStatusTag}; Tag={VanguardSurgeryCoverPrepareExecutor.StatusTag}; Tag={VanguardMedicalIsolationController.StatusTag}; controllerRecoveryTag={ControllerRecoveryStatusTag}; handsSettleTag={MedicalHandsSettleStatusTag}; inventoryRefreshTag={InventoryRefreshStatusTag}; authorityHoldTag={MedicalAuthorityHoldStatusTag}; coverCommitTag={MedicalCoverCommitStatusTag}; surgeryDebtTag={MedicalSurgeryDebtRetryStatusTag}");
     }
 
+    public static string ForgetRuntimePresence(string? botProfileId, string reason)
+    {
+        string key = string.IsNullOrWhiteSpace(botProfileId) ? "none" : botProfileId.Trim();
+        if (string.Equals(key, "none", StringComparison.OrdinalIgnoreCase))
+        {
+            return "medicalRuntime=ignored_missing_profile";
+        }
+
+        int localRemoved = 0;
+        if (ControllerBusySinceByBot.Remove(key)) localRemoved++;
+        if (SnapshotsByBotProfileId.Remove(key)) localRemoved++;
+        localRemoved += ActiveLeaseSnapshot.RemoveAll(lease =>
+            lease != null && string.Equals(lease.BotProfileId, key, StringComparison.OrdinalIgnoreCase));
+
+        foreach (string logKey in LastRecheckLogAtByKey.Keys.ToArray())
+        {
+            if (logKey.StartsWith(key + "|", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(logKey, key, StringComparison.OrdinalIgnoreCase))
+            {
+                LastRecheckLogAtByKey.Remove(logKey);
+                localRemoved++;
+            }
+        }
+
+        int cover = VanguardSurgeryCoverPrepareExecutor.ForgetRuntimePresence(key, reason);
+        int isolation = VanguardMedicalIsolationController.ForgetRuntimePresence(key, reason);
+        int readiness = VanguardMedicalCommitReadinessGate.ForgetRuntimePresence(key, reason);
+        int postOrbit = VanguardPostOrbitInventoryRecoveryService.ForgetRuntimePresence(key, reason);
+        int debt = VanguardSurgeryDebtService.ForgetRuntimePresence(key, reason);
+        int watchdog = VanguardMedicalHandsWatchdogService.ForgetRuntimePresence(key, reason);
+        int nativeAttempt = VanguardMedicalNativeAttemptMemory.ForgetRuntimePresence(key, reason);
+        int resultBridge = VanguardMedicalExecutionResultBridge.ForgetRuntimePresence(key, reason);
+        int selector = VanguardMobileMedicalActionSelector.ForgetRuntimePresence(key, reason);
+        int admission = VanguardSurgeryAdmissionSettleGate.ForgetRuntimePresence(key, reason);
+        int canonical = VanguardCanonicalMedicalStateService.ForgetRuntimePresence(key, reason);
+        int preparePolicy = VanguardMedicalSurgeryPreparePolicy.ForgetRuntimePresence(key, reason);
+
+        return "medicalRuntime=forgotten"
+            + ";local=" + localRemoved
+            + ";cover=" + cover
+            + ";isolation=" + isolation
+            + ";readiness=" + readiness
+            + ";postOrbit=" + postOrbit
+            + ";debt=" + debt
+            + ";watchdog=" + watchdog
+            + ";nativeAttempt=" + nativeAttempt
+            + ";resultBridge=" + resultBridge
+            + ";selector=" + selector
+            + ";admission=" + admission
+            + ";canonical=" + canonical
+            + ";preparePolicy=" + preparePolicy
+            + ";physicalCancellation=false"
+            + ";reason=" + Safe(reason);
+    }
+
     public static void Tick()
     {
         if (!VanguardOperatorRuntimeAuditLoadGuard.IsOpen())
@@ -162,11 +215,6 @@ internal static class VanguardMobileMedicalLeaseExecutor
         }
 
         if (!VanguardFikaCompat.IsRaidAuthority)
-        {
-            return;
-        }
-
-        if (!VanguardOperatorRuntimeAuditOptions.GetFirstActiveMobileMedicalLeaseEnabled())
         {
             return;
         }
@@ -264,7 +312,9 @@ internal static class VanguardMobileMedicalLeaseExecutor
                 continue;
             }
 
-            bool waitingForPostUseCadence = !lease.EffectResolvedAwaitingHandsRelease
+            bool waitingForPostUseCadence = !lease.SurgeryCancellationRequested
+                && !lease.FirstAidCancellationRequested
+                && !lease.EffectResolvedAwaitingHandsRelease
                 && lease.ItemUseObserved
                 && lease.FirstAidEndedObserved
                 && lease.NextPostUseRecheckAtUtc != DateTimeOffset.MinValue
@@ -287,6 +337,27 @@ internal static class VanguardMobileMedicalLeaseExecutor
                 continue;
             }
 
+            if (progress.OperatorDead)
+            {
+                CompleteLease(lease, now, VanguardMedicalActionOutcomeKind.Failed, progress.Reason, FailureCooldown, progress);
+                continue;
+            }
+
+            // Cancellation already requested is the same in-flight native transaction, not an
+            // unstarted medical action. Drain it before combat authority or priority arbitration
+            // can misclassify a temporarily idle Using flag as permission to release its lease.
+            if (IsSurgeryNeed(lease.MedicalNeed) && lease.SurgeryCancellationRequested)
+            {
+                HandlePendingSurgeryCancellation(lease, record?.BotOwner, snapshot, now, progress);
+                continue;
+            }
+
+            if (!IsSurgeryNeed(lease.MedicalNeed) && lease.FirstAidCancellationRequested)
+            {
+                HandlePendingFirstAidCancellation(lease, record?.BotOwner, snapshot, now, progress);
+                continue;
+            }
+
             bool combatProtected = VanguardMainIntentScheduler.IsSainCombatExecutionProtected(snapshot.BotProfileId, now, out var combatProtectionReason);
             bool mobileLease = VanguardPrimaryExecutionContract.IsMobileMedicalKind(lease.WindowKind);
             string activeSidecarReason = "not_mobile_lease";
@@ -299,6 +370,15 @@ internal static class VanguardMobileMedicalLeaseExecutor
             {
                 if (!progress.FirstAidUsing && !lease.ItemUseObserved)
                 {
+                    if (IsSurgeryNeed(lease.MedicalNeed) && lease.SurgeryApplyAttemptCount > 0)
+                    {
+                        // ApplyToCurrentPart has already crossed the native commit boundary:
+                        // Using may still be false while EFT is settling the first callback.
+                        TryCancelCommittedSurgery(lease, record?.BotOwner, now, progress,
+                            combatProtectionReason, "sain_combat_primary", isThreat: true);
+                        continue;
+                    }
+
                     CompleteLease(lease, now, VanguardMedicalActionOutcomeKind.Interrupted,
                         "InterruptedBySainCombatPrimaryBeforeUse:" + combatProtectionReason, FailureCooldown, progress);
                     VanguardClientDiagnosticsLog.Info(VanguardPrimaryExecutionContract.SainWindowStatusTag,
@@ -307,12 +387,6 @@ internal static class VanguardMobileMedicalLeaseExecutor
                 }
 
                 LogCombatDrainOnly(lease, snapshot, now, mobileLease, mobileSidecarStillAllowed, activeSidecarReason, combatProtectionReason);
-            }
-
-            if (progress.OperatorDead)
-            {
-                CompleteLease(lease, now, VanguardMedicalActionOutcomeKind.Failed, progress.Reason, FailureCooldown, progress);
-                continue;
             }
 
             if (TryPreemptLowerPriorityMedicalLease(lease, record?.BotOwner, snapshot, now, progress))
@@ -330,26 +404,6 @@ internal static class VanguardMobileMedicalLeaseExecutor
                 continue;
             }
 
-            // Runtime invariant: surgery owns one controller use. Once native cancellation has been
-            // requested, keep the medical lease until EFT has actually returned the hands. This
-            // prevents combat/follow/loot from racing the controller's cancellation callback.
-            if (IsSurgeryNeed(lease.MedicalNeed)
-                && lease.SurgeryCancellationRequested
-                && HandlePendingSurgeryCancellation(lease, record?.BotOwner, snapshot, now, progress))
-            {
-                continue;
-            }
-
-            // A native first-aid use already committed before a true direct threat must not
-            // drain to completion while the Operator is being engaged. Keep the same lease until
-            // EFT returns the hands, so combat cannot race the native cancellation callback.
-            if (!IsSurgeryNeed(lease.MedicalNeed)
-                && lease.FirstAidCancellationRequested
-                && HandlePendingFirstAidCancellation(lease, record?.BotOwner, snapshot, now, progress))
-            {
-                continue;
-            }
-
             if (IsSurgeryNeed(lease.MedicalNeed))
             {
                 TryObserveTerminalSurgeryItemDepletionCommit(
@@ -362,7 +416,6 @@ internal static class VanguardMobileMedicalLeaseExecutor
             }
 
             if (!IsSurgeryNeed(lease.MedicalNeed)
-                && mobileLease
                 && progress.FirstAidUsing
                 && HasTrueMedicalAbortThreat(snapshot, out var committedFirstAidThreat))
             {
@@ -448,9 +501,14 @@ internal static class VanguardMobileMedicalLeaseExecutor
                     continue;
                 }
 
+                if (RequiresStationaryMedicalIsolation(lease.MedicalNeed))
+                {
+                    VanguardMedicalIsolationController.RefreshStationaryMedicalHold(lease, record?.BotOwner, snapshot, now,
+                        IsSurgeryNeed(lease.MedicalNeed) ? "surgery_using_heartbeat" : "fracture_using_heartbeat", out _);
+                }
+
                 if (IsSurgeryNeed(lease.MedicalNeed))
                 {
-                    VanguardMedicalIsolationController.RefreshStationaryMedicalHold(lease, record?.BotOwner, snapshot, now, "surgery_using_heartbeat", out _);
                     if (TryHandleSurgeryControllerCommitTimeout(lease, record?.BotOwner, snapshot, now, progress, allowInternalRetry: true))
                     {
                         continue;
@@ -1129,7 +1187,9 @@ internal static class VanguardMobileMedicalLeaseExecutor
         bool nativeControllerActive = progress.FirstAidUsing || lease.ItemUseObserved;
         if (IsSurgeryNeed(lease.MedicalNeed))
         {
-            nativeControllerActive |= IsSurgeryControllerActive(botOwner, progress);
+            // ApplyToCurrentPart is an actual native attempt even before Using is observable.
+            nativeControllerActive |= lease.SurgeryApplyAttemptCount > 0
+                || IsSurgeryControllerActive(botOwner, progress);
             if (nativeControllerActive)
             {
                 TryCancelCommittedSurgery(
@@ -1235,6 +1295,13 @@ internal static class VanguardMobileMedicalLeaseExecutor
             return;
         }
 
+        if (!VanguardRuntimeSettingsAuthorityResolver
+                .ResolvePlayerScoped(snapshot.OwnerProfileId, "mobile_medical_admission")
+                .FirstActiveMobileMedicalLeaseEnabled)
+        {
+            return;
+        }
+
         long admissionDebtStarted = VanguardRuntimePerformanceGuard.Begin();
         VanguardSurgeryDebtService.UpdateFromSnapshot(snapshot, DateTimeOffset.UtcNow);
         VanguardRuntimePerformanceGuard.End("MedicalAdmissionSurgeryDebt", admissionDebtStarted);
@@ -1257,9 +1324,11 @@ internal static class VanguardMobileMedicalLeaseExecutor
             return;
         }
         snapshot = effectiveSnapshot;
+        VanguardMedicalIsolationController.ReconcilePendingStationaryFractureConvergence(record.BotOwner, snapshot, now);
 
         if (VanguardMedicalHandsWatchdogService.IsMedicalAdmissionBlocked(snapshot.BotProfileId, out var handsAdmissionSummary))
         {
+            VanguardMedicalIsolationController.ReleasePendingStationaryFractureConvergence(snapshot.BotProfileId, record.BotOwner, now, "hands_watchdog_admission_block");
             if (ShouldLogRecheck(snapshot.BotProfileId + "|post_terminal_hands_admission_block", now))
             {
                 VanguardClientDiagnosticsLog.Info(VanguardMedicalHandsWatchdogService.StatusTag,
@@ -1279,6 +1348,14 @@ internal static class VanguardMobileMedicalLeaseExecutor
         bool selectedActiveMedical = (board.Selected.IntentKey == "MobileMedicalStabilize" && board.ExecutionWindow.WindowKind == "MobileMedicalStabilizeWindow")
             || (board.Selected.IntentKey == "StationaryMedicalStabilize" && board.ExecutionWindow.WindowKind == "StationaryMedicalFractureWindow")
             || (board.Selected.IntentKey == "StationaryMedicalSurgery" && board.ExecutionWindow.WindowKind == "StationaryMedicalSurgeryWindow");
+        bool currentBoardSelectsStationaryFracture = selectedActiveMedical
+            && board.Selected.IntentKey == "StationaryMedicalStabilize"
+            && board.ExecutionWindow.WindowKind == "StationaryMedicalFractureWindow"
+            && snapshot.Medical.Need.DominantNeed == Vanguard.Client.Runtime.Medical.VanguardMedicalNeed.Fracture;
+        if (!currentBoardSelectsStationaryFracture)
+        {
+            VanguardMedicalIsolationController.ReleasePendingStationaryFractureConvergence(snapshot.BotProfileId, record.BotOwner, now, "current_board_not_stationary_fracture");
+        }
         long admissionSchedulerStarted = VanguardRuntimePerformanceGuard.Begin();
         bool hasActivePrimary = VanguardMainIntentScheduler.TryGetActivePrimaryWindow(snapshot.BotProfileId, DateTimeOffset.UtcNow, out var activePrimaryKind, out _, out _, out var activePrimarySummary);
         bool combatPrimaryActive = VanguardMainIntentScheduler.IsSainCombatExecutionProtected(snapshot.BotProfileId, DateTimeOffset.UtcNow, out var combatProtectionReason);
@@ -1307,6 +1384,7 @@ internal static class VanguardMobileMedicalLeaseExecutor
 
         if (combatPrimaryActive && !mobileSidecarAllowed)
         {
+            VanguardMedicalIsolationController.ReleasePendingStationaryFractureConvergence(snapshot.BotProfileId, record.BotOwner, now, "combat_primary_protected");
             if (ShouldLogRecheck(snapshot.BotProfileId + "|combat_primary_medical_deferred|" + board.Selected.IntentKey, DateTimeOffset.UtcNow))
             {
                 VanguardClientDiagnosticsLog.Trace(VanguardPrimaryExecutionContract.SainWindowStatusTag,
@@ -1357,6 +1435,7 @@ internal static class VanguardMobileMedicalLeaseExecutor
         VanguardRuntimePerformanceGuard.End("MedicalAdmissionPostOrbitGate", admissionPostOrbitStarted);
         if (delayForPostOrbit)
         {
+            VanguardMedicalIsolationController.ReleasePendingStationaryFractureConvergence(snapshot.BotProfileId, record.BotOwner, now, "post_orbit_inventory_recheck:" + postOrbitDelayReason);
             if (ShouldLogRecheck(snapshot.BotProfileId + "|post_orbit_inventory_recheck|" + postOrbitDelayReason, now))
             {
                 VanguardClientDiagnosticsLog.Info(PostOrbitInventoryRecoveryStatusTag, $"VANGUARD_MEDICAL_ACTIVE_RECHECK operator={snapshot.OperatorId}; botProfile={snapshot.BotProfileId}; selectedIntent={board.Selected.IntentKey}; reason={postOrbitDelayReason}; medNeed={snapshot.Medical.Need.DominantNeed}; target={snapshot.Medical.Actionability.TargetPart}; item={snapshot.Medical.Actionability.SelectedItemName}; canApply={Tri(snapshot.Medical.Actionability.CanApplyItem)}; {postOrbitSummary}; next=medical_recheck_before_action; tag={PostOrbitInventoryRecoveryStatusTag}");
@@ -1371,6 +1450,29 @@ internal static class VanguardMobileMedicalLeaseExecutor
         VanguardRuntimePerformanceGuard.End("MedicalAdmissionActionSelector", admissionSelectorStarted);
         if (!medicalSelectionSucceeded)
         {
+            string pendingFractureConvergenceSummary = "fractureConvergencePending=false;reason=probe_not_run";
+            bool transientFractureSelectorMismatch = snapshot.Medical.Need.DominantNeed == Vanguard.Client.Runtime.Medical.VanguardMedicalNeed.Fracture
+                && string.Equals(reason, "selected_item_not_found_or_not_applicable_in_inventory_refresh", StringComparison.OrdinalIgnoreCase)
+                && snapshot.Medical.Actionability.RequiredItemAvailable
+                && snapshot.Medical.Actionability.CanApplyItem == true
+                && VanguardMedicalIsolationController.HasPendingStationaryFractureConvergence(
+                    snapshot.BotProfileId,
+                    snapshot.Medical.Actionability.TargetPart,
+                    snapshot.Medical.Actionability.SelectedItemTemplateId,
+                    now,
+                    out pendingFractureConvergenceSummary);
+
+            if (transientFractureSelectorMismatch)
+            {
+                if (ShouldLogRecheck(snapshot.BotProfileId + "|fracture_selector_transient_mismatch|" + snapshot.Medical.Actionability.SelectedItemTemplateId, now))
+                {
+                    VanguardClientDiagnosticsLog.Info(VanguardMedicalIsolationController.StationaryFractureConvergenceStatusTag,
+                        $"VANGUARD_STATIONARY_FRACTURE_SELECTOR_RECHECK_DEFERRED operator={snapshot.OperatorId}; botProfile={snapshot.BotProfileId}; selectedIntent={board.Selected.IntentKey}; selectorReason={reason}; medNeed={snapshot.Medical.Need.DominantNeed}; target={snapshot.Medical.Actionability.TargetPart}; item={snapshot.Medical.Actionability.SelectedItemName}; itemTemplate={snapshot.Medical.Actionability.SelectedItemTemplateId}; snapshotItemAvailable={Bool(snapshot.Medical.Actionability.RequiredItemAvailable)}; snapshotCanApply={Tri(snapshot.Medical.Actionability.CanApplyItem)}; {pendingFractureConvergenceSummary}; convergenceRetained=true; leaseStarted=false; nativeApply=false; failedOutcome=false; next=retry_exact_live_selector_on_next_snapshot; tag={VanguardMedicalIsolationController.StationaryFractureConvergenceStatusTag}");
+                }
+                return;
+            }
+
+            VanguardMedicalIsolationController.ReleasePendingStationaryFractureConvergence(snapshot.BotProfileId, record.BotOwner, now, "medical_selection_failed:" + reason);
             if (ShouldLogRecheck(snapshot.BotProfileId + "|" + reason, now))
             {
                 VanguardClientDiagnosticsLog.Info(StatusTag, $"VANGUARD_MEDICAL_ACTIVE_RECHECK operator={snapshot.OperatorId}; botProfile={snapshot.BotProfileId}; selectedIntent={board.Selected.IntentKey}; reason={reason}; medNeed={snapshot.Medical.Need.DominantNeed}; target={snapshot.Medical.Actionability.TargetPart}; item={snapshot.Medical.Actionability.SelectedItemName}; canApply={Tri(snapshot.Medical.Actionability.CanApplyItem)}; safety={snapshot.Medical.Safety.Reason}; stationarySafe={Bool(snapshot.Medical.Safety.SafeForStationaryAid)}; coverOrHold={Bool(snapshot.Medical.Safety.CoveredOrHoldingAngle)}; surgeryDebtExclusions={surgeryDebtExclusions}; surgeryDebt={Safe(surgeryDebtExclusionSummary)}");
@@ -1445,6 +1547,11 @@ internal static class VanguardMobileMedicalLeaseExecutor
                 $"VANGUARD_MEDICAL_EFFECT_ALTERNATIVE_SELECTED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; need={selection.Need}; target={Safe(selection.TargetPartName)}; item={Safe(selection.ItemName)}; itemInstance={Safe(selection.ItemInstanceId)}; priorNoEffectCount={circuitOutcome.ConsecutiveNoEffectCount}; excludedInstances={excludedItemInstances.Count}; doctrine=single_selector_pass_chooses_viable_instance; tag={VanguardExecutionLeaseStore.StateBoundOutcomeStatusTag}");
         }
 
+        if (selection.Need != Vanguard.Client.Runtime.Medical.VanguardMedicalNeed.Fracture)
+        {
+            VanguardMedicalIsolationController.ReleasePendingStationaryFractureConvergence(snapshot.BotProfileId, record.BotOwner, now, "selected_need_changed:" + selection.Need);
+        }
+
         if (ShouldDeferTrivialHpHealDuringTravel(snapshot, selection, initialTargetHealth, out var trivialHealReason))
         {
             if (ShouldLogRecheck(snapshot.BotProfileId + "|trivial_hp_heal_travel|" + selection.TargetPartName, now))
@@ -1469,6 +1576,7 @@ internal static class VanguardMobileMedicalLeaseExecutor
 
         if (mobileSidecarAllowed && selection.RequiresStationary)
         {
+            VanguardMedicalIsolationController.ReleasePendingStationaryFractureConvergence(snapshot.BotProfileId, record.BotOwner, now, "stationary_sidecar_blocked");
             if (ShouldLogRecheck(snapshot.BotProfileId + "|stationary_sidecar_blocked|" + selection.Need, now))
             {
                 VanguardClientDiagnosticsLog.Info(VanguardPrimaryExecutionContract.StatusTag, $"VANGUARD_STATIONARY_MEDICAL_SIDECAR_BLOCKED operator={snapshot.OperatorId}; botProfile={snapshot.BotProfileId}; reason=stationary_selection_not_sidecar; sidecarReason={Safe(mobileSidecarReason)}; {selection.Summary}; primary={Safe(activePrimaryKind)}; doctrine=stationary_medical_is_primary_only; tag={VanguardPrimaryExecutionContract.StatusTag}; medicalTag={StatusTag}");
@@ -1479,6 +1587,7 @@ internal static class VanguardMobileMedicalLeaseExecutor
         if (selection.RequiresStationary
             && VanguardMovementAuthorityDoctrine.ShouldRejoinBeforeStationaryMedicalStart(snapshot, VanguardMovementAuthorityDoctrine.StationaryMedicalStartMaxOwnerDistanceMeters, out var stationaryLeashReason))
         {
+            VanguardMedicalIsolationController.ReleasePendingStationaryFractureConvergence(snapshot.BotProfileId, record.BotOwner, now, "stationary_action_leash:" + stationaryLeashReason);
             if (ShouldLogRecheck(snapshot.BotProfileId + "|stationary_action_leash|" + stationaryLeashReason, now))
             {
                 VanguardClientDiagnosticsLog.Info(VanguardPrimaryExecutionContract.StatusTag,
@@ -1494,6 +1603,7 @@ internal static class VanguardMobileMedicalLeaseExecutor
             && !VanguardMovementAuthorityDoctrine.IsTrueDirectThreat(snapshot);
         if (breakContactRequired && !mobileOpportunityCanUseExistingSafety)
         {
+            VanguardMedicalIsolationController.ReleasePendingStationaryFractureConvergence(snapshot.BotProfileId, record.BotOwner, now, "break_contact_required:" + breakContactReason);
             if (combatPrimaryActive)
             {
                 if (ShouldLogRecheck(snapshot.BotProfileId + "|mobile_sidecar_break_contact_blocked|" + breakContactReason, now))
@@ -1534,6 +1644,21 @@ internal static class VanguardMobileMedicalLeaseExecutor
         VanguardRuntimePerformanceGuard.End("MedicalAdmissionCommitReadiness", admissionCommitGateStarted);
         if (!medicalCommitReady)
         {
+            if (selection.Need == Vanguard.Client.Runtime.Medical.VanguardMedicalNeed.Fracture
+                && IsStationaryFractureReadinessBlock(medicalCommitReadinessReason))
+            {
+                var convergenceLease = BuildStationaryFractureConvergenceLease(snapshot, selection, now);
+                bool convergenceActive = VanguardMedicalIsolationController.TryConvergeStationaryFractureAuthority(
+                    convergenceLease, record.BotOwner, snapshot, now, out var convergenceSummary);
+                VanguardClientDiagnosticsLog.Diagnostic(VanguardMedicalIsolationController.StationaryFractureConvergenceStatusTag, () =>
+                    $"VANGUARD_STATIONARY_FRACTURE_COMMIT_CONVERGENCE operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; need={selection.Need}; target={Safe(selection.TargetPartName)}; item={Safe(selection.ItemName)}; readiness={Safe(medicalCommitReadinessReason)}; convergenceActive={Bool(convergenceActive)}; {convergenceSummary}; leaseStarted=false; nativeApply=false; commitGateStillRequired=true; tag={VanguardMedicalIsolationController.StationaryFractureConvergenceStatusTag}; readinessTag={VanguardMedicalCommitReadinessGate.StatusTag}");
+                return;
+            }
+
+            if (selection.Need == Vanguard.Client.Runtime.Medical.VanguardMedicalNeed.Fracture)
+            {
+                VanguardMedicalIsolationController.ReleasePendingStationaryFractureConvergence(snapshot.BotProfileId, record.BotOwner, now, "commit_not_ready_non_stationary:" + medicalCommitReadinessReason);
+            }
             VanguardClientDiagnosticsLog.Diagnostic(VanguardMedicalCommitReadinessGate.StatusTag, () =>
                 $"VANGUARD_MEDICAL_NATIVE_APPLY_DEFERRED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; need={selection.Need}; target={Safe(selection.TargetPartName)}; item={Safe(selection.ItemName)}; reason={Safe(medicalCommitReadinessReason)}; leaseStarted=false; nativeApply=false; gameplayAuthorityUnchanged=true; tag={VanguardMedicalCommitReadinessGate.StatusTag}");
             return;
@@ -1544,7 +1669,12 @@ internal static class VanguardMobileMedicalLeaseExecutor
         var noProgressTimeout = NoProgressTimeoutFor(selection);
         var lease = new VanguardExecutionLeaseState
         {
-            LeaseId = LeasePrefixFor(selection) + now.ToUnixTimeMilliseconds().ToString(System.Globalization.CultureInfo.InvariantCulture),
+            LeaseId = selection.Need == Vanguard.Client.Runtime.Medical.VanguardMedicalNeed.Fracture
+                && VanguardMedicalIsolationController.HasPendingStationaryFractureConvergence(
+                    snapshot.BotProfileId, selection.TargetPartName, selection.ItemTemplateId, now, out _)
+                    ? VanguardMedicalIsolationController.ResolveStationaryFractureConvergenceLeaseId(
+                        snapshot.BotProfileId, selection.TargetPartName, selection.ItemTemplateId, now)
+                    : LeasePrefixFor(selection) + now.ToUnixTimeMilliseconds().ToString(System.Globalization.CultureInfo.InvariantCulture),
             OperatorId = snapshot.OperatorId,
             BotProfileId = snapshot.BotProfileId,
             IntentKey = mobileSidecarAllowed ? (mobileOpportunityKind == "idle_opportunistic_medical" ? "IdleOpportunisticMedical" : "MobileMedicalSidecar") : board.Selected.IntentKey,
@@ -1648,6 +1778,10 @@ internal static class VanguardMobileMedicalLeaseExecutor
             var firstAid = record.BotOwner.Medecine?.FirstAid;
             if (firstAid == null)
             {
+                if (selection.Need == Vanguard.Client.Runtime.Medical.VanguardMedicalNeed.Fracture)
+                {
+                    VanguardMedicalIsolationController.ReleasePendingStationaryFractureConvergence(snapshot.BotProfileId, record.BotOwner, now, "first_aid_controller_null");
+                }
                 VanguardExecutionLeaseStore.RegisterOutcome(snapshot.BotProfileId, selection.Need, selection.TargetPartName, selection.ItemTemplateId, now + RejectedCooldown);
                 VanguardClientDiagnosticsLog.Warning(StatusTag, $"VANGUARD_EXECUTION_FAILED operator={snapshot.OperatorId}; botProfile={snapshot.BotProfileId}; reason=first_aid_controller_null; {selection.Summary}");
                 return;
@@ -1655,21 +1789,65 @@ internal static class VanguardMobileMedicalLeaseExecutor
 
             if (!TryValidateSingleFirstAidCommit(record.BotOwner, firstAid.Using, firstAid.IsBleeding, selection, out var firstAidCommitReason))
             {
+                if (selection.Need == Vanguard.Client.Runtime.Medical.VanguardMedicalNeed.Fracture)
+                {
+                    VanguardMedicalIsolationController.ReleasePendingStationaryFractureConvergence(snapshot.BotProfileId, record.BotOwner, now, "first_aid_commit_not_ready:" + firstAidCommitReason);
+                }
                 VanguardClientDiagnosticsLog.Diagnostic(VanguardMedicalCommitReadinessGate.StatusTag, () =>
                     $"VANGUARD_FIRST_AID_COMMIT_DEFERRED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; need={selection.Need}; target={Safe(selection.TargetPartName)}; item={Safe(selection.ItemName)}; reason={Safe(firstAidCommitReason)}; leaseStarted=false; nativeApply=false; failedOutcome=false; tag={VanguardMedicalCommitReadinessGate.StatusTag}");
                 return;
             }
 
+            string fractureIsolationSummary = "fractureIsolation=not_required";
+            if (selection.Need == Vanguard.Client.Runtime.Medical.VanguardMedicalNeed.Fracture)
+            {
+                if (!VanguardMedicalIsolationController.TryBeginStationaryMedicalAction(lease, record.BotOwner, snapshot, now, out fractureIsolationSummary))
+                {
+                    bool postureRetry = fractureIsolationSummary.IndexOf("posture_not_ready", StringComparison.OrdinalIgnoreCase) >= 0
+                        || fractureIsolationSummary.IndexOf("stationary_settle_started", StringComparison.OrdinalIgnoreCase) >= 0
+                        || fractureIsolationSummary.IndexOf("stationary_settle_waiting", StringComparison.OrdinalIgnoreCase) >= 0;
+                    if (!postureRetry)
+                    {
+                        VanguardMedicalIsolationController.ReleasePendingStationaryFractureConvergence(snapshot.BotProfileId, record.BotOwner, now, "fracture_final_isolation_not_ready:" + fractureIsolationSummary);
+                    }
+                    VanguardClientDiagnosticsLog.Info(VanguardMedicalIsolationController.StationaryFractureConvergenceStatusTag,
+                        $"VANGUARD_STATIONARY_FRACTURE_FINAL_SETTLE_DEFERRED {lease.Summary}; {fractureIsolationSummary}; retryable={Bool(postureRetry)}; leaseStarted=false; nativeApply=false; commitGatePassed=true; tag={VanguardMedicalIsolationController.StationaryFractureConvergenceStatusTag}; isolationTag={VanguardMedicalIsolationController.StatusTag}");
+                    return;
+                }
+
+                if (!VanguardMedicalIsolationController.RefreshStationaryMedicalHold(lease, record.BotOwner, snapshot, now, "fracture_before_apply", out var fractureHoldSummary))
+                {
+                    VanguardMedicalIsolationController.ReleaseForLease(lease, record.BotOwner, now, "stationary_fracture_hold_not_ready:" + fractureHoldSummary);
+                    VanguardClientDiagnosticsLog.Info(VanguardMedicalIsolationController.StationaryFractureConvergenceStatusTag,
+                        $"VANGUARD_STATIONARY_FRACTURE_FINAL_SETTLE_DEFERRED {lease.Summary}; reason=hold_not_ready; {fractureHoldSummary}; leaseStarted=false; nativeApply=false; tag={VanguardMedicalIsolationController.StationaryFractureConvergenceStatusTag}; isolationTag={VanguardMedicalIsolationController.StatusTag}");
+                    return;
+                }
+                fractureIsolationSummary += ";" + fractureHoldSummary;
+
+                if (!TryValidateSingleFirstAidCommit(record.BotOwner, firstAid.Using, firstAid.IsBleeding, selection, out firstAidCommitReason))
+                {
+                    VanguardMedicalIsolationController.ReleaseForLease(lease, record.BotOwner, now, "stationary_fracture_commit_changed_before_start:" + firstAidCommitReason);
+                    VanguardClientDiagnosticsLog.Diagnostic(VanguardMedicalCommitReadinessGate.StatusTag, () =>
+                        $"VANGUARD_FIRST_AID_COMMIT_DEFERRED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; need={selection.Need}; target={Safe(selection.TargetPartName)}; item={Safe(selection.ItemName)}; reason={Safe(firstAidCommitReason)}; phase=after_stationary_fracture_settle; leaseStarted=false; nativeApply=false; failedOutcome=false; tag={VanguardMedicalCommitReadinessGate.StatusTag}");
+                    return;
+                }
+            }
+
             if (!VanguardExecutionLeaseStore.TryStart(lease))
             {
+                if (selection.Need == Vanguard.Client.Runtime.Medical.VanguardMedicalNeed.Fracture)
+                {
+                    VanguardMedicalIsolationController.ReleaseForLease(lease, record.BotOwner, now, "stationary_fracture_lease_start_rejected");
+                }
                 return;
             }
 
+            VanguardMedicalCommitReadinessGate.ConsumeStableCommit(snapshot.BotProfileId, selection, "fracture_native_lease_started");
             firstAid.CurUsingMeds = selection.Item;
             firstAid.Nullable_0 = selection.TargetPart;
-            VanguardClientDiagnosticsLog.Info(StatusTag, $"VANGUARD_EXECUTION_LEASE_STARTED {lease.Summary}; min={minDuration.TotalSeconds:0.00}; max={maxDuration.TotalSeconds:0.00}; noProgress={noProgressTimeout.TotalSeconds:0.00}; postUseRecheck={PostUseRecheckWindowForLease(lease).TotalSeconds:0.00}; movementAllowed={Bool(selection.MovementAllowed)}; followAllowed={Bool(selection.FollowAllowed)}; combatAllowed=false; activeMedicalTag={ActiveMedicalHpFractureStatusTag}; effectGuard={MedicalEffectGuardStatusTag}; surgeryTag={ActiveSurgeryStatusTag}; surgerySafetyTag={SainLikeSurgerySafetyStatusTag}");
+            VanguardClientDiagnosticsLog.Info(StatusTag, $"VANGUARD_EXECUTION_LEASE_STARTED {lease.Summary}; min={minDuration.TotalSeconds:0.00}; max={maxDuration.TotalSeconds:0.00}; noProgress={noProgressTimeout.TotalSeconds:0.00}; postUseRecheck={PostUseRecheckWindowForLease(lease).TotalSeconds:0.00}; movementAllowed={Bool(selection.MovementAllowed)}; followAllowed={Bool(selection.FollowAllowed)}; combatAllowed=false; medicalIsolation={Bool(selection.Need == Vanguard.Client.Runtime.Medical.VanguardMedicalNeed.Fracture)}; fractureIsolation={Safe(fractureIsolationSummary)}; activeMedicalTag={ActiveMedicalHpFractureStatusTag}; effectGuard={MedicalEffectGuardStatusTag}; surgeryTag={ActiveSurgeryStatusTag}; surgerySafetyTag={SainLikeSurgerySafetyStatusTag}; fractureConvergenceTag={VanguardMedicalIsolationController.StationaryFractureConvergenceStatusTag}");
             firstAid.TryApplyToCurrentPart();
-            VanguardClientDiagnosticsLog.Info(StatusTag, $"VANGUARD_MEDICAL_ACTIVE_ACTION_ATTEMPTED {lease.Summary}; method=BotFirstAidClass.TryApplyToCurrentPart; exactItem=true; exactTarget=true; lane={selection.ExecutionLane}");
+            VanguardClientDiagnosticsLog.Info(StatusTag, $"VANGUARD_MEDICAL_ACTIVE_ACTION_ATTEMPTED {lease.Summary}; method=BotFirstAidClass.TryApplyToCurrentPart; exactItem=true; exactTarget=true; lane={selection.ExecutionLane}; stationaryIsolation={Bool(selection.Need == Vanguard.Client.Runtime.Medical.VanguardMedicalNeed.Fracture)}; fractureConvergenceTag={VanguardMedicalIsolationController.StationaryFractureConvergenceStatusTag}");
         }
         catch (Exception exception)
         {
@@ -1680,9 +1858,9 @@ internal static class VanguardMobileMedicalLeaseExecutor
                 "exception=" + exception.GetType().Name + ":" + Safe(exception.Message),
                 now);
             VanguardExecutionLeaseStore.Release(snapshot.BotProfileId);
-            if (IsSurgeryNeed(selection.Need))
+            if (RequiresStationaryMedicalIsolation(selection.Need))
             {
-                VanguardMedicalIsolationController.ReleaseForLease(lease, record.BotOwner, now, "stationary_surgery_attempt_exception:" + exception.GetType().Name);
+                VanguardMedicalIsolationController.ReleaseForLease(lease, record.BotOwner, now, "stationary_medical_attempt_exception:" + exception.GetType().Name);
             }
 
             VanguardExecutionLeaseStore.RegisterOutcome(snapshot.BotProfileId, selection.Need, selection.TargetPartName, selection.ItemTemplateId, now + RejectedCooldown);
@@ -1788,7 +1966,7 @@ internal static class VanguardMobileMedicalLeaseExecutor
             return false;
         }
 
-        if (!VanguardMedicalCommitReadinessGate.CanCommit(botOwner, snapshot, selection, now, out var commitReadinessReason))
+        if (!VanguardMedicalCommitReadinessGate.CanCommit(botOwner, snapshot, selection, now, out var commitReadinessReason, preparedSurgeryLiveSelection: true))
         {
             summary = "directChain=false;reason=commit_readiness_pending:" + Safe(commitReadinessReason) + ";preparePreserved=true";
             VanguardClientDiagnosticsLog.Diagnostic(VanguardMedicalCommitReadinessGate.StatusTag, () =>
@@ -1856,13 +2034,13 @@ internal static class VanguardMobileMedicalLeaseExecutor
             return false;
         }
 
-        if (!VanguardMedicalIsolationController.TryBeginStationaryMedicalAction(surgeryLease, botOwner, snapshot, now, out var isolationSummary))
+        if (!VanguardMedicalIsolationController.TryBeginStationaryMedicalAction(prepareLease, botOwner, snapshot, now, out var isolationSummary))
         {
             summary = "directChain=false;reason=isolation_not_ready;" + isolationSummary;
             return false;
         }
 
-        if (!VanguardMedicalIsolationController.RefreshStationaryMedicalHold(surgeryLease, botOwner, snapshot, now, "direct_chain_pre_apply:" + Safe(reason), out var holdSummary))
+        if (!VanguardMedicalIsolationController.RefreshStationaryMedicalHold(prepareLease, botOwner, snapshot, now, "direct_chain_pre_apply:" + Safe(reason), out var holdSummary))
         {
             summary = "directChain=false;reason=stationary_hold_not_ready;" + holdSummary;
             VanguardMedicalIsolationController.BeginOrUpdatePrepareIsolation(prepareLease, botOwner, snapshot, now);
@@ -1890,6 +2068,22 @@ internal static class VanguardMobileMedicalLeaseExecutor
             {
                 VanguardMedicalIsolationController.BeginOrUpdatePrepareIsolation(prepareLease, botOwner, snapshot, now);
             }
+            return false;
+        }
+
+        if (!VanguardMedicalIsolationController.TryTransferStationarySurgeryAuthority(
+                prepareLease, surgeryLease, botOwner, snapshot, now, out var directTransferSummary))
+        {
+            // Failed admission after store handoff: return to the exact prepare generation
+            // without releasing an unrelated successor or applying the surgical item.
+            bool prepareRestored = VanguardExecutionLeaseStore.TryReplace(
+                prepareLease.BotProfileId, surgeryLease.LeaseId, prepareLease);
+            if (prepareRestored)
+            {
+                VanguardMedicalIsolationController.BeginOrUpdatePrepareIsolation(prepareLease, botOwner, snapshot, now);
+            }
+            summary = "directChain=false;reason=authority_handoff_failed;prepareRestored=" + Bool(prepareRestored)
+                + ";" + directTransferSummary;
             return false;
         }
 
@@ -2217,32 +2411,38 @@ internal static class VanguardMobileMedicalLeaseExecutor
             return false;
         }
 
-        bool bleedingNeed = selection.Need == VanguardMedicalNeed.HeavyBleed
-            || selection.Need == VanguardMedicalNeed.LightBleed;
-        if (bleedingNeed && !nativeBleeding)
+        // EFT / SPT BotFirstAidClass.TryApplyToCurrentPart commits when
+        // either its currently derived bleeding flag is true OR the exact selected item can be
+        // applied to the exact target part. Vanguard must mirror that native predicate here.
+        // Requiring IsBleeding alone deadlocks an exact CAT/hemostat selected by Vanguard when
+        // BotFirstAidClass still has a different native med (for example AI-2) as CurUsingMeds.
+        bool nativeCanApply;
+        try
         {
-            reason = "native_bleeding_state_not_ready";
+            nativeCanApply = botOwner.GetPlayer?.HealthController?.CanApplyItem(selection.Item, selection.TargetPart) == true;
+        }
+        catch (Exception exception)
+        {
+            reason = "commit_preflight_exception:" + exception.GetType().Name;
             return false;
         }
 
-        if (!bleedingNeed)
+        bool bleedingNeed = selection.Need == VanguardMedicalNeed.HeavyBleed
+            || selection.Need == VanguardMedicalNeed.LightBleed;
+        if (bleedingNeed && !nativeBleeding && !nativeCanApply)
         {
-            try
-            {
-                if (botOwner.GetPlayer?.HealthController?.CanApplyItem(selection.Item, selection.TargetPart) != true)
-                {
-                    reason = "health_controller_can_apply_false:" + selection.TargetPart;
-                    return false;
-                }
-            }
-            catch (Exception exception)
-            {
-                reason = "commit_preflight_exception:" + exception.GetType().Name;
-                return false;
-            }
+            reason = "native_bleeding_or_exact_can_apply_not_ready:" + selection.TargetPart;
+            return false;
+        }
+        if (!bleedingNeed && !nativeCanApply)
+        {
+            reason = "health_controller_can_apply_false:" + selection.TargetPart;
+            return false;
         }
 
-        reason = "single_first_aid_commit_ready";
+        reason = nativeBleeding && bleedingNeed
+            ? "single_first_aid_commit_ready:native_bleeding"
+            : "single_first_aid_commit_ready:native_can_apply_exact_item";
         return true;
     }
 
@@ -2494,6 +2694,44 @@ internal static class VanguardMobileMedicalLeaseExecutor
         return false;
     }
 
+    private static bool TryReadNativeMedicalHandsTruth(
+        BotOwner? botOwner,
+        out bool handsReadable,
+        out bool medicalHands,
+        out bool weaponHandsStillActive,
+        out string summary)
+    {
+        handsReadable = false;
+        medicalHands = false;
+        weaponHandsStillActive = false;
+        summary = "bot_owner_missing";
+        if (botOwner == null)
+        {
+            return false;
+        }
+
+        try
+        {
+            VanguardPostLootWeaponReadinessSnapshot hands = VanguardPostLootWeaponReadinessReader.Capture(botOwner);
+            summary = hands.Summary;
+            string handsType = hands.HandsControllerType ?? string.Empty;
+            handsReadable = !string.IsNullOrWhiteSpace(handsType)
+                && !string.Equals(handsType, "none", StringComparison.OrdinalIgnoreCase);
+            medicalHands = handsReadable
+                && (handsType.IndexOf("MedsController", StringComparison.OrdinalIgnoreCase) >= 0
+                    || handsType.IndexOf("MedsAnimationHandsController", StringComparison.OrdinalIgnoreCase) >= 0
+                    || handsType.IndexOf("Meds", StringComparison.OrdinalIgnoreCase) >= 0
+                    || handsType.IndexOf("Medicine", StringComparison.OrdinalIgnoreCase) >= 0);
+            weaponHandsStillActive = handsReadable && !medicalHands && hands.WeaponReady;
+            return true;
+        }
+        catch (Exception exception)
+        {
+            summary = "hands_read_exception:" + Safe(exception.GetType().Name);
+            return false;
+        }
+    }
+
     private static bool TryHandleNativeMedicalStartStall(
         VanguardExecutionLeaseState lease,
         BotOwner? botOwner,
@@ -2513,49 +2751,13 @@ internal static class VanguardMobileMedicalLeaseExecutor
 
         if (IsSurgeryNeed(lease.MedicalNeed))
         {
-            if (lease.SurgeryControllerCallbackObserved || lease.SurgeryResourceCommitObserved || lease.SurgeryTargetEffectConfirmed)
-            {
-                return false;
-            }
-
-            DateTimeOffset started = lease.LastSurgeryApplyAttemptAtUtc == DateTimeOffset.MinValue
-                ? lease.StartedAtUtc
-                : lease.LastSurgeryApplyAttemptAtUtc;
-            TimeSpan deadline = IsSurv12(lease.ItemTemplateId, lease.ItemName)
-                ? SurgerySurv12NativeStartStallTimeout
-                : SurgeryCmsNativeStartStallTimeout;
-            if (now - started < deadline)
-            {
-                return false;
-            }
-
-            if (HasTrueMedicalAbortThreat(snapshot, out _))
-            {
-                return false;
-            }
-
-            bool retryAllowed = allowInternalSurgeryRetry && lease.SurgeryStartRetryCount < MaxInternalSurgeryStartRetries;
-            lease.SurgeryStartRetryPending = retryAllowed;
-            lease.SurgeryStartRetryRequestedAtUtc = now;
-            lease.SurgeryStartRetryReason = retryAllowed
-                ? "native_controller_using_without_resource_commit_or_effect"
-                : "native_controller_stalled_after_bounded_retry";
-            if (retryAllowed)
-            {
-                lease.SurgeryStartRetryCount++;
-            }
-
-            TryCancelCommittedSurgery(
-                lease,
-                botOwner,
-                now,
-                progress,
-                lease.SurgeryStartRetryReason,
-                retryAllowed ? "native_start_stall_retry" : "native_start_stall_terminal",
-                isThreat: false);
-            VanguardClientDiagnosticsLog.Warning(MedicalNativeCommitStatusTag,
-                $"VANGUARD_NATIVE_SURGERY_START_STALL {lease.Summary}; elapsed={(now - started).TotalSeconds:0.00}; deadline={deadline.TotalSeconds:0.00}; retryAllowed={Bool(retryAllowed)}; retryCount={lease.SurgeryStartRetryCount}; resourceCommitted=false; targetEffect=false; callback=false; action={(retryAllowed ? "cancel_drain_then_internal_retry" : "cancel_drain_then_terminal_failure")}; gameplayFailure=false; tag={MedicalNativeCommitStatusTag}");
-            return true;
+            // A native controller that is already Using is positive in-flight truth, not a start-stall
+            // signal. The bounded SetInHands failure path is handled by
+            // TryHandleSurgeryControllerCommitTimeout, which requires stable positive weapon-hands
+            // evidence before it can cancel. Resource/effect completion remains independently bounded
+            // by the normal surgery max/absolute windows and true-threat cancellation.
+            TryObserveSurgeryNativeHandsCommit(lease, botOwner, now, out _, out _);
+            return false;
         }
 
         if (lease.FirstAidCancellationRequested || lease.FirstAidStartStallObserved)
@@ -2571,8 +2773,35 @@ internal static class VanguardMobileMedicalLeaseExecutor
             return false;
         }
 
+        if (lease.MedicalNeed == Vanguard.Client.Runtime.Medical.VanguardMedicalNeed.Fracture)
+        {
+            // BotFirstAidClass raises Using before SetInHands completes. Therefore elapsed Using time
+            // alone cannot distinguish a failed start from a legitimate long-running Splint/Grizzly
+            // animation. Cancel only when hands truth positively says the bot has returned to a ready
+            // non-medical/weapon state while the child Using latch is still stuck. Unknown, transitional
+            // or genuine medical hands fail open and are left to the bounded normal/max-window logic.
+            if (!TryReadNativeMedicalHandsTruth(botOwner, out bool handsReadable, out bool medicalHands, out bool weaponHandsStillActive, out string handsSummary)
+                || !handsReadable
+                || medicalHands
+                || !weaponHandsStillActive)
+            {
+                if (medicalHands && ShouldLogRecheck(lease.BotProfileId + "|stationary_fracture_native_hands_preserved", now))
+                {
+                    VanguardClientDiagnosticsLog.Info(MedicalNativeCommitStatusTag,
+                        $"VANGUARD_STATIONARY_FRACTURE_INFLIGHT_PRESERVED {lease.Summary}; elapsed={(now - firstAidStarted).TotalSeconds:0.00}; hands={Safe(handsSummary)}; reason=positive_native_medical_hands_using; cancellation=false; doctrine=elapsed_using_is_not_start_stall; tag={MedicalNativeCommitStatusTag}");
+                }
+                return false;
+            }
+
+            VanguardClientDiagnosticsLog.Warning(MedicalNativeCommitStatusTag,
+                $"VANGUARD_STATIONARY_FRACTURE_START_COMMIT_MISSING {lease.Summary}; elapsed={(now - firstAidStarted).TotalSeconds:0.00}; hands={Safe(handsSummary)}; reason=positive_ready_non_medical_hands_while_first_aid_using; action=bounded_cancel_then_fresh_lease_retry; tag={MedicalNativeCommitStatusTag}");
+        }
+
         lease.FirstAidStartStallObserved = true;
-        TryCancelStalledFirstAid(lease, botOwner, now, progress, "native_first_aid_using_without_resource_or_effect");
+        TryCancelStalledFirstAid(lease, botOwner, now, progress,
+            lease.MedicalNeed == Vanguard.Client.Runtime.Medical.VanguardMedicalNeed.Fracture
+                ? "native_first_aid_using_with_positive_weapon_hands_after_start_timeout"
+                : "native_first_aid_using_without_resource_or_effect");
         return true;
     }
 
@@ -3880,10 +4109,11 @@ internal static class VanguardMobileMedicalLeaseExecutor
         {
             VanguardSurgeryDebtService.RegisterOutcome(lease, progress, now, outcome, reason);
         }
-        if (IsSurgeryNeed(lease.MedicalNeed))
+        if (RequiresStationaryMedicalIsolation(lease.MedicalNeed))
         {
             VanguardRaidOperatorRuntimeRegistry.TryGetRuntimeByBotProfileId(lease.BotProfileId, out var releaseRecord);
-            VanguardMedicalIsolationController.ReleaseForLease(lease, releaseRecord?.BotOwner, now, "stationary_surgery_" + outcome + ":" + reason);
+            string stationaryKind = IsSurgeryNeed(lease.MedicalNeed) ? "surgery" : "fracture";
+            VanguardMedicalIsolationController.ReleaseForLease(lease, releaseRecord?.BotOwner, now, "stationary_" + stationaryKind + "_" + outcome + ":" + reason);
         }
 
         if (!terminalTruth.DeadConfirmed && confirmedNativeAttempt && IsNoEffectReason(reason, progress))
@@ -3951,6 +4181,45 @@ internal static class VanguardMobileMedicalLeaseExecutor
         return lease.MedicalNeed == Vanguard.Client.Runtime.Medical.VanguardMedicalNeed.HpHeal ? HpHealPostUseRecheckWindow : MobilePostUseRecheckWindow;
     }
 
+
+    private static VanguardExecutionLeaseState BuildStationaryFractureConvergenceLease(
+        OperatorDecisionSnapshot snapshot,
+        VanguardMobileMedicalActionSelection selection,
+        DateTimeOffset now)
+    {
+        return new VanguardExecutionLeaseState
+        {
+            LeaseId = VanguardMedicalIsolationController.ResolveStationaryFractureConvergenceLeaseId(
+                snapshot.BotProfileId, selection.TargetPartName, selection.ItemTemplateId, now),
+            OperatorId = snapshot.OperatorId,
+            BotProfileId = snapshot.BotProfileId,
+            IntentKey = "StationaryMedicalStabilize",
+            WindowKind = "StationaryMedicalFractureConvergenceWindow",
+            MedicalNeed = selection.Need,
+            TargetPart = selection.TargetPartName,
+            ItemTemplateId = selection.ItemTemplateId,
+            ItemInstanceId = selection.ItemInstanceId,
+            ItemName = selection.ItemName,
+            StartedAtUtc = now,
+            LastProgressAtUtc = now,
+            Attempted = false
+        };
+    }
+
+    private static bool IsStationaryFractureReadinessBlock(string? reason)
+    {
+        return !string.IsNullOrWhiteSpace(reason)
+            && (reason.IndexOf("stationary_active_movement_command", StringComparison.OrdinalIgnoreCase) >= 0
+                || reason.IndexOf("stationary_posture_not_stable", StringComparison.OrdinalIgnoreCase) >= 0
+                || reason.IndexOf("ready_confirmation_pending", StringComparison.OrdinalIgnoreCase) >= 0
+                || reason.IndexOf("ready_confirmation_non_new_snapshot_pending", StringComparison.OrdinalIgnoreCase) >= 0);
+    }
+
+    private static bool RequiresStationaryMedicalIsolation(Vanguard.Client.Runtime.Medical.VanguardMedicalNeed need)
+    {
+        return need == Vanguard.Client.Runtime.Medical.VanguardMedicalNeed.Fracture
+            || IsSurgeryNeed(need);
+    }
 
     private static string LeasePrefixFor(VanguardMobileMedicalActionSelection selection)
     {

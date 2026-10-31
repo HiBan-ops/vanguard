@@ -52,6 +52,23 @@ internal static class VanguardMobileMedicalActionSelector
     private static readonly object SurgeryLogSync = new();
     private static readonly Dictionary<string, string> LastSurgeryAreaStateByBot = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<string, DateTimeOffset> LastSurgeryAreaLogAtByBot = new(StringComparer.OrdinalIgnoreCase);
+    public static int ForgetRuntimePresence(string? botProfileId, string reason)
+    {
+        string key = string.IsNullOrWhiteSpace(botProfileId) ? "none" : botProfileId.Trim();
+        if (string.Equals(key, "none", StringComparison.OrdinalIgnoreCase))
+        {
+            return 0;
+        }
+
+        lock (SurgeryLogSync)
+        {
+            int removed = 0;
+            if (LastSurgeryAreaStateByBot.Remove(key)) removed++;
+            if (LastSurgeryAreaLogAtByBot.Remove(key)) removed++;
+            return removed;
+        }
+    }
+
     public static bool TrySelect(BotOwner? botOwner, OperatorDecisionSnapshot snapshot, out VanguardMobileMedicalActionSelection selection, out string reason)
     {
         return TrySelect(botOwner, snapshot, null, out selection, out reason);
@@ -180,7 +197,7 @@ internal static class VanguardMobileMedicalActionSelector
         // The prepare lease already owns the patient and has completed the cover contract. Do not
         // re-evaluate MedicalPlan.WouldExecuteIfActive here: that plan may still describe the
         // prepare phase. Safety, hands idleness, exact target and exact item remain mandatory.
-        if (!IsStationarySurgerySafe(snapshot, out var surgerySafetyReason))
+        if (!IsPreparedStationarySurgerySafe(snapshot, expectedTargetPartName, out var surgerySafetyReason))
         {
             reason = "stationary_surgery_safety_gate_blocked:" + surgerySafetyReason;
             return false;
@@ -387,6 +404,60 @@ internal static class VanguardMobileMedicalActionSelector
     }
 
     private static string Tri(bool? value) => value.HasValue ? Bool(value.Value) : "unknown";
+
+    private static bool IsPreparedStationarySurgerySafe(
+        OperatorDecisionSnapshot snapshot,
+        string expectedTargetPartName,
+        out string reason)
+    {
+        var safety = snapshot.Medical.Safety;
+        if (!safety.SurgeryAreaClear || !safety.SafeForStationarySurgery)
+        {
+            reason = "sain_like_surgery_area_not_clear:" + Safe(safety.SurgeryAreaClearReason);
+            LogSurgeryAreaCheck(snapshot, false, reason);
+            return false;
+        }
+
+        bool vanguardCoverGranted = VanguardSurgeryCoverPrepareExecutor.HasRecentVanguardSurgeryCoverGrant(
+            snapshot,
+            out var vanguardGrantReason);
+
+        bool preparedIsolationReady = VanguardMedicalIsolationController.HasCompatibleStationaryIsolation(
+            snapshot.BotProfileId,
+            expectedTargetPartName,
+            snapshot.Medical.Actionability.SelectedItemTemplateId,
+            DateTimeOffset.UtcNow,
+            out var preparedIsolationReason);
+
+        // Opportunity-first convergence: the prepare/direct-chain has already admitted either
+        // a physical cover commit or a compatible stationary medical isolation. Requiring a
+        // second cover-slot grant here traps the current-position hard-commit path even though
+        // the patient is already safely stationary and ready for the exact surgery procedure.
+        if (!vanguardCoverGranted && !preparedIsolationReady)
+        {
+            reason = "await_vanguard_cover_commit_or_prepared_isolation:grant="
+                + Safe(vanguardGrantReason)
+                + ":isolation="
+                + Safe(preparedIsolationReason);
+            LogSurgeryAreaCheck(snapshot, false, reason);
+            return false;
+        }
+
+        if (IsPreStartStationarySurgeryBlocked(snapshot, out var preStartReason))
+        {
+            reason = "await_stationary_idle:" + preStartReason;
+            LogSurgeryAreaCheck(snapshot, false, reason);
+            return false;
+        }
+
+        reason = vanguardCoverGranted
+            ? (string.IsNullOrWhiteSpace(safety.SurgeryAreaClearReason)
+                ? "vanguard_cover_slot_ready"
+                : safety.SurgeryAreaClearReason + "+vanguard_cover_slot_ready")
+            : "prepared_stationary_isolation_ready:" + Safe(preparedIsolationReason);
+        LogSurgeryAreaCheck(snapshot, true, reason);
+        return true;
+    }
 
     private static bool IsStationarySurgerySafe(OperatorDecisionSnapshot snapshot, out string reason)
     {

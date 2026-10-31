@@ -44,6 +44,7 @@ internal static class VanguardMovementContractPolicy
         bool idleStallSuspect)
     {
         var cohesion = snapshot.SquadCohesion;
+        var ownerPolicy = VanguardMovementAuthorityDoctrine.ForOwner(snapshot.OwnerProfileId);
         bool ownerKnown = cohesion.OwnerKnown;
         bool ownerReliable = cohesion.OwnerReliableForActiveMovement;
         bool medicalBlocks = VanguardMovementAuthorityDoctrine.IsStationaryMedicalAuthority(snapshot);
@@ -54,15 +55,15 @@ internal static class VanguardMovementContractPolicy
         bool doctrineHardOutside = ownerKnown
             && cohesion.OperatorDistanceToOwner >= VanguardMovementAuthorityDoctrine.CombatCohesionHardReturnMeters
             && !combatProductive;
-        bool hardOutside = ownerKnown && (cohesion.OperatorDistanceToOwner >= VanguardMovementAuthorityDoctrine.HardCorrectionMeters || doctrineHardOutside);
-        bool softOutside = ownerKnown && (cohesion.OperatorDistanceToOwner > VanguardMovementAuthorityDoctrine.TacticalBubbleMeters || cohesion.OperatorDistanceToOwner >= VanguardMovementAuthorityDoctrine.TravelCohesionStartMeters);
-        bool inBubble = ownerKnown && cohesion.OperatorDistanceToOwner <= VanguardMovementAuthorityDoctrine.TacticalBubbleMeters;
+        bool hardOutside = ownerKnown && (cohesion.OperatorDistanceToOwner >= ownerPolicy.HardCorrectionMeters || doctrineHardOutside);
+        bool softOutside = ownerKnown && (cohesion.OperatorDistanceToOwner > ownerPolicy.TacticalBubbleMeters || cohesion.OperatorDistanceToOwner >= VanguardMovementAuthorityDoctrine.TravelCohesionStartMeters);
+        bool inBubble = ownerKnown && cohesion.OperatorDistanceToOwner <= ownerPolicy.TacticalBubbleMeters;
         bool staleSearchInsideBubble = sainEnvelopeViolation
             && inBubble
             && string.Equals(sainViolationReason, "sain_search_stale_or_non_actionable_target", StringComparison.OrdinalIgnoreCase);
         bool generalStaleSainExit = VanguardMovementAuthorityDoctrine.IsSainCombatStaleNonActionable(snapshot, out var generalStaleReason);
         bool searchOutsideBubble = sainEnvelopeViolation && softOutside;
-        bool suppressExternal = VanguardMovementAuthorityDoctrine.SuppressExternalDuringRecallEnabled;
+        bool suppressExternal = ownerPolicy.SuppressExternalDuringRecallEnabled;
         bool externalOutOfDoctrine = suppressExternal && (lootWouldSuppress || orbitWouldSuppress);
         bool contractLootSuppress = suppressExternal && lootWouldSuppress;
         bool contractOrbitSuppress = suppressExternal && orbitWouldSuppress;
@@ -85,7 +86,7 @@ internal static class VanguardMovementContractPolicy
         bool closeCohesionExternalAllowed = !criticalLootActive
             && (!orbitActive || cohesion.OperatorDistanceToOwner >= VanguardMovementAuthorityDoctrine.CloseCohesionOrbitPreemptMinMeters)
             && (!pathActive || cohesion.OperatorDistanceToOwner >= VanguardMovementAuthorityDoctrine.CloseCohesionPathPreemptMinMeters);
-        bool closeCohesionCandidate = VanguardMovementAuthorityDoctrine.TacticalRepositionActiveEnabled
+        bool closeCohesionCandidate = ownerPolicy.TacticalRepositionActiveEnabled
             && closeCohesionDistance
             && closeCohesionShapePressure
             && closeCohesionExternalAllowed
@@ -94,7 +95,7 @@ internal static class VanguardMovementContractPolicy
             && !forcedCombatCohesionCatchup
             && !hardOutside;
         bool squadCombatContact = VanguardCombatAwarenessBridge.HasMovementAuthoritativeSquadCombatContact(snapshot, DateTimeOffset.UtcNow, out _);
-        bool tacticalVolumeJoinCandidate = VanguardMovementAuthorityDoctrine.TacticalRepositionActiveEnabled
+        bool tacticalVolumeJoinCandidate = ownerPolicy.TacticalRepositionActiveEnabled
             && VanguardMovementAuthorityDoctrine.NeedsTacticalVolumeJoin(snapshot)
             && !trueThreat
             && !combatProductive
@@ -112,7 +113,7 @@ internal static class VanguardMovementContractPolicy
             || cohesion.OperatorDistanceToOwner >= VanguardMovementAuthorityDoctrine.TravelCohesionStartMeters
             || forcedCombatCohesionCatchup
             || (travelHoldActive && cohesion.OperatorDistanceToOwner >= VanguardMovementAuthorityDoctrine.TravelCohesionPostReturnReacquireMeters)
-            || (softOutside && cohesion.OperatorDistanceToOwner < VanguardMovementAuthorityDoctrine.HardCorrectionMeters)
+            || (softOutside && cohesion.OperatorDistanceToOwner < ownerPolicy.HardCorrectionMeters)
             || orbitQuiescePressure;
         bool travelExternalPressure = monotonicTravelPressure
             || orbitActive
@@ -122,7 +123,7 @@ internal static class VanguardMovementContractPolicy
             || idleStall
             || orbitQuiescePressure
             || forcedCombatCohesionCatchup;
-        bool travelCohesionCandidate = VanguardMovementAuthorityDoctrine.TacticalRepositionActiveEnabled
+        bool travelCohesionCandidate = ownerPolicy.TacticalRepositionActiveEnabled
             && ownerKnown
             && ownerReliable
             && travelDistancePressure
@@ -133,7 +134,7 @@ internal static class VanguardMovementContractPolicy
             && !criticalLootActive
             && (monotonicTravelPressure || !hardOutside)
             && (monotonicTravelPressure || cohesion.OperatorDistanceToOwner < VanguardMovementAuthorityDoctrine.CombatCohesionHardReturnMeters);
-        bool tacticalRepositionCandidate = VanguardMovementAuthorityDoctrine.TacticalRepositionActiveEnabled
+        bool tacticalRepositionCandidate = ownerPolicy.TacticalRepositionActiveEnabled
             && inBubble
             && !softOutside
             && !trueThreat
@@ -145,10 +146,10 @@ internal static class VanguardMovementContractPolicy
                 || !cohesion.SectorTopologyValid
                 || idleStall);
         string claimReason = "doctrine_disabled";
-        bool claimedCohesionCandidate = VanguardMovementAuthorityDoctrine.TacticalRepositionActiveEnabled
+        bool claimedCohesionCandidate = ownerPolicy.TacticalRepositionActiveEnabled
             && VanguardSquadCohesionClaimExecutor.ShouldPublishClaimContract(snapshot, out claimReason)
             && !forcedCombatCohesionCatchup
-            && cohesion.OperatorDistanceToOwner < VanguardMovementAuthorityDoctrine.CombatCohesionForcedCatchupMeters
+            && cohesion.OperatorDistanceToOwner < ownerPolicy.CombatCohesionForcedCatchupMeters
             && !hardOutside;
 
         if (!ownerKnown)

@@ -4,10 +4,10 @@ using System.Linq;
 using Vanguard.Client.Diagnostics;
 using Vanguard.Client.Raid.Runtime;
 
-// Responsibility: Provides Operator Runtime Audit Load Guard support for the runtime audit.
-// Flow: The file encapsulates one bounded piece of the subsystem and exchanges explicit inputs/results with neighboring services instead of relying on hidden cross-system state.
-// Authority boundary: Authority remains with the owning subsystem and any external EFT/SPT/Fika/SAIN component explicitly referenced by its call path.
-// Invariant: Behavior stays scoped to the current profile/raid/process contract and preserves existing safety and compatibility boundaries.
+// Responsibility: Keep passive Operator audit inspection dormant until registered runtime Operators have live BotOwner handles.
+// Flow: Inspect the Operator runtime registry, open the gate on live ownership and reset one-time diagnostic flags on raid lifecycle changes.
+// Authority boundary: The Operator runtime registry owns spawn registration; this guard does not probe external brains or create Operators.
+// Invariant: The gate remains closed with no registered Operator or no live BotOwner handle.
 namespace Vanguard.Client.Runtime.Audit;
 
 /// <summary>

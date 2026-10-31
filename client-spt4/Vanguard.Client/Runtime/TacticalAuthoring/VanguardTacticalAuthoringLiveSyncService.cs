@@ -11,6 +11,7 @@ using Vanguard.Client.Compatibility;
 using Vanguard.Client.Diagnostics;
 using Vanguard.Client.Raid.Runtime;
 using Vanguard.Client.Raid.Services;
+using Vanguard.Client.Runtime.SquadCohesion;
 
 // Responsibility: Relays the player’s live Tactical Authoring preview to the authoritative raid process and brings the current preview state back to readers.
 // Flow: The local editor publishes a compact revision, background HTTP exchanges it with the SPT server, and the Headless/host consumes the latest accepted raid-scoped preview at a bounded cadence.
@@ -59,6 +60,9 @@ internal static class VanguardTacticalAuthoringLiveSyncService
             return;
         }
 
+        VanguardTacticalCoordinationRuntimeReadService.Tick();
+        VanguardTacticalCoordinatorReadOnlyTopologyService.Tick();
+        TacticalAssessmentService.Tick();
         bool directRuntimeAuthority = IsDirectRuntimeAuthority();
         if (!raidTransportActive)
         {
@@ -99,6 +103,7 @@ internal static class VanguardTacticalAuthoringLiveSyncService
 
         VanguardTacticalAuthoringLiveExchangeRequestDto? request = null;
         VanguardTacticalAuthoringLiveAuthorSnapshotDto? outgoingAuthor = null;
+        VanguardTacticalCoordinationTopologySnapshotDto? outgoingTopology = null;
         VanguardTacticalAuthoringLiveAuthorSnapshotDto author;
 
         if (!VanguardFikaCompat.IsActualHeadlessProcess)
@@ -133,6 +138,11 @@ internal static class VanguardTacticalAuthoringLiveSyncService
             }
         }
 
+        if (!VanguardFikaCompat.IsActualHeadlessProcess)
+        {
+            _ = VanguardTacticalCoordinationRuntimeReadService.TryBuildOutgoingTopologySnapshot(now, out outgoingTopology);
+        }
+
         if (VanguardFikaCompat.IsActualHeadlessProcess)
         {
             request = new VanguardTacticalAuthoringLiveExchangeRequestDto
@@ -148,7 +158,7 @@ internal static class VanguardTacticalAuthoringLiveSyncService
         {
             var authorityResults = VanguardTacticalAuthoringHeadlessPreviewService.BuildRuntimeAuthorityResults();
             bool remoteAuthorPollingRequired = VanguardFikaCompat.IsDirectPlayerRaidHost;
-            if (remoteAuthorPollingRequired || outgoingAuthor != null || authorityResults.Count > 0)
+            if (remoteAuthorPollingRequired || outgoingAuthor != null || outgoingTopology != null || authorityResults.Count > 0)
             {
                 request = new VanguardTacticalAuthoringLiveExchangeRequestDto
                 {
@@ -157,18 +167,20 @@ internal static class VanguardTacticalAuthoringLiveSyncService
                     ClientLabel = VanguardBuildVersion.BuildLabel,
                     KnownOwnerProfileIds = VanguardRaidOperatorRuntimeRegistry.GetKnownOwnerProfileIds().ToList(),
                     Author = outgoingAuthor,
+                    Topology = outgoingTopology,
                     HeadlessResults = authorityResults
                 };
             }
         }
-        else if (outgoingAuthor != null)
+        else if (outgoingAuthor != null || outgoingTopology != null)
         {
             request = new VanguardTacticalAuthoringLiveExchangeRequestDto
             {
                 Role = "author",
                 ClientBuild = VanguardBuildVersion.Value,
                 ClientLabel = VanguardBuildVersion.BuildLabel,
-                Author = outgoingAuthor
+                Author = outgoingAuthor,
+                Topology = outgoingTopology
             };
         }
 
@@ -185,7 +197,7 @@ internal static class VanguardTacticalAuthoringLiveSyncService
         {
             bootLogged = true;
             VanguardClientDiagnosticsLog.Info(StatusTag,
-                $"TACTICAL_AUTHORING_LIVE_SYNC active=true; role={request.Role}; raidOnlyTransport=true; offRaidHttp=false; actualHeadlessProcess={VanguardFikaCompat.IsActualHeadlessProcess}; directRuntimeAuthority={directRuntimeAuthority}; raidHostedByHeadless={VanguardFikaCompat.IsRaidHostedByHeadless}; legacyHeadlessCompat={VanguardFikaCompat.IsHeadless}; inRaidInterval={InRaidExchangeInterval.TotalSeconds:0.00}s; asyncIo=true; persistedRuntimeConsumption=false; build={VanguardBuildVersion.BuildLabel}");
+                $"TACTICAL_AUTHORING_LIVE_SYNC active=true; role={request.Role}; raidOnlyTransport=true; offRaidHttp=false; actualHeadlessProcess={VanguardFikaCompat.IsActualHeadlessProcess}; directRuntimeAuthority={directRuntimeAuthority}; raidHostedByHeadless={VanguardFikaCompat.IsRaidHostedByHeadless}; legacyHeadlessCompat={VanguardFikaCompat.IsHeadless}; inRaidInterval={InRaidExchangeInterval.TotalSeconds:0.00}s; asyncIo=true; persistedHoldRuntimeConsumption=false; tcTopologyReadSync=true; build={VanguardBuildVersion.BuildLabel}");
         }
     }
 
@@ -206,6 +218,16 @@ internal static class VanguardTacticalAuthoringLiveSyncService
         runtimeAuthorityStateInitialized = false;
         lastDirectRuntimeAuthority = false;
         VanguardTacticalAuthoringHeadlessPreviewService.Reset(reason);
+        VanguardTacticalCoordinationRuntimeReadService.Reset(reason);
+        VanguardTacticalCoordinatorReadOnlyTopologyService.Reset(reason);
+        TacticalAssessmentService.Reset(reason);
+        RouteConvergenceService.Reset(reason);
+        ChokeDetectionService.Reset(reason);
+        ThreatExposureShadowClassificationService.Reset(reason);
+        ThreatExposureAssignmentAlignmentService.Reset(reason);
+        ThreatExposureObservationService.Reset(reason);
+        RouteIndependenceService.Reset(reason);
+        AntiCongaService.Reset(reason);
     }
 
     private static bool TryReserve()
@@ -299,6 +321,7 @@ internal static class VanguardTacticalAuthoringLiveSyncService
                     $"TACTICAL_AUTHORING_LIVE_SYNC_HEADLESS_AUTHOR_RECEIVED authors={result.Response.Authors.Count}; owners={string.Join(",", result.Response.Authors.Select(item => item.OwnerProfileId))}; mainThreadApply=true");
             }
             VanguardTacticalAuthoringHeadlessPreviewService.ApplyAuthorSnapshots(result.Response.Authors, now);
+            VanguardTacticalCoordinationRuntimeReadService.ApplyRemoteTopologySnapshots(result.Response.Topologies, now);
             nextExchangeAtUtc = now + InRaidExchangeInterval;
             return;
         }
@@ -320,6 +343,7 @@ internal static class VanguardTacticalAuthoringLiveSyncService
             }
 
             VanguardTacticalAuthoringHeadlessPreviewService.ApplyAuthorSnapshots(result.Response.Authors, now);
+            VanguardTacticalCoordinationRuntimeReadService.ApplyRemoteTopologySnapshots(result.Response.Topologies, now);
             if (closePending)
             {
                 closePending = false;
@@ -379,6 +403,17 @@ internal static class VanguardTacticalAuthoringLiveSyncService
         nextExchangeAtUtc = DateTimeOffset.MinValue;
         VanguardTacticalAuthoringLivePreviewClientState.Clear();
         VanguardTacticalAuthoringHeadlessPreviewService.Reset("runtime_authority_changed");
+        VanguardTacticalCoordinationRuntimeReadService.Reset("runtime_authority_changed");
+        VanguardTacticalCoordinatorReadOnlyTopologyService.Reset("runtime_authority_changed");
+        TacticalAssessmentService.Reset("runtime_authority_changed");
+        RouteConvergenceService.Reset("runtime_authority_changed");
+        ChokeDetectionService.Reset("runtime_authority_changed");
+        ThreatExposureShadowClassificationService.Reset("runtime_authority_changed");
+        ThreatExposureAssignmentAlignmentService.Reset("runtime_authority_changed");
+        TacticalFitnessShadowService.Reset("runtime_authority_changed");
+        ThreatExposureObservationService.Reset("runtime_authority_changed");
+        RouteIndependenceService.Reset("runtime_authority_changed");
+        AntiCongaService.Reset("runtime_authority_changed");
         firstHeadlessAuthorReceiptLogged = false;
         firstRuntimeAuthorityAuthorReceiptLogged = false;
         firstAuthorResultReceiptLogged = false;

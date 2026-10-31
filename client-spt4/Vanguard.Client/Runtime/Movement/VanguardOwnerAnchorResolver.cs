@@ -6,10 +6,10 @@ using UnityEngine;
 using Vanguard.Client.Compatibility;
 using Vanguard.Client.Runtime.Audit;
 
-// Responsibility: Provides Owner Anchor Resolver support for the movement/cohesion runtime.
-// Flow: The file encapsulates one bounded piece of the subsystem and exchanges explicit inputs/results with neighboring services instead of relying on hidden cross-system state.
-// Authority boundary: Authority remains with the owning subsystem and any external EFT/SPT/Fika/SAIN component explicitly referenced by its call path.
-// Invariant: Behavior stays scoped to the current profile/raid/process contract and preserves existing safety and compatibility boundaries.
+// Responsibility: Resolve live player-owner position and facing for Operator cohesion, with a read-only last-known fallback.
+// Flow: Prefer direct player transform observations, cache them per owner, and mark stale or cached results as unreliable for movement.
+// Authority boundary: The EFT player transform remains the live authority; cached anchor data is observational only.
+// Invariant: Cached or stale positions are never reported as reliable active-movement anchors.
 namespace Vanguard.Client.Runtime.Movement;
 
 internal readonly struct VanguardOwnerAnchor

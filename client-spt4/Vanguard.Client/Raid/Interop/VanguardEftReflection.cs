@@ -4,10 +4,10 @@ using System.Linq;
 using System.Reflection;
 using EFT;
 
-// Responsibility: Provides Eft Reflection support for the Vanguard client.
-// Flow: The file encapsulates one bounded piece of the subsystem and exchanges explicit inputs/results with neighboring services instead of relying on hidden cross-system state.
-// Authority boundary: Authority remains with the owning subsystem and any external EFT/SPT/Fika/SAIN component explicitly referenced by its call path.
-// Invariant: Behavior stays scoped to the current profile/raid/process contract and preserves existing safety and compatibility boundaries.
+// Responsibility: Centralize optional EFT member access and method invocation without hard dependencies on optional runtime assemblies.
+// Flow: Resolve compatible single-argument methods, AddEnemy signatures, nested members and profile IDs using runtime type inspection.
+// Authority boundary: EFT objects own their state; this bridge invokes their existing members but does not substitute a gameplay authority.
+// Invariant: Null targets or absent compatible methods produce no invocation, and unresolved member reads return null.
 namespace Vanguard.Client.Raid.Interop;
 
 /// <summary>

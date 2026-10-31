@@ -1,4 +1,5 @@
 using System.Reflection;
+using System.Text;
 using SPTarkov.Server.Core.Models.Utils;
 
 // Responsibility: Produces bounded diagnostics/telemetry for Server Diagnostics Log in the server diagnostics.
@@ -10,6 +11,9 @@ namespace Vanguard.Server.Diagnostics;
 
 internal static class VanguardServerDiagnosticsLog
 {
+    private const long MaxActiveLogBytes = 16L * 1024L * 1024L;
+    private const int ArchiveRetentionCount = 2;
+    private static readonly Encoding LogEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
     private static readonly object FileLock = new();
 
     public static void Startup<TLogger>(ISptLogger<TLogger> logger, string message)
@@ -55,15 +59,59 @@ internal static class VanguardServerDiagnosticsLog
             var dataDirectory = Path.Combine(userDirectory, "vanguard", "operators");
             Directory.CreateDirectory(dataDirectory);
             var line = $"{DateTimeOffset.UtcNow:O} {message}{Environment.NewLine}";
+            var logPath = Path.Combine(dataDirectory, "vanguard-server.log");
+            int pendingBytes = LogEncoding.GetByteCount(line);
             lock (FileLock)
             {
-                File.AppendAllText(Path.Combine(dataDirectory, "vanguard-server.log"), line);
+                // Release hygiene: keep the detailed server evidence, but bound disk growth. Rotation
+                // is best-effort by design; a filesystem/AV race must never make diagnostics fatal.
+                try
+                {
+                    RotateIfNeeded(logPath, pendingBytes);
+                }
+                catch
+                {
+                    // Keep writing the active file if retention maintenance cannot run.
+                }
+
+                File.AppendAllText(logPath, line, LogEncoding);
             }
         }
         catch
         {
             // Diagnostics must never block server startup.
         }
+    }
+
+    private static void RotateIfNeeded(string logPath, int pendingBytes)
+    {
+        if (!File.Exists(logPath))
+            return;
+
+        long currentBytes = new FileInfo(logPath).Length;
+        if (currentBytes + pendingBytes <= MaxActiveLogBytes)
+            return;
+
+        string oldestArchive = logPath + "." + ArchiveRetentionCount;
+        if (File.Exists(oldestArchive))
+            File.Delete(oldestArchive);
+
+        for (int archive = ArchiveRetentionCount - 1; archive >= 1; archive--)
+        {
+            string source = logPath + "." + archive;
+            if (!File.Exists(source))
+                continue;
+
+            string destination = logPath + "." + (archive + 1);
+            if (File.Exists(destination))
+                File.Delete(destination);
+            File.Move(source, destination);
+        }
+
+        string firstArchive = logPath + ".1";
+        if (File.Exists(firstArchive))
+            File.Delete(firstArchive);
+        File.Move(logPath, firstArchive);
     }
 
     private static string ResolveUserDirectory(string modDirectory)

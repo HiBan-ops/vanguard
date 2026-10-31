@@ -11,9 +11,9 @@ namespace Vanguard.Server.Operators.Audit.Services;
 
 /// <summary>
 /// Vanguard persistence/convergence path F12 governance authority.
-/// PLAYER_SCOPED loot doctrine is stored strictly per OwnerProfileId.
-/// RAID_SCOPED diagnostics, general movement doctrine and the medical lease switch are writable only
-/// by the player raid authority and are merged into reads.
+/// PLAYER_SCOPED gameplay doctrine (movement/cohesion, mobile-medical admission and loot policy)
+/// is stored strictly per OwnerProfileId. RAID_SCOPED diagnostics/process policy is writable only
+/// by the player raid authority and is merged into reads.
 /// No latest-client promotion or cross-owner bootstrap is permitted.
 /// </summary>
 [Injectable(InjectionType.Singleton)]
@@ -39,7 +39,10 @@ public sealed class VanguardOperatorRuntimeAuditSettingsService
     public VanguardOperatorRuntimeAuditSettingsResponse Set(VanguardOperatorRuntimeAuditSettingsRequest? request, string? requestedByProfileId)
     {
         var safeRequest = request ?? new VanguardOperatorRuntimeAuditSettingsRequest();
-        string ownerProfileId = NormalizeProfileId(safeRequest.OwnerProfileId ?? safeRequest.UpdatedByProfileId, requestedByProfileId);
+        string claimedOwnerProfileId = NormalizeProfileId(safeRequest.OwnerProfileId ?? safeRequest.UpdatedByProfileId, requestedByProfileId);
+        string ownerProfileId = NormalizeProfileId(requestedByProfileId, claimedOwnerProfileId);
+        bool ownerClaimIgnored = !string.IsNullOrWhiteSpace(requestedByProfileId)
+            && !string.Equals(claimedOwnerProfileId, ownerProfileId, StringComparison.Ordinal);
         string source = NormalizeSource(safeRequest.Source ?? safeRequest.UpdatedBySource);
         bool clientCommand = IsClientCommandSource(source);
         bool compatibleClientBuild = IsCompatibleClientBuild(safeRequest.ClientLabel, safeRequest.ClientBuild);
@@ -78,9 +81,13 @@ public sealed class VanguardOperatorRuntimeAuditSettingsService
                 raidScopedSettings.GovernanceVersion = GovernanceVersion;
             }
 
-            string reason = raidScopeAccepted
-                ? "runtime_audit_config_player_and_raid_scopes_set"
-                : "runtime_audit_config_player_scope_set_raid_scope_ignored_non_authority";
+            string reason = ownerClaimIgnored
+                ? (raidScopeAccepted
+                    ? "runtime_audit_config_owner_claim_ignored_player_and_raid_scopes_set"
+                    : "runtime_audit_config_owner_claim_ignored_player_scope_set_raid_scope_ignored_non_authority")
+                : (raidScopeAccepted
+                    ? "runtime_audit_config_player_and_raid_scopes_set"
+                    : "runtime_audit_config_player_scope_set_raid_scope_ignored_non_authority");
             return Response(MergeForResponse(nextOwner, ownerProfileId), reason);
         }
     }
@@ -164,6 +171,21 @@ public sealed class VanguardOperatorRuntimeAuditSettingsService
             MovementOpportunisticLootMaxDistanceMeters = Clamp(request.MovementOpportunisticLootMaxDistanceMeters, 6.0f, 42.0f),
             MovementOpportunisticLootScanCooldownSeconds = Clamp(request.MovementOpportunisticLootScanCooldownSeconds, 8.0f, 60.0f),
             MovementOpportunisticLootGrantSeconds = Clamp(request.MovementOpportunisticLootGrantSeconds, 4.0f, 20.0f),
+            TacticalCoordinationDangerCloseWeaponMeters = Clamp(request.TacticalCoordinationDangerCloseWeaponMeters, 5.0f, 20.0f),
+            TacticalCoordinationProactiveWeaponMeters = Clamp(request.TacticalCoordinationProactiveWeaponMeters, 10.0f, 35.0f),
+            TacticalCoordinationOverwatchMinimumThreatMeters = Clamp(request.TacticalCoordinationOverwatchMinimumThreatMeters, 25.0f, 80.0f),
+            TacticalCoordinationOverwatchStandoffMeters = Clamp(request.TacticalCoordinationOverwatchStandoffMeters, 20.0f, 80.0f),
+            TacticalCoordinationBuddyIsolationMeters = Clamp(request.TacticalCoordinationBuddyIsolationMeters, 15.0f, 45.0f),
+            TacticalCoordinationBuddyHelperMaxMeters = Clamp(request.TacticalCoordinationBuddyHelperMaxMeters, 20.0f, 70.0f),
+            TacticalCoordinationFlankLeadCloseMeters = Clamp(request.TacticalCoordinationFlankLeadCloseMeters, 10.0f, 35.0f),
+            TacticalCoordinationFlankLeadFarMeters = Clamp(request.TacticalCoordinationFlankLeadFarMeters, 35.0f, 100.0f),
+            TacticalCoordinationBoundAdvanceDistanceMeters = Clamp(request.TacticalCoordinationBoundAdvanceDistanceMeters, 5.0f, 20.0f),
+            TacticalSearchShadowComparisonEnabled = request.TacticalSearchShadowComparisonEnabled,
+            TacticalSearchShadowOwnerLimitMeters = Clamp(request.TacticalSearchShadowOwnerLimitMeters, 42.0f, 90.0f),
+            TacticalSearchShadowRequireOwnerDistanceImprovement = request.TacticalSearchShadowRequireOwnerDistanceImprovement,
+            TacticalSearchShadowRetreatStepMeters = Clamp(request.TacticalSearchShadowRetreatStepMeters, 5.0f, 45.0f),
+            TacticalSearchShadowLateralOffsetMeters = Clamp(request.TacticalSearchShadowLateralOffsetMeters, 0.0f, 25.0f),
+            TacticalSearchShadowMaxPathMeters = Clamp(request.TacticalSearchShadowMaxPathMeters, 26.0f, 90.0f),
             LootOperationalSessionEnabled = request.LootOperationalSessionEnabled,
             LootBackupLongWeaponEnabled = request.LootBackupLongWeaponEnabled,
             LootBackupPistolEnabled = request.LootBackupPistolEnabled,
@@ -186,6 +208,7 @@ public sealed class VanguardOperatorRuntimeAuditSettingsService
         };
 
         NormalizeTravelModeHysteresis(settings);
+        NormalizeTacticalCoordinationTuning(settings);
         return settings;
     }
 
@@ -219,7 +242,6 @@ public sealed class VanguardOperatorRuntimeAuditSettingsService
         target.DecisionSnapshotLogEnabled = source.DecisionSnapshotLogEnabled;
         target.IntentDryRunEnabled = source.IntentDryRunEnabled;
         target.ThreatScannerDryRunEnabled = source.ThreatScannerDryRunEnabled;
-        target.FirstActiveMobileMedicalLeaseEnabled = source.FirstActiveMobileMedicalLeaseEnabled;
         target.OperatorPostRaidPersistenceEnabled = source.OperatorPostRaidPersistenceEnabled;
         target.HeadlessKeepGcEnabledInRaid = source.HeadlessKeepGcEnabledInRaid;
         target.VerboseTransitionLogEnabled = source.VerboseTransitionLogEnabled;
@@ -227,10 +249,15 @@ public sealed class VanguardOperatorRuntimeAuditSettingsService
         target.SummaryIntervalSeconds = source.SummaryIntervalSeconds;
         target.TransitionLogMinIntervalSeconds = source.TransitionLogMinIntervalSeconds;
         target.ThreatScannerIntervalSeconds = source.ThreatScannerIntervalSeconds;
+        target.MovementVerboseDoctrineLogEnabled = source.MovementVerboseDoctrineLogEnabled;
+    }
+
+    private static void CopyPlayerScoped(VanguardOperatorRuntimeAuditSettings source, VanguardOperatorRuntimeAuditSettings target)
+    {
+        target.FirstActiveMobileMedicalLeaseEnabled = source.FirstActiveMobileMedicalLeaseEnabled;
         target.MovementOutsideBubbleRecallEnabled = source.MovementOutsideBubbleRecallEnabled;
         target.MovementSainBoundaryReturnEnabled = source.MovementSainBoundaryReturnEnabled;
         target.MovementSuppressExternalDuringRecallEnabled = source.MovementSuppressExternalDuringRecallEnabled;
-        target.MovementVerboseDoctrineLogEnabled = source.MovementVerboseDoctrineLogEnabled;
         target.MovementTacticalRepositionEnabled = source.MovementTacticalRepositionEnabled;
         target.MovementTacticalRepositionCooldownSeconds = source.MovementTacticalRepositionCooldownSeconds;
         target.MovementTacticalRepositionMinDeltaMeters = source.MovementTacticalRepositionMinDeltaMeters;
@@ -249,12 +276,25 @@ public sealed class VanguardOperatorRuntimeAuditSettingsService
         target.MovementLeaseNoProgressSeconds = source.MovementLeaseNoProgressSeconds;
         target.MovementLeaseMaxDurationSeconds = source.MovementLeaseMaxDurationSeconds;
         target.MovementActionRallyMaxReanchors = source.MovementActionRallyMaxReanchors;
-    }
-
-    private static void CopyPlayerScoped(VanguardOperatorRuntimeAuditSettings source, VanguardOperatorRuntimeAuditSettings target)
-    {
         target.MovementOpportunisticLootBrokerEnabled = source.MovementOpportunisticLootBrokerEnabled;
         target.MovementOpportunisticLootMaxDistanceMeters = source.MovementOpportunisticLootMaxDistanceMeters;
+        target.MovementOpportunisticLootScanCooldownSeconds = source.MovementOpportunisticLootScanCooldownSeconds;
+        target.MovementOpportunisticLootGrantSeconds = source.MovementOpportunisticLootGrantSeconds;
+        target.TacticalCoordinationDangerCloseWeaponMeters = source.TacticalCoordinationDangerCloseWeaponMeters;
+        target.TacticalCoordinationProactiveWeaponMeters = source.TacticalCoordinationProactiveWeaponMeters;
+        target.TacticalCoordinationOverwatchMinimumThreatMeters = source.TacticalCoordinationOverwatchMinimumThreatMeters;
+        target.TacticalCoordinationOverwatchStandoffMeters = source.TacticalCoordinationOverwatchStandoffMeters;
+        target.TacticalCoordinationBuddyIsolationMeters = source.TacticalCoordinationBuddyIsolationMeters;
+        target.TacticalCoordinationBuddyHelperMaxMeters = source.TacticalCoordinationBuddyHelperMaxMeters;
+        target.TacticalCoordinationFlankLeadCloseMeters = source.TacticalCoordinationFlankLeadCloseMeters;
+        target.TacticalCoordinationFlankLeadFarMeters = source.TacticalCoordinationFlankLeadFarMeters;
+        target.TacticalCoordinationBoundAdvanceDistanceMeters = source.TacticalCoordinationBoundAdvanceDistanceMeters;
+        target.TacticalSearchShadowComparisonEnabled = source.TacticalSearchShadowComparisonEnabled;
+        target.TacticalSearchShadowOwnerLimitMeters = source.TacticalSearchShadowOwnerLimitMeters;
+        target.TacticalSearchShadowRequireOwnerDistanceImprovement = source.TacticalSearchShadowRequireOwnerDistanceImprovement;
+        target.TacticalSearchShadowRetreatStepMeters = source.TacticalSearchShadowRetreatStepMeters;
+        target.TacticalSearchShadowLateralOffsetMeters = source.TacticalSearchShadowLateralOffsetMeters;
+        target.TacticalSearchShadowMaxPathMeters = source.TacticalSearchShadowMaxPathMeters;
         target.LootOperationalSessionEnabled = source.LootOperationalSessionEnabled;
         target.LootBackupLongWeaponEnabled = source.LootBackupLongWeaponEnabled;
         target.LootBackupPistolEnabled = source.LootBackupPistolEnabled;
@@ -268,7 +308,6 @@ public sealed class VanguardOperatorRuntimeAuditSettingsService
         target.LootMaximumMagazinesPerSession = source.LootMaximumMagazinesPerSession;
         target.LootMaximumLooseAmmunitionRoundsPerSession = source.LootMaximumLooseAmmunitionRoundsPerSession;
         target.LootMaximumWeaponsPerSession = source.LootMaximumWeaponsPerSession;
-        // Deprecated scan/grant fields are intentionally not copied: they are non-authoritative compatibility residue.
     }
 
     private static VanguardOperatorRuntimeAuditSettings Clone(VanguardOperatorRuntimeAuditSettings source)
@@ -323,6 +362,30 @@ public sealed class VanguardOperatorRuntimeAuditSettingsService
             Clamp(settings.MovementTravelCatchUpExitMeters, 10.0f, 55.0f),
             Math.Max(10.0f, settings.MovementTravelCatchUpEnterMeters - 2.0f));
         settings.MovementTravelModeDwellSeconds = Clamp(settings.MovementTravelModeDwellSeconds, 0.25f, 5.0f);
+    }
+
+    private static void NormalizeTacticalCoordinationTuning(VanguardOperatorRuntimeAuditSettings settings)
+    {
+        settings.TacticalCoordinationDangerCloseWeaponMeters = Clamp(settings.TacticalCoordinationDangerCloseWeaponMeters, 5.0f, 20.0f);
+        settings.TacticalCoordinationProactiveWeaponMeters = Math.Max(
+            Clamp(settings.TacticalCoordinationProactiveWeaponMeters, 10.0f, 35.0f),
+            settings.TacticalCoordinationDangerCloseWeaponMeters + 2.0f);
+        settings.TacticalCoordinationOverwatchMinimumThreatMeters = Math.Max(
+            Clamp(settings.TacticalCoordinationOverwatchMinimumThreatMeters, 25.0f, 80.0f),
+            settings.TacticalCoordinationProactiveWeaponMeters + 2.0f);
+        settings.TacticalCoordinationOverwatchStandoffMeters = Math.Min(
+            Clamp(settings.TacticalCoordinationOverwatchStandoffMeters, 20.0f, 80.0f),
+            Math.Max(20.0f, settings.TacticalCoordinationOverwatchMinimumThreatMeters - 2.0f));
+        settings.TacticalCoordinationBuddyIsolationMeters = Clamp(settings.TacticalCoordinationBuddyIsolationMeters, 15.0f, 45.0f);
+        settings.TacticalCoordinationBuddyHelperMaxMeters = Math.Max(
+            Clamp(settings.TacticalCoordinationBuddyHelperMaxMeters, 20.0f, 70.0f),
+            settings.TacticalCoordinationBuddyIsolationMeters + 4.0f);
+        settings.TacticalCoordinationFlankLeadCloseMeters = Clamp(settings.TacticalCoordinationFlankLeadCloseMeters, 10.0f, 35.0f);
+        settings.TacticalCoordinationFlankLeadFarMeters = Math.Max(
+            Clamp(settings.TacticalCoordinationFlankLeadFarMeters, 35.0f, 100.0f),
+            settings.TacticalCoordinationFlankLeadCloseMeters + 15.0f);
+        settings.TacticalCoordinationBoundAdvanceDistanceMeters = Clamp(settings.TacticalCoordinationBoundAdvanceDistanceMeters, 5.0f, 20.0f);
+        settings.TacticalSearchShadowOwnerLimitMeters = Clamp(settings.TacticalSearchShadowOwnerLimitMeters, 42.0f, 90.0f);
     }
 
     private static bool IsCompatibleClientBuild(string? clientLabel, string? clientBuild)

@@ -1,10 +1,10 @@
 #if SPT_CLIENT
 using Vanguard.Client.Runtime.Decision;
 
-// Responsibility: Provides Movement Broker Dry Run support for the movement/cohesion runtime.
-// Flow: The file encapsulates one bounded piece of the subsystem and exchanges explicit inputs/results with neighboring services instead of relying on hidden cross-system state.
-// Authority boundary: Authority remains with the owning subsystem and any external EFT/SPT/Fika/SAIN component explicitly referenced by its call path.
-// Invariant: Behavior stays scoped to the current profile/raid/process contract and preserves existing safety and compatibility boundaries.
+// Responsibility: Project the movement broker decision without opening a live movement lease.
+// Flow: Build a movement contract and lease plan from a snapshot, then expose the selected plan key and suppression projections.
+// Authority boundary: Contract and lease builders determine eligibility; dry-run output never commands an Operator or external AI.
+// Invariant: The reported WouldOpenLease and backend values reflect planning eligibility, not a committed lease.
 namespace Vanguard.Client.Runtime.Movement;
 
 internal static class VanguardMovementBrokerDryRun

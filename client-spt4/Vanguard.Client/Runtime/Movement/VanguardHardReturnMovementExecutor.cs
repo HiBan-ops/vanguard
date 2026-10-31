@@ -2,6 +2,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using EFT;
 using UnityEngine;
 using UnityEngine.AI;
@@ -44,8 +45,8 @@ internal static class VanguardHardReturnMovementExecutor
     private const string HardRegroupSprintStatusTag = "VANGUARD_HARD_REGROUP_SPRINT_OK";
 
     private static readonly TimeSpan TickInterval = TimeSpan.FromSeconds(0.30d);
-    private static TimeSpan StartCooldown => TimeSpan.FromSeconds(VanguardMovementAuthorityDoctrine.MovementLeaseStartCooldownSeconds);
-    private static TimeSpan FailureCooldown => TimeSpan.FromSeconds(VanguardMovementAuthorityDoctrine.MovementLeaseFailureCooldownSeconds);
+    private static TimeSpan StartCooldownFor(string? ownerProfileId) => TimeSpan.FromSeconds(VanguardMovementAuthorityDoctrine.ForOwner(ownerProfileId).MovementLeaseStartCooldownSeconds);
+    private static TimeSpan FailureCooldownFor(string? ownerProfileId) => TimeSpan.FromSeconds(VanguardMovementAuthorityDoctrine.ForOwner(ownerProfileId).MovementLeaseFailureCooldownSeconds);
     private static TimeSpan AbortCooldown => TimeSpan.FromSeconds(VanguardMovementAuthorityDoctrine.MovementLeaseAbortCooldownSeconds);
     private static TimeSpan PreemptPendingDelay => TimeSpan.FromSeconds(VanguardMovementAuthorityDoctrine.PreemptPendingDelaySeconds);
     private static readonly TimeSpan SuppressionRetryDelay = TimeSpan.FromSeconds(0.65d);
@@ -92,6 +93,101 @@ internal static class VanguardHardReturnMovementExecutor
         VanguardClientDiagnosticsLog.Info(StatusTag, $"VANGUARD_ACTION_RALLY_RETURN_RESET reason={Safe(reason)}; activeMovement=true; applyOnce=true; preemptPending=true; combatBackoff=true; pathValidation=required; actionRally=true; closeReturn=true; authorityHeldUntilOutcome=true; cleanAuth=true; isolatedCombatRelease=true; hardRegroupSprint=true; tag={MoveBridgeStatusTag}; returnAuthorityTag={StatusTag}; goToSomePointTag={GoToSomePointBridgeStatusTag}; actionRallyTag={ActionRallyStatusTag}; continuationTag={ReturnContinuationStatusTag}; returnPathTag={ReturnPathValidationCompatibilityTag}; pendingTag={PendingStatusTag}; anchorScoreTag={AnchorScoreStatusTag}; cleanAuthTag={CleanAuthStatusTag}");
     }
 
+    public static string ForgetRuntimePresence(string? botProfileId, string reason)
+    {
+        string key = Safe(botProfileId);
+        bool activeRemoved;
+        bool pendingRemoved;
+        lock (Sync)
+        {
+            activeRemoved = ActiveByBotProfileId.Remove(key);
+            pendingRemoved = PendingByBotProfileId.Remove(key);
+            CooldownUntilByBotProfileId.Remove(key);
+            CombatBackoffUntilByBotProfileId.Remove(key);
+            IsolatedCombatWatchByBotProfileId.Remove(key);
+            PhysicalRecoveryByBotProfileId.Remove(key);
+            foreach (string logKey in LastLogByKey.Keys.Where(value => value.IndexOf(key, StringComparison.OrdinalIgnoreCase) >= 0).ToArray())
+            {
+                LastLogByKey.Remove(logKey);
+            }
+        }
+
+        return "hardReturnForgotten=true;activeRemoved=" + Bool(activeRemoved)
+            + ";pendingRemoved=" + Bool(pendingRemoved)
+            + ";cooldownRetained=false;externalResume=false;normalFinish=false;reason=" + Safe(reason);
+    }
+
+    // A qualified Medic pair can take over an ordinary HardReturn only after its
+    // replacement scheduler window exists. Retire the exact old executor state;
+    // never apply a failure cooldown or close the replacement Medical window.
+    internal static bool TryYieldForMedicPair(string botProfileId, string oldWindowId, DateTimeOffset now, out string summary)
+    {
+        summary = "invalid_hard_return_yield";
+        if (string.IsNullOrWhiteSpace(botProfileId) || string.IsNullOrWhiteSpace(oldWindowId))
+            return false;
+
+        HardReturnLeaseState? active = null;
+        PendingReturnState? pending = null;
+        lock (Sync)
+        {
+            ActiveByBotProfileId.TryGetValue(botProfileId, out active);
+            PendingByBotProfileId.TryGetValue(botProfileId, out pending);
+            if (active != null && !string.Equals(active.SchedulerWindowId, oldWindowId, StringComparison.OrdinalIgnoreCase))
+            {
+                summary = "different_active_hard_return_preserved";
+                return false;
+            }
+            if (pending != null && !string.Equals(pending.SchedulerWindowId, oldWindowId, StringComparison.OrdinalIgnoreCase))
+            {
+                summary = "different_pending_hard_return_preserved";
+                return false;
+            }
+            if (active != null) ActiveByBotProfileId.Remove(botProfileId);
+            if (pending != null) PendingByBotProfileId.Remove(botProfileId);
+        }
+
+        string commandClear = active == null ? "no_active_hard_return_command"
+            : VanguardReturnMovementCommandStore.ClearOwned(botProfileId, active.LeaseId,
+                active.StartedAtUtc, "medical_pair_cooperative_yield");
+        BotOwner? botOwner = VanguardRaidOperatorRuntimeRegistry.TryGetRuntimeByBotProfileId(
+            botProfileId, out VanguardRaidOperatorRuntimeRecord runtime) ? runtime.BotOwner : null;
+        string externalRelease = VanguardExternalAuthorityAdapter.ReleaseMovementHardReturnPreempt(
+            botOwner, botProfileId, now, "medical_pair_cooperative_yield", oldWindowId);
+        bool successorCommandOwnedElsewhere = commandClear.StartsWith("protected_newer_command:", StringComparison.OrdinalIgnoreCase);
+        summary = "hard_return_retired:pending=" + Bool(pending != null)
+            + ":active=" + Bool(active != null)
+            + ":command=" + Safe(commandClear)
+            + ":external=" + Safe(externalRelease);
+        VanguardClientDiagnosticsLog.Info(StatusTag,
+            $"VANGUARD_HARD_RETURN_MEDIC_YIELD botProfile={Safe(botProfileId)}; previousWindow={Safe(oldWindowId)}; {summary}; handoffReady={Bool(!successorCommandOwnedElsewhere)}; cooldown=false; schedulerWindowRetained=Medical; tag={StatusTag}");
+        // A different physical command is still the owner's. Do not turn the
+        // medical pair into an implicit takeover of that unrelated successor.
+        return !successorCommandOwnedElsewhere;
+    }
+
+    // Native tick observability: strict read-only lookup. Never calls scheduler, clears a lease,
+    // or creates an authority grant; a missing exact lease is reported as unknown.
+    internal static bool TryPeekActiveWindowForNativeTickObservation(
+        string botProfileId, string leaseId, out string schedulerWindowId)
+    {
+        schedulerWindowId = "unknown";
+        if (string.IsNullOrWhiteSpace(botProfileId) || string.IsNullOrWhiteSpace(leaseId))
+        {
+            return false;
+        }
+        lock (Sync)
+        {
+            if (!ActiveByBotProfileId.TryGetValue(botProfileId, out HardReturnLeaseState? active)
+                || !string.Equals(active.LeaseId, leaseId, StringComparison.Ordinal))
+            {
+                return false;
+            }
+            schedulerWindowId = active.SchedulerWindowId;
+            return !string.IsNullOrWhiteSpace(schedulerWindowId)
+                && !string.Equals(schedulerWindowId, "none", StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
     public static bool IsCrossLeasePhysicalRecoveryActive(string? botProfileId, DateTimeOffset now, out string reason)
     {
         var state = GetPhysicalRecovery(botProfileId, now);
@@ -127,6 +223,7 @@ internal static class VanguardHardReturnMovementExecutor
             return false;
         }
 
+        var ownerPolicy = VanguardMovementAuthorityDoctrine.ForOwner(snapshot.OwnerProfileId);
         Vector3 botPosition = ResolveBotPosition(botOwner);
         lock (Sync)
         {
@@ -148,7 +245,7 @@ internal static class VanguardHardReturnMovementExecutor
                 return false;
             }
 
-            float noProgressSeconds = VanguardMovementAuthorityDoctrine.MovementLeaseNoProgressSeconds;
+            float noProgressSeconds = ownerPolicy.MovementLeaseNoProgressSeconds;
             ActiveByBotProfileId[snapshot.BotProfileId] = new HardReturnLeaseState
             {
                 LeaseId = leaseId,
@@ -159,15 +256,15 @@ internal static class VanguardHardReturnMovementExecutor
                 MoveOwnerAtStart = snapshot.MovementAuthority.CurrentAuthority,
                 Anchor = anchor,
                 AnchorRadiusMeters = anchorRadiusMeters,
-                ActionRallyClearMeters = VanguardMovementAuthorityDoctrine.ActionRallyClearMeters,
-                ActionRallyAcceptMeters = VanguardMovementAuthorityDoctrine.ActionRallyAcceptMeters,
-                CompletionMeters = VanguardMovementAuthorityDoctrine.HardReturnCompletionMeters,
+                ActionRallyClearMeters = ownerPolicy.ActionRallyClearMeters,
+                ActionRallyAcceptMeters = ownerPolicy.ActionRallyAcceptMeters,
+                CompletionMeters = ownerPolicy.HardReturnCompletionMeters,
                 NoProgressSeconds = noProgressSeconds,
                 MaxReanchorsPerLease = 1,
                 StartedAtUtc = now,
                 MinUntilUtc = now + TimeSpan.FromSeconds(VanguardMovementAuthorityDoctrine.MovementLeaseMinDurationSeconds),
                 MaxUntilUtc = expiresAtUtc,
-                HardMaxUntilUtc = now + TimeSpan.FromSeconds(VanguardMovementAuthorityDoctrine.MovementLeaseHardMaxSeconds),
+                HardMaxUntilUtc = now + TimeSpan.FromSeconds(ownerPolicy.MovementLeaseHardMaxSeconds),
                 NoProgressUntilUtc = now + TimeSpan.FromSeconds(noProgressSeconds),
                 LastProgressAtUtc = now,
                 NextAuthorityRefreshAtUtc = now + AuthorityRefreshInterval,
@@ -229,7 +326,7 @@ internal static class VanguardHardReturnMovementExecutor
         {
             bootLogged = true;
             VanguardClientDiagnosticsLog.Info(StatusTag,
-                $"VANGUARD_MOVE_BRIDGE_BOOT enabled=true; activeMovement=true; scope=hard_outside_bubble_external_or_sain_boundary; movementF12Sync=true; bubbleRadius={VanguardMovementAuthorityDoctrine.TacticalBubbleMeters:0}; hardCorrection={VanguardMovementAuthorityDoctrine.HardCorrectionMeters:0}; actionRallyClear={VanguardMovementAuthorityDoctrine.ActionRallyClearMeters:0}; actionRallyAccept={VanguardMovementAuthorityDoctrine.ActionRallyAcceptMeters:0}; hardReturnCompletion={VanguardMovementAuthorityDoctrine.HardReturnCompletionMeters:0}; backend=BIGBRAIN_GOTOSOMEPOINT; pathValidation=NavMesh.CalculatePath_PathComplete_required; anchorScoring=true; pathDistancePenalty=true; outcomeMemory=true; noProgressTyped=true; preemptPending=true; preemptDelay={VanguardMovementAuthorityDoctrine.PreemptPendingDelaySeconds:0.00}; preemptMax={VanguardMovementAuthorityDoctrine.PreemptPendingMaxSeconds:0.00}; authorityRefresh={VanguardMovementAuthorityDoctrine.MovementAuthorityRefreshSeconds:0.00}; combatBackoff={VanguardMovementAuthorityDoctrine.HardReturnCombatBackoffSeconds:0.00}; maxWindow={VanguardMovementAuthorityDoctrine.MovementLeaseMaxDurationSeconds:0}; hardMax={VanguardMovementAuthorityDoctrine.MovementLeaseHardMaxSeconds:0}; reapplyPolicy=apply_once_plus_bounded_same_generation_retarget; actionRally=true; noAnchorOnlyCompletion=true; noGoToPointNoWaySuccess=true; noReflectionGoToPoint=true; legacyReflectionBridgeDisabled=true; guards=owner_reliable_true_threat_effective_stationary_medical_only_mobile_medical_sidecar_allowed; doctrineSnapshot=per_lease; movementSyncTag={VanguardBuildVersion.MovementDoctrineF12SyncStatusTag}; tag={MoveBridgeStatusTag}; returnAuthorityTag={StatusTag}; goToSomePointTag={GoToSomePointBridgeStatusTag}; actionRallyTag={ActionRallyStatusTag}; continuationTag={ReturnContinuationStatusTag}; returnPathTag={ReturnPathValidationCompatibilityTag}; pendingTag={PendingStatusTag}; anchorScoreTag={AnchorScoreStatusTag}; schedulerTag={MainSchedulerStatusTag}; Tag={HardReturnCompatibilityTag}; Tag={SainBoundaryCompatibilityTag}; isolatedCombatReleaseTag={IsolatedCombatReleaseStatusTag}; hardRegroupSprintTag={HardRegroupSprintStatusTag}");
+                $"VANGUARD_MOVE_BRIDGE_BOOT enabled=true; activeMovement=player_scoped_owner_profile_id; movementF12Scope=PLAYER_SCOPED; scope=hard_outside_bubble_external_or_sain_boundary; backend=BIGBRAIN_GOTOSOMEPOINT; pathValidation=NavMesh.CalculatePath_PathComplete_required; anchorScoring=true; outcomeMemory=true; noProgressTyped=true; preemptPending=true; actionRally=true; doctrineSnapshot=per_lease_owner_scoped; tag={MoveBridgeStatusTag}; returnAuthorityTag={StatusTag}; schedulerTag={MainSchedulerStatusTag}; build={VanguardBuildVersion.BuildLabel}");
             VanguardClientDiagnosticsLog.Info(PendingStatusTag,
                 $"VANGUARD_PREEMPT_PENDING_BOOT enabled=true; commandSameTick=false; commandAfterPreemptTick=true; revalidateBeforeCommand=true; externalQuiesceRequired=true; pathCompleteRequired=true; actionRally=true; tag={PendingStatusTag}; returnAuthorityTag={StatusTag}; actionRallyTag={ActionRallyStatusTag}; continuationTag={ReturnContinuationStatusTag}; returnPathTag={ReturnPathValidationCompatibilityTag}");
         }
@@ -263,6 +360,7 @@ internal static class VanguardHardReturnMovementExecutor
                 continue;
             }
 
+            var ownerPolicy = VanguardMovementAuthorityDoctrine.ForOwner(snapshot.OwnerProfileId);
             string interrupt = CheckInterrupt(snapshot, now);
             if (!string.Equals(interrupt, "none", StringComparison.OrdinalIgnoreCase))
             {
@@ -290,7 +388,7 @@ internal static class VanguardHardReturnMovementExecutor
                 string completionReason = anchorDistance <= lease.AnchorRadiusMeters
                     ? "inside_hard_return_completion_and_anchor"
                     : "inside_hard_return_completion_band";
-                FinishLease(lease, now, "Completed", completionReason, StartCooldown, snapshot, record.BotOwner);
+                FinishLease(lease, now, "Completed", completionReason, StartCooldownFor(snapshot.OwnerProfileId), snapshot, record.BotOwner);
                 continue;
             }
 
@@ -377,13 +475,13 @@ internal static class VanguardHardReturnMovementExecutor
                     // A rejected restart means this executor no longer owns a usable command. Do not
                     // leave the scheduler window alive until the broad no-progress timeout and do not
                     // retry against a foreign generation on every tick.
-                    FinishLease(lease, now, "Failed", "PhysicalRestartRejected:" + restartResult, FailureCooldown, snapshot, record.BotOwner);
+                    FinishLease(lease, now, "Failed", "PhysicalRestartRejected:" + restartResult, FailureCooldownFor(snapshot.OwnerProfileId), snapshot, record.BotOwner);
                     continue;
                 }
 
                 if (blockedSeconds >= 3.0d && lease.PhysicalRestartCount >= 1)
                 {
-                    FinishLease(lease, now, "Timeout", "PhysicalBlockedAfterRestart:" + physical.Summary, FailureCooldown, snapshot, record.BotOwner);
+                    FinishLease(lease, now, "Timeout", "PhysicalBlockedAfterRestart:" + physical.Summary, FailureCooldownFor(snapshot.OwnerProfileId), snapshot, record.BotOwner);
                     continue;
                 }
             }
@@ -450,16 +548,36 @@ internal static class VanguardHardReturnMovementExecutor
 
                 TimeSpan timeoutCooldown = reanchorReason.StartsWith("reanchor_limit_reached", StringComparison.OrdinalIgnoreCase)
                     ? TimeSpan.FromSeconds(VanguardMovementAuthorityDoctrine.ActionRallyReanchorLimitCooldownSeconds)
-                    : FailureCooldown;
+                    : FailureCooldownFor(snapshot.OwnerProfileId);
                 FinishLease(lease, now, "Timeout", "NoProgressTimeout:" + noProgressReason + ":reanchor=" + reanchorReason, timeoutCooldown, snapshot, record.BotOwner);
                 continue;
             }
 
             if (now >= lease.MaxUntilUtc)
             {
-                FinishLease(lease, now, "Timeout", now >= lease.HardMaxUntilUtc ? "HardMaxWindowExpired" : "MaxWindowExpired", FailureCooldown, snapshot, record.BotOwner);
+                FinishLease(lease, now, "Timeout", now >= lease.HardMaxUntilUtc ? "HardMaxWindowExpired" : "MaxWindowExpired", FailureCooldownFor(snapshot.OwnerProfileId), snapshot, record.BotOwner);
             }
         }
+    }
+
+    // Two separate read-only checks: local instance identity and scheduler window
+    // identity. This is a conservative stale-work rejection, not an atomic receipt
+    // for the external physical movement drain or Medical pair commit.
+    private static bool IsCurrentPendingOwner(PendingReturnState state, DateTimeOffset now)
+    {
+        lock (Sync)
+        {
+            if (!PendingByBotProfileId.TryGetValue(state.BotProfileId, out var current)
+                || !ReferenceEquals(current, state)
+                || state.ExpiresAtUtc <= now
+                || ActiveByBotProfileId.ContainsKey(state.BotProfileId))
+            {
+                return false;
+            }
+        }
+
+        return VanguardMainIntentScheduler.IsExactExternalMovementWindowCurrent(
+            state.BotProfileId, state.SchedulerWindowId, now, grenade: false);
     }
 
     private static void TickPendingPreempts(IReadOnlyList<OperatorDecisionSnapshot> snapshots, DateTimeOffset now)
@@ -472,6 +590,13 @@ internal static class VanguardHardReturnMovementExecutor
 
         foreach (var state in pending)
         {
+            // A copied pending reference is not authority. A later window or runtime
+            // incarnation may have replaced it while this tick was in progress.
+            if (!IsCurrentPendingOwner(state, DateTimeOffset.UtcNow))
+            {
+                continue;
+            }
+
             var snapshot = FindSnapshot(snapshots, state.BotProfileId);
             if (snapshot == null)
             {
@@ -485,6 +610,7 @@ internal static class VanguardHardReturnMovementExecutor
                 continue;
             }
 
+            var ownerPolicy = VanguardMovementAuthorityDoctrine.ForOwner(snapshot.OwnerProfileId);
             string interrupt = CheckInterrupt(snapshot, now);
             if (!string.Equals(interrupt, "none", StringComparison.OrdinalIgnoreCase))
             {
@@ -499,7 +625,7 @@ internal static class VanguardHardReturnMovementExecutor
 
             if (now >= state.ExpiresAtUtc)
             {
-                FinishPending(state, now, "preempt_pending_timeout", FailureCooldown, snapshot, record.BotOwner);
+                FinishPending(state, now, "preempt_pending_timeout", FailureCooldownFor(snapshot.OwnerProfileId), snapshot, record.BotOwner);
                 continue;
             }
 
@@ -528,7 +654,7 @@ internal static class VanguardHardReturnMovementExecutor
                     continue;
                 }
 
-                FinishPending(state, now, "external_quiesce_not_granted:" + commandPreemptOutcome, FailureCooldown, snapshot, record.BotOwner);
+                FinishPending(state, now, "external_quiesce_not_granted:" + commandPreemptOutcome, FailureCooldownFor(snapshot.OwnerProfileId), snapshot, record.BotOwner);
                 LogThrottled("externalQuiesceFail|" + state.BotProfileId + "|" + commandPreemptOutcome, now,
                     $"VANGUARD_RETURN_AUTHORITY_QUIESCE_FAILED {state.Summary}; outcome={Safe(commandPreemptOutcome)}; preempt={Safe(commandPreemptSummary)}; bubbleDist={snapshot.SquadCohesion.OperatorDistanceToOwner:0.00}; command=false; tag={MoveBridgeStatusTag}; returnAuthorityTag={StatusTag}; goToSomePointTag={GoToSomePointBridgeStatusTag}; actionRallyTag={ActionRallyStatusTag}; pendingTag={PendingStatusTag}");
                 continue;
@@ -544,7 +670,7 @@ internal static class VanguardHardReturnMovementExecutor
                     continue;
                 }
 
-                FinishPending(state, now, "anchor_path_failed:" + anchorReason, FailureCooldown, snapshot, record.BotOwner);
+                FinishPending(state, now, "anchor_path_failed:" + anchorReason, FailureCooldownFor(snapshot.OwnerProfileId), snapshot, record.BotOwner);
                 LogThrottled("pathFailCommand|" + state.BotProfileId + "|" + anchorReason, now,
                     $"VANGUARD_RETURN_PATH_FAILED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; phase=before_command; reason={Safe(anchorReason)}; path={Safe(pathSummary)}; bubbleDist={snapshot.SquadCohesion.OperatorDistanceToOwner:0.00}; tag={MoveBridgeStatusTag}; returnAuthorityTag={StatusTag}; goToSomePointTag={GoToSomePointBridgeStatusTag}; actionRallyTag={ActionRallyStatusTag}; continuationTag={ReturnContinuationStatusTag}; returnPathTag={ReturnPathValidationCompatibilityTag}; pendingTag={PendingStatusTag}");
                 continue;
@@ -552,9 +678,16 @@ internal static class VanguardHardReturnMovementExecutor
 
             bool sprint = ShouldSprintHardRegroup(snapshot);
             string leaseId = "return_bridge_" + now.ToUnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture) + "_" + Safe(snapshot.BotProfileId);
-            float windowSeconds = CalculateLeaseWindowSeconds(snapshot.SquadCohesion.OperatorDistanceToOwner, pathDistance);
+            float windowSeconds = CalculateLeaseWindowSeconds(snapshot.SquadCohesion.OperatorDistanceToOwner, pathDistance, ownerPolicy);
             DateTimeOffset maxUntil = now + TimeSpan.FromSeconds(windowSeconds);
             float anchorRadius = Math.Max(4f, Math.Min(VanguardMovementAuthorityDoctrine.HardReturnAnchorRadiusMeters, snapshot.MovementAuthority.BrokerPlan.LeasePlan.AnchorRadiusMeters));
+            // NavMesh and external authority calls can outlive the scheduler grant.
+            // Never submit a command for a pending state already retired or replaced.
+            if (!IsCurrentPendingOwner(state, DateTimeOffset.UtcNow))
+            {
+                continue;
+            }
+
             bool commanded = VanguardReturnMovementCommandStore.Issue(
                 leaseId,
                 snapshot.OperatorId,
@@ -570,21 +703,26 @@ internal static class VanguardHardReturnMovementExecutor
                 out var commandResult);
             if (!commanded)
             {
-                FinishPending(state, now, "move_bridge_rejected:" + commandResult, FailureCooldown, snapshot, record.BotOwner);
+                FinishPending(state, now, "move_bridge_rejected:" + commandResult, FailureCooldownFor(snapshot.OwnerProfileId), snapshot, record.BotOwner);
                 LogThrottled("commandRejected|" + state.BotProfileId + "|" + commandResult, now,
                     $"VANGUARD_MOVE_BRIDGE_COMMAND_REJECTED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; anchor={FormatVector(anchor)}; sprint={Bool(sprint)}; command={Safe(commandResult)}; path={Safe(pathSummary)}; bubbleDist={snapshot.SquadCohesion.OperatorDistanceToOwner:0.00}; tag={MoveBridgeStatusTag}; goToSomePointTag={GoToSomePointBridgeStatusTag}; returnAuthorityTag={StatusTag}; pendingTag={PendingStatusTag}");
                 continue;
             }
 
-            lock (Sync)
+            if (!IsCurrentPendingOwner(state, DateTimeOffset.UtcNow))
             {
-                PendingByBotProfileId.Remove(state.BotProfileId);
+                if (commanded)
+                {
+                    _ = VanguardReturnMovementCommandStore.ClearOwned(
+                        snapshot.BotProfileId, leaseId, now, "pending_replaced_during_command_issue");
+                }
+                continue;
             }
 
-            float leaseActionRallyClearMeters = VanguardMovementAuthorityDoctrine.ActionRallyClearMeters;
-            float leaseActionRallyAcceptMeters = VanguardMovementAuthorityDoctrine.ActionRallyAcceptMeters;
-            float leaseNoProgressSeconds = VanguardMovementAuthorityDoctrine.MovementLeaseNoProgressSeconds;
-            int leaseMaxReanchors = VanguardMovementAuthorityDoctrine.ActionRallyMaxReanchorsPerLease;
+            float leaseActionRallyClearMeters = ownerPolicy.ActionRallyClearMeters;
+            float leaseActionRallyAcceptMeters = ownerPolicy.ActionRallyAcceptMeters;
+            float leaseNoProgressSeconds = ownerPolicy.MovementLeaseNoProgressSeconds;
+            int leaseMaxReanchors = ownerPolicy.ActionRallyMaxReanchorsPerLease;
 
             var lease = new HardReturnLeaseState
             {
@@ -598,13 +736,13 @@ internal static class VanguardHardReturnMovementExecutor
                 AnchorRadiusMeters = anchorRadius,
                 ActionRallyClearMeters = leaseActionRallyClearMeters,
                 ActionRallyAcceptMeters = leaseActionRallyAcceptMeters,
-                CompletionMeters = VanguardMovementAuthorityDoctrine.HardReturnCompletionMeters,
+                CompletionMeters = ownerPolicy.HardReturnCompletionMeters,
                 NoProgressSeconds = leaseNoProgressSeconds,
                 MaxReanchorsPerLease = leaseMaxReanchors,
                 StartedAtUtc = now,
                 MinUntilUtc = now + TimeSpan.FromSeconds(VanguardMovementAuthorityDoctrine.MovementLeaseMinDurationSeconds),
                 MaxUntilUtc = maxUntil,
-                HardMaxUntilUtc = now + TimeSpan.FromSeconds(VanguardMovementAuthorityDoctrine.MovementLeaseHardMaxSeconds),
+                HardMaxUntilUtc = now + TimeSpan.FromSeconds(ownerPolicy.MovementLeaseHardMaxSeconds),
                 NoProgressUntilUtc = now + TimeSpan.FromSeconds(leaseNoProgressSeconds),
                 NextAuthorityRefreshAtUtc = now + AuthorityRefreshInterval,
                 NextReanchorAllowedAtUtc = now + TimeSpan.FromSeconds(VanguardMovementAuthorityDoctrine.ActionRallyReanchorCooldownSeconds),
@@ -629,12 +767,42 @@ internal static class VanguardHardReturnMovementExecutor
                 PathSafeFallback = false
             };
 
+            bool admitted;
             lock (Sync)
             {
-                ActiveByBotProfileId[snapshot.BotProfileId] = lease;
+                // The pending-to-active transition is a single executor-state mutation.
+                // A late worker must not remove a successor pending or overwrite a lease.
+                admitted = PendingByBotProfileId.TryGetValue(state.BotProfileId, out var current)
+                    && ReferenceEquals(current, state)
+                    && !ActiveByBotProfileId.ContainsKey(state.BotProfileId);
+                if (admitted)
+                {
+                    PendingByBotProfileId.Remove(state.BotProfileId);
+                    ActiveByBotProfileId[state.BotProfileId] = lease;
+                }
+            }
+            if (!admitted)
+            {
+                _ = VanguardReturnMovementCommandStore.ClearOwned(
+                    snapshot.BotProfileId, leaseId, now, "pending_replaced_before_active_commit");
+                continue;
             }
 
-            VanguardMainIntentScheduler.MarkHardReturnStarted(snapshot.BotProfileId, lease.LeaseId, now, lease.Summary, lease.SchedulerWindowId);
+            if (!VanguardMainIntentScheduler.MarkHardReturnStarted(
+                snapshot.BotProfileId, lease.LeaseId, now, lease.Summary, lease.SchedulerWindowId))
+            {
+                lock (Sync)
+                {
+                    if (ActiveByBotProfileId.TryGetValue(lease.BotProfileId, out var current)
+                        && ReferenceEquals(current, lease))
+                    {
+                        ActiveByBotProfileId.Remove(lease.BotProfileId);
+                    }
+                }
+                _ = VanguardReturnMovementCommandStore.ClearOwned(
+                    snapshot.BotProfileId, leaseId, now, "scheduler_window_lost_before_active_commit");
+                continue;
+            }
 
             LogThrottled("started|" + snapshot.BotProfileId, now,
                 $"VANGUARD_BOUNDARY_RETURN_LEASE_STARTED {lease.Summary}; anchor={FormatVector(anchor)}; anchorReason={Safe(anchorReason)}; path={Safe(pathSummary)}; pathDist={pathDistance:0.00}; anchorScore={Safe(anchorScoreSummary)}; sprint={Bool(sprint)}; command={Safe(commandResult)}; backend=BigBrain_GoToSomePoint; commandPreempt={Safe(commandPreemptOutcome)}; preemptPendingElapsed={lease.PendingElapsedSeconds:0.00}; applyOnce=true; actionRally=true; noPeriodicReapply=true; authorityHeldUntilOutcome=true; tag={MoveBridgeStatusTag}; returnAuthorityTag={StatusTag}; goToSomePointTag={GoToSomePointBridgeStatusTag}; actionRallyTag={ActionRallyStatusTag}; continuationTag={ReturnContinuationStatusTag}; returnPathTag={ReturnPathValidationCompatibilityTag}; pendingTag={PendingStatusTag}; anchorScoreTag={AnchorScoreStatusTag}; schedulerTag={MainSchedulerStatusTag}; Tag={HardReturnCompatibilityTag}; Tag={SainBoundaryCompatibilityTag}; isolatedCombatReleaseTag={IsolatedCombatReleaseStatusTag}; hardRegroupSprintTag={HardRegroupSprintStatusTag}");
@@ -653,6 +821,7 @@ internal static class VanguardHardReturnMovementExecutor
                 continue;
             }
 
+            var ownerPolicy = VanguardMovementAuthorityDoctrine.ForOwner(snapshot.OwnerProfileId);
             // Do not short-circuit before TryOpenHardReturnPending: it is the authority that decides
             // whether an active close/travel/claim window is weak enough to preempt. Evaluating an
             // overlapping pre-check here would suppress valid hard-return takeover attempts.
@@ -693,20 +862,20 @@ internal static class VanguardHardReturnMovementExecutor
                     return;
                 }
 
-                SetCooldown(snapshot.BotProfileId, now + FailureCooldown);
+                SetCooldown(snapshot.BotProfileId, now + FailureCooldownFor(snapshot.OwnerProfileId));
                 VanguardMainIntentScheduler.FinishPrimaryWindow(snapshot.BotProfileId, now, "Failed", "anchor_path_failed:" + anchorReason, pathSummary, schedulerWindowId);
                 LogThrottled("anchorFail|" + snapshot.BotProfileId + "|" + anchorReason, now,
                     $"VANGUARD_RETURN_PATH_FAILED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; phase=start; reason={Safe(anchorReason)}; path={Safe(pathSummary)}; bubbleDist={snapshot.SquadCohesion.OperatorDistanceToOwner:0.00}; schedulerWindow={Safe(schedulerWindowId)}; tag={MoveBridgeStatusTag}; schedulerTag={MainSchedulerStatusTag}; returnAuthorityTag={StatusTag}; goToSomePointTag={GoToSomePointBridgeStatusTag}; actionRallyTag={ActionRallyStatusTag}; continuationTag={ReturnContinuationStatusTag}; returnPathTag={ReturnPathValidationCompatibilityTag}");
                 continue;
             }
 
-            TimeSpan authorityTtl = TimeSpan.FromSeconds(Math.Min(VanguardMovementAuthorityDoctrine.MovementLeaseHardMaxSeconds + 5f, CalculateLeaseWindowSeconds(snapshot.SquadCohesion.OperatorDistanceToOwner, pathDistance) + 8f));
+            TimeSpan authorityTtl = TimeSpan.FromSeconds(Math.Min(ownerPolicy.MovementLeaseHardMaxSeconds + 5f, CalculateLeaseWindowSeconds(snapshot.SquadCohesion.OperatorDistanceToOwner, pathDistance, ownerPolicy) + 8f));
             string scheduledPreemptReason = IsIsolatedCombatReleaseActive(snapshot.BotProfileId, now)
                 ? "scheduler_preempt_pending:isolated_combat_release"
                 : "scheduler_preempt_pending";
             var external = IsSainBoundaryReturnRequest(snapshot)
-                ? VanguardExternalAuthorityAdapter.RequestScheduledSainBoundaryReturnPreempt(record.BotOwner, snapshot, "sain_boundary_return_" + scheduledPreemptReason, authorityTtl, now)
-                : VanguardExternalAuthorityAdapter.RequestScheduledMovementHardReturnPreempt(record.BotOwner, snapshot, "hard_return_" + scheduledPreemptReason, authorityTtl, now);
+                ? VanguardExternalAuthorityAdapter.RequestScheduledSainBoundaryReturnPreempt(record.BotOwner, snapshot, "sain_boundary_return_" + scheduledPreemptReason, authorityTtl, now, schedulerWindowId)
+                : VanguardExternalAuthorityAdapter.RequestScheduledMovementHardReturnPreempt(record.BotOwner, snapshot, "hard_return_" + scheduledPreemptReason, authorityTtl, now, schedulerWindowId);
             if (!IsPreemptOutcomeUsableForPending(external.Outcome))
             {
                 if (external.Outcome == VanguardExternalPreemptOutcome.RejectedCombatOwner)
@@ -715,6 +884,7 @@ internal static class VanguardHardReturnMovementExecutor
                 }
                 SetCooldown(snapshot.BotProfileId, now + (external.Outcome == VanguardExternalPreemptOutcome.RejectedCombatOwner ? TimeSpan.FromSeconds(VanguardMovementAuthorityDoctrine.HardReturnCombatBackoffSeconds) : AbortCooldown));
                 VanguardMainIntentScheduler.FinishPrimaryWindow(snapshot.BotProfileId, now, "Failed", "external_preempt_" + external.Outcome, external.Summary, schedulerWindowId);
+                _ = VanguardExternalAuthorityAdapter.ReleaseMovementHardReturnPreempt(record.BotOwner, snapshot.BotProfileId, now, "admission_rejected:" + external.Outcome, schedulerWindowId);
                 LogThrottled("externalRejected|" + snapshot.BotProfileId + "|" + external.Outcome, now,
                     $"VANGUARD_PREEMPT_PENDING_ABORTED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; reason=external_preempt_{external.Outcome}; schedulerWindow={Safe(schedulerWindowId)}; {external.Summary}; tag={PendingStatusTag}; schedulerTag={MainSchedulerStatusTag}; returnAuthorityTag={StatusTag}; returnPathTag={ReturnPathValidationCompatibilityTag}");
                 continue;
@@ -754,6 +924,7 @@ internal static class VanguardHardReturnMovementExecutor
 
     private static bool IsEligibleToStart(OperatorDecisionSnapshot snapshot, DateTimeOffset now, out string reason)
     {
+        var ownerPolicy = VanguardMovementAuthorityDoctrine.ForOwner(snapshot.OwnerProfileId);
         reason = "none";
         if (snapshot == null || !snapshot.Alive)
         {
@@ -771,7 +942,7 @@ internal static class VanguardHardReturnMovementExecutor
         var broker = authority.BrokerPlan;
         var contract = broker.Contract;
         var lease = broker.LeasePlan;
-        if (!authority.HardOutsideBubble || snapshot.SquadCohesion.OperatorDistanceToOwner < VanguardMovementAuthorityDoctrine.HardCorrectionMeters)
+        if (!authority.HardOutsideBubble || snapshot.SquadCohesion.OperatorDistanceToOwner < ownerPolicy.HardCorrectionMeters)
         {
             reason = "not_hard_outside_bubble";
             return false;
@@ -873,6 +1044,7 @@ internal static class VanguardHardReturnMovementExecutor
 
     private static bool IsStillEligibleAfterPreempt(OperatorDecisionSnapshot snapshot, PendingReturnState state, out string reason)
     {
+        var ownerPolicy = VanguardMovementAuthorityDoctrine.ForOwner(snapshot.OwnerProfileId);
         if (!snapshot.Alive)
         {
             reason = "not_alive";
@@ -888,7 +1060,7 @@ internal static class VanguardHardReturnMovementExecutor
         // Runtime invariant: the hard-outside threshold is a start condition only.  After the preempt was accepted,
         // the pending command is allowed to continue while the Operator is still outside the action-rally
         // accept ring.  This prevents a 103m -> 84m improvement from aborting before the bridge command.
-        if (snapshot.SquadCohesion.OperatorDistanceToOwner <= VanguardMovementAuthorityDoctrine.HardReturnCompletionMeters)
+        if (snapshot.SquadCohesion.OperatorDistanceToOwner <= ownerPolicy.HardReturnCompletionMeters)
         {
             reason = "already_inside_hard_return_completion";
             return false;
@@ -934,13 +1106,14 @@ internal static class VanguardHardReturnMovementExecutor
 
     private static bool TryRefreshPreemptForCommand(PendingReturnState state, OperatorDecisionSnapshot snapshot, BotOwner botOwner, DateTimeOffset now, out string outcome, out string summary)
     {
-        TimeSpan ttl = TimeSpan.FromSeconds(Math.Max(8f, VanguardMovementAuthorityDoctrine.MovementLeaseMaxDurationSeconds));
+        var ownerPolicy = VanguardMovementAuthorityDoctrine.ForOwner(snapshot.OwnerProfileId);
+        TimeSpan ttl = TimeSpan.FromSeconds(Math.Max(8f, ownerPolicy.MovementLeaseMaxDurationSeconds));
         string preCommandReason = IsIsolatedCombatReleaseActive(snapshot.BotProfileId, now)
             ? "before_command_continuation:isolated_combat_release"
             : "before_command_continuation";
         var result = IsSainBoundaryReturnRequest(state.RequestKind)
-            ? VanguardExternalAuthorityAdapter.RequestSainBoundaryReturnContinuationPreempt(botOwner, snapshot, "sain_boundary_" + preCommandReason, ttl, now, allowActiveVanguardPathResidue: false)
-            : VanguardExternalAuthorityAdapter.RequestMovementHardReturnContinuationPreempt(botOwner, snapshot, "hard_return_" + preCommandReason, ttl, now, allowActiveVanguardPathResidue: false);
+            ? VanguardExternalAuthorityAdapter.RequestSainBoundaryReturnContinuationPreempt(botOwner, snapshot, "sain_boundary_" + preCommandReason, ttl, now, allowActiveVanguardPathResidue: false, ownerWindowId: state.SchedulerWindowId)
+            : VanguardExternalAuthorityAdapter.RequestMovementHardReturnContinuationPreempt(botOwner, snapshot, "hard_return_" + preCommandReason, ttl, now, allowActiveVanguardPathResidue: false, ownerWindowId: state.SchedulerWindowId);
         outcome = result.Outcome.ToString();
         summary = result.Summary;
         if (IsStrictAuthorityGranted(result.Outcome))
@@ -980,12 +1153,13 @@ internal static class VanguardHardReturnMovementExecutor
 
     private static bool RefreshMovementAuthorityHold(HardReturnLeaseState lease, OperatorDecisionSnapshot snapshot, BotOwner botOwner, DateTimeOffset now, out string reason)
     {
+        var ownerPolicy = VanguardMovementAuthorityDoctrine.ForOwner(snapshot.OwnerProfileId);
         if (!IsHardReturnContinuationAllowed(snapshot, out var continuationReason))
         {
             lease.NextAuthorityRefreshAtUtc = now + AuthorityRefreshInterval;
             reason = "continuation_not_allowed:" + continuationReason;
             LogThrottled("authorityContinuationBlocked|" + lease.BotProfileId + "|" + continuationReason, now,
-                $"VANGUARD_RETURN_CONTINUATION_BLOCKED {lease.Summary}; reason={Safe(continuationReason)}; bubbleDist={snapshot.SquadCohesion.OperatorDistanceToOwner:0.00}; startThreshold={VanguardMovementAuthorityDoctrine.HardCorrectionMeters:0.00}; completion={VanguardMovementAuthorityDoctrine.HardReturnCompletionMeters:0.00}; startEligibilityNotReused=true; tag={ReturnContinuationStatusTag}; returnAuthorityTag={StatusTag}; actionRallyTag={ActionRallyStatusTag}");
+                $"VANGUARD_RETURN_CONTINUATION_BLOCKED {lease.Summary}; reason={Safe(continuationReason)}; bubbleDist={snapshot.SquadCohesion.OperatorDistanceToOwner:0.00}; startThreshold={ownerPolicy.HardCorrectionMeters:0.00}; completion={ownerPolicy.HardReturnCompletionMeters:0.00}; startEligibilityNotReused=true; tag={ReturnContinuationStatusTag}; returnAuthorityTag={StatusTag}; actionRallyTag={ActionRallyStatusTag}");
             return false;
         }
 
@@ -994,8 +1168,8 @@ internal static class VanguardHardReturnMovementExecutor
             ? "active_lease_continuation:isolated_combat_release"
             : "active_lease_continuation";
         var result = IsSainBoundaryReturnRequest(lease.RequestKind)
-            ? VanguardExternalAuthorityAdapter.RequestSainBoundaryReturnContinuationPreempt(botOwner, snapshot, "sain_boundary_" + continuationPreemptReason, ttl, now, allowActiveVanguardPathResidue: true)
-            : VanguardExternalAuthorityAdapter.RequestMovementHardReturnContinuationPreempt(botOwner, snapshot, "hard_return_" + continuationPreemptReason, ttl, now, allowActiveVanguardPathResidue: true);
+            ? VanguardExternalAuthorityAdapter.RequestSainBoundaryReturnContinuationPreempt(botOwner, snapshot, "sain_boundary_" + continuationPreemptReason, ttl, now, allowActiveVanguardPathResidue: true, ownerWindowId: lease.SchedulerWindowId)
+            : VanguardExternalAuthorityAdapter.RequestMovementHardReturnContinuationPreempt(botOwner, snapshot, "hard_return_" + continuationPreemptReason, ttl, now, allowActiveVanguardPathResidue: true, ownerWindowId: lease.SchedulerWindowId);
 
         lease.NextAuthorityRefreshAtUtc = now + AuthorityRefreshInterval;
         lease.ExternalPreemptOutcome = result.Outcome.ToString();
@@ -1014,6 +1188,7 @@ internal static class VanguardHardReturnMovementExecutor
 
     private static bool IsHardReturnContinuationAllowed(OperatorDecisionSnapshot snapshot, out string reason)
     {
+        var ownerPolicy = VanguardMovementAuthorityDoctrine.ForOwner(snapshot.OwnerProfileId);
         if (snapshot == null || !snapshot.Alive)
         {
             reason = "not_alive";
@@ -1043,7 +1218,7 @@ internal static class VanguardHardReturnMovementExecutor
             return false;
         }
 
-        if (snapshot.SquadCohesion.OperatorDistanceToOwner <= VanguardMovementAuthorityDoctrine.HardReturnCompletionMeters)
+        if (snapshot.SquadCohesion.OperatorDistanceToOwner <= ownerPolicy.HardReturnCompletionMeters)
         {
             reason = "inside_hard_return_completion";
             return false;
@@ -1060,27 +1235,28 @@ internal static class VanguardHardReturnMovementExecutor
         if (candidate > lease.MaxUntilUtc && candidate <= lease.HardMaxUntilUtc)
         {
             lease.MaxUntilUtc = candidate;
-            VanguardReturnMovementCommandStore.RefreshLeaseWindow(lease.BotProfileId, lease.MaxUntilUtc, "progress_extend");
+            VanguardReturnMovementCommandStore.RefreshLeaseWindow(lease.BotProfileId, lease.LeaseId, lease.MaxUntilUtc, "progress_extend");
         }
     }
 
     private static bool ShouldSprintHardRegroup(OperatorDecisionSnapshot snapshot)
     {
-        bool sprint = snapshot.SquadCohesion.OperatorDistanceToOwner >= VanguardMovementAuthorityDoctrine.HardCorrectionMeters;
+        var ownerPolicy = VanguardMovementAuthorityDoctrine.ForOwner(snapshot.OwnerProfileId);
+        bool sprint = snapshot.SquadCohesion.OperatorDistanceToOwner >= ownerPolicy.HardCorrectionMeters;
         if (sprint)
         {
             LogThrottled("hardRegroupSprint|" + snapshot.BotProfileId, DateTimeOffset.UtcNow,
-                $"VANGUARD_HARD_REGROUP_SPRINT_ENABLED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; bubbleDist={snapshot.SquadCohesion.OperatorDistanceToOwner:0.00}; threshold={VanguardMovementAuthorityDoctrine.HardCorrectionMeters:0.00}; reason=hard_return_outside_threshold; tag={HardRegroupSprintStatusTag}; returnAuthorityTag={StatusTag}");
+                $"VANGUARD_HARD_REGROUP_SPRINT_ENABLED operator={Safe(snapshot.OperatorId)}; botProfile={Safe(snapshot.BotProfileId)}; bubbleDist={snapshot.SquadCohesion.OperatorDistanceToOwner:0.00}; threshold={ownerPolicy.HardCorrectionMeters:0.00}; reason=hard_return_outside_threshold; tag={HardRegroupSprintStatusTag}; returnAuthorityTag={StatusTag}");
         }
 
         return sprint;
     }
 
-    private static float CalculateLeaseWindowSeconds(float bubbleDistance, float pathDistance)
+    private static float CalculateLeaseWindowSeconds(float bubbleDistance, float pathDistance, VanguardMovementAuthorityDoctrine.OwnerMovementPolicy ownerPolicy)
     {
         float distance = Math.Max(bubbleDistance, pathDistance);
         float estimated = 12f + distance / 3.2f;
-        return Math.Max(VanguardMovementAuthorityDoctrine.MovementLeaseMaxDurationSeconds, Math.Min(VanguardMovementAuthorityDoctrine.MovementLeaseHardMaxSeconds, estimated));
+        return Math.Max(ownerPolicy.MovementLeaseMaxDurationSeconds, Math.Min(ownerPolicy.MovementLeaseHardMaxSeconds, estimated));
     }
 
     private static bool TryRestartHardReturnCommand(HardReturnLeaseState lease, DateTimeOffset now, string physicalSummary, out string result)
@@ -1153,7 +1329,7 @@ internal static class VanguardHardReturnMovementExecutor
         }
 
         bool sprint = ShouldSprintHardRegroup(snapshot);
-        VanguardReturnMovementCommandStore.RefreshLeaseWindow(lease.BotProfileId, lease.MaxUntilUtc, "reanchor_before_command");
+        VanguardReturnMovementCommandStore.RefreshLeaseWindow(lease.BotProfileId, lease.LeaseId, lease.MaxUntilUtc, "reanchor_before_command");
         var retargetResult = VanguardReturnMovementCommandStore.TryRetargetActive(
             lease.LeaseId,
             lease.BotProfileId,
@@ -1228,6 +1404,7 @@ internal static class VanguardHardReturnMovementExecutor
     private static bool TryAllowIsolatedCombatRelease(OperatorDecisionSnapshot snapshot, DateTimeOffset now, string phase, out string reason)
     {
         reason = "none";
+        var ownerPolicy = VanguardMovementAuthorityDoctrine.ForOwner(snapshot.OwnerProfileId);
         if (snapshot == null || !snapshot.Alive)
         {
             reason = "not_alive";
@@ -1235,7 +1412,7 @@ internal static class VanguardHardReturnMovementExecutor
         }
 
         float bubble = snapshot.SquadCohesion.OperatorDistanceToOwner;
-        if (bubble < VanguardMovementAuthorityDoctrine.HardCorrectionMeters)
+        if (bubble < ownerPolicy.HardCorrectionMeters)
         {
             reason = "not_hard_outside_bubble";
             ClearIsolatedCombatWatch(snapshot.BotProfileId);
@@ -1401,6 +1578,7 @@ internal static class VanguardHardReturnMovementExecutor
 
     private static bool TryResolveReturnAnchor(OperatorDecisionSnapshot snapshot, Vector3 botPosition, DateTimeOffset now, out Vector3 anchor, out string reason, out string pathSummary, out float pathDistance, out string scoreSummary)
     {
+        var ownerPolicy = VanguardMovementAuthorityDoctrine.ForOwner(snapshot.OwnerProfileId);
         anchor = Vector3.zero;
         reason = "none";
         pathSummary = "none";
@@ -1452,11 +1630,11 @@ internal static class VanguardHardReturnMovementExecutor
 
         float[] radii =
         {
-            VanguardMovementAuthorityDoctrine.ActionRallyPreferredMeters,
-            VanguardMovementAuthorityDoctrine.ActionRallyNearMeters,
-            VanguardMovementAuthorityDoctrine.ActionRallyWideMeters,
+            ownerPolicy.ActionRallyPreferredMeters,
+            ownerPolicy.ActionRallyNearMeters,
+            ownerPolicy.ActionRallyWideMeters,
             VanguardMovementAuthorityDoctrine.ActionRallyTightMeters,
-            VanguardMovementAuthorityDoctrine.ActionRallyOuterMeters
+            ownerPolicy.ActionRallyOuterMeters
         };
 
         Vector3[] directions =
@@ -1504,7 +1682,7 @@ internal static class VanguardHardReturnMovementExecutor
                 }
 
                 float sampledOwnerDistance = HorizontalDistance(sampled, owner);
-                if (sampledOwnerDistance > VanguardMovementAuthorityDoctrine.ActionRallyAcceptMeters + 6f)
+                if (sampledOwnerDistance > ownerPolicy.ActionRallyAcceptMeters + 6f)
                 {
                     lastFailure = "sample_too_far_from_action_rally:" + sampledOwnerDistance.ToString("0.00", CultureInfo.InvariantCulture);
                     continue;
@@ -1516,7 +1694,7 @@ internal static class VanguardHardReturnMovementExecutor
                     continue;
                 }
 
-                float preferredPenalty = Mathf.Abs(radius - VanguardMovementAuthorityDoctrine.ActionRallyPreferredMeters) * 1.5f;
+                float preferredPenalty = Mathf.Abs(radius - ownerPolicy.ActionRallyPreferredMeters) * 1.5f;
                 float travelEstimate = HorizontalDistance(botPosition, sampled);
                 float preliminary = 200f - preferredPenalty - travelEstimate * 0.18f - directionIndex * 0.35f - radiusIndex * 0.20f;
                 rawCandidates.Add(new RawRallyCandidate(sampled, radius, radiusIndex, directionIndex, sampledOwnerDistance, preliminary));
@@ -1543,6 +1721,7 @@ internal static class VanguardHardReturnMovementExecutor
 
             var scored = VanguardActionRallyAnchorScorer.Score(
                 snapshot.BotProfileId,
+                snapshot.OwnerProfileId,
                 botPosition,
                 owner,
                 raw.Anchor,
@@ -1572,12 +1751,13 @@ internal static class VanguardHardReturnMovementExecutor
         {
             float ownerSampleDistance = HorizontalDistance(ownerSample, owner);
             bool excluded = recovery != null && HorizontalDistance(ownerSample, recovery.FailedAnchor) < FailedAnchorExclusionMeters;
-            if (!excluded && ownerSampleDistance <= VanguardMovementAuthorityDoctrine.ActionRallyAcceptMeters
+            if (!excluded && ownerSampleDistance <= ownerPolicy.ActionRallyAcceptMeters
                 && TryValidateCompletePath(botPosition, ownerSample, out var ownerPathSummary, out var ownerPathDistance))
             {
                 pathValidations++;
                 var scoredOwner = VanguardActionRallyAnchorScorer.Score(
                     snapshot.BotProfileId,
+                    snapshot.OwnerProfileId,
                     botPosition,
                     owner,
                     ownerSample,
@@ -1626,6 +1806,7 @@ internal static class VanguardHardReturnMovementExecutor
 
     private static bool TryResolvePhysicalEscapeWaypoint(OperatorDecisionSnapshot snapshot, Vector3 botPosition, Vector3 owner, Vector3 forward, Vector3 right, PhysicalRecoveryState recovery, DateTimeOffset now, out Vector3 anchor, out string reason, out string pathSummary, out float pathDistance, out string scoreSummary)
     {
+        var ownerPolicy = VanguardMovementAuthorityDoctrine.ForOwner(snapshot.OwnerProfileId);
         anchor = Vector3.zero;
         reason = "none";
         pathSummary = "none";
@@ -1797,14 +1978,21 @@ internal static class VanguardHardReturnMovementExecutor
     {
         lock (Sync)
         {
+            if (!PendingByBotProfileId.TryGetValue(state.BotProfileId, out var current)
+                || !ReferenceEquals(current, state))
+            {
+                // The copied pending state was retired or replaced while the caller was working.
+                // Never publish cooldown/outcome/release against the successor.
+                return;
+            }
             PendingByBotProfileId.Remove(state.BotProfileId);
         }
 
         SetCooldown(state.BotProfileId, now + cooldown);
         VanguardMovementOutcomeMemory.RecordLeaseOutcome(state.BotProfileId, state.Anchor, "PendingAbort", reason, state.PathDistanceMeters, now);
         string commandClear = "pending_has_no_owned_command";
-        string release = VanguardExternalAuthorityAdapter.ReleaseMovementHardReturnPreempt(botOwner, state.BotProfileId, now, "pending_abort:" + reason);
         VanguardMainIntentScheduler.FinishPrimaryWindow(state.BotProfileId, now, "Failed", "pending_abort:" + reason, state.Summary, state.SchedulerWindowId);
+        string release = VanguardExternalAuthorityAdapter.ReleaseMovementHardReturnPreempt(botOwner, state.BotProfileId, now, "pending_abort:" + reason, state.SchedulerWindowId);
         float elapsed = (float)(now - state.PreemptedAtUtc).TotalSeconds;
         string bubbleDist = snapshot == null ? "unknown" : snapshot.SquadCohesion.OperatorDistanceToOwner.ToString("0.00", CultureInfo.InvariantCulture);
         VanguardClientDiagnosticsLog.Info(PendingStatusTag,
@@ -1815,21 +2003,28 @@ internal static class VanguardHardReturnMovementExecutor
     {
         lock (Sync)
         {
+            if (!ActiveByBotProfileId.TryGetValue(lease.BotProfileId, out var current)
+                || !ReferenceEquals(current, lease))
+            {
+                // A terminal callback may hold an obsolete lease reference. It must not
+                // end or alter a later HardReturn occupant of this profile slot.
+                return;
+            }
             ActiveByBotProfileId.Remove(lease.BotProfileId);
         }
 
         SetCooldown(lease.BotProfileId, now + cooldown);
         string commandClear = VanguardReturnMovementCommandStore.ClearOwned(lease.BotProfileId, lease.LeaseId, lease.StartedAtUtc, outcome + ":" + reason);
-        string release = VanguardExternalAuthorityAdapter.ReleaseMovementHardReturnPreempt(botOwner, lease.BotProfileId, now, outcome + ":" + reason);
         string outcomeMemory = VanguardMovementOutcomeMemory.RecordLeaseOutcome(lease.BotProfileId, lease.Anchor, outcome, reason, lease.PathDistanceMeters, now);
         VanguardMainIntentScheduler.FinishPrimaryWindow(lease.BotProfileId, now, outcome, reason, lease.Summary + ";movementOutcome=" + outcomeMemory, lease.SchedulerWindowId);
+        string release = VanguardExternalAuthorityAdapter.ReleaseMovementHardReturnPreempt(botOwner, lease.BotProfileId, now, outcome + ":" + reason, lease.SchedulerWindowId);
         if (string.Equals(outcome, "Completed", StringComparison.OrdinalIgnoreCase) && snapshot != null)
         {
             ClearPhysicalRecovery(lease.BotProfileId, "hard_return_completed");
             VanguardSquadTravelCohesionAuthority.RecordHardReturnCompleted(lease.BotProfileId, lease.OperatorId, snapshot.SquadCohesion.OperatorDistanceToOwner, now, reason);
         }
         else if (snapshot != null
-            && snapshot.SquadCohesion.OperatorDistanceToOwner >= VanguardMovementAuthorityDoctrine.HardCorrectionMeters
+            && snapshot.SquadCohesion.OperatorDistanceToOwner >= VanguardMovementAuthorityDoctrine.ForOwner(snapshot.OwnerProfileId).HardCorrectionMeters
             && (reason.IndexOf("PhysicalBlocked", StringComparison.OrdinalIgnoreCase) >= 0
                 || reason.IndexOf("NoProgressTimeout", StringComparison.OrdinalIgnoreCase) >= 0
                 || reason.IndexOf("PhysicalRestartRejected", StringComparison.OrdinalIgnoreCase) >= 0))

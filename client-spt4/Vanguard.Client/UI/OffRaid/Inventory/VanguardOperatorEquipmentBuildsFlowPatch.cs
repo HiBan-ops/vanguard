@@ -344,7 +344,7 @@ internal sealed class VanguardOperatorEquipmentBuildsControllerPatch : ModulePat
         try
         {
             PropertyInfo? property = AccessTools.Property(controller.GetType(), "LastEquipmentBuildType");
-            // The supported SPT 4.0.13 controller exposes this as a property. Query the field only
+            // The supported SPT controller exposes this as a property. Query the field only
             // as a compatibility fallback so Harmony does not emit a false missing-field warning.
             FieldInfo? field = property == null
                 ? AccessTools.Field(controller.GetType(), "LastEquipmentBuildType")

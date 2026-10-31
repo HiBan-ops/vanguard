@@ -3,10 +3,10 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 
-// Responsibility: Provides Corpse Loot Outcome Memory support for the loot runtime.
-// Flow: The file encapsulates one bounded piece of the subsystem and exchanges explicit inputs/results with neighboring services instead of relying on hidden cross-system state.
-// Authority boundary: Authority remains with the owning subsystem and any external EFT/SPT/Fika/SAIN component explicitly referenced by its call path.
-// Invariant: Behavior stays scoped to the current profile/raid/process contract and preserves existing safety and compatibility boundaries.
+// Responsibility: Track Operator-specific corpse loot failures and context-dependent exhaustion within a raid.
+// Flow: Apply failure retry windows and compare exhaustion records against manifest, interest and need signatures.
+// Authority boundary: This memory gates repeated attempts; it does not persist loot results or transfer inventory items.
+// Invariant: Exhaustion is scoped to an Operator, corpse and matching context, not a permanent corpse-wide prohibition.
 namespace Vanguard.Client.Runtime.Loot;
 
 /// <summary>

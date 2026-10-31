@@ -3,10 +3,10 @@ using System;
 using System.Collections.Generic;
 using EFT.InventoryLogic;
 
-// Responsibility: Provides World Loot Container Live Item Resolver support for the loot runtime.
-// Flow: The file encapsulates one bounded piece of the subsystem and exchanges explicit inputs/results with neighboring services instead of relying on hidden cross-system state.
-// Authority boundary: Authority remains with the owning subsystem and any external EFT/SPT/Fika/SAIN component explicitly referenced by its call path.
-// Invariant: Behavior stays scoped to the current profile/raid/process contract and preserves existing safety and compatibility boundaries.
+// Responsibility: Locate a selected live item beneath a world loot container root by exact item identity.
+// Flow: Walk the container root and child items with a fixed inspection limit, returning the discovered source path.
+// Authority boundary: The resolver reads the live container tree and owns neither loot utility decisions nor inventory mutation.
+// Invariant: Unresolved identities or traversal limits produce failure instead of an unverified item assignment.
 namespace Vanguard.Client.Runtime.Loot;
 
 /// <summary>Resolves an assigned live item beneath LootableContainer.ItemOwner.RootItem without owning loot policy.</summary>

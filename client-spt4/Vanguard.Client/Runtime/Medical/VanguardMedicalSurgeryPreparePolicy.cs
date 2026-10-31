@@ -21,6 +21,27 @@ internal static class VanguardMedicalSurgeryPreparePolicy
     private static readonly TimeSpan PolicyLogInterval = TimeSpan.FromSeconds(2.00d);
     private static readonly System.Collections.Generic.Dictionary<string, DateTimeOffset> LastPolicyLogAtByKey = new(StringComparer.OrdinalIgnoreCase);
 
+    public static int ForgetRuntimePresence(string? botProfileId, string reason)
+    {
+        string key = string.IsNullOrWhiteSpace(botProfileId) ? "none" : botProfileId.Trim();
+        if (string.Equals(key, "none", StringComparison.OrdinalIgnoreCase))
+        {
+            return 0;
+        }
+
+        int removed = 0;
+        foreach (string logKey in new System.Collections.Generic.List<string>(LastPolicyLogAtByKey.Keys))
+        {
+            if (logKey.IndexOf(key, StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                LastPolicyLogAtByKey.Remove(logKey);
+                removed++;
+            }
+        }
+
+        return removed;
+    }
+
     public static bool ShouldPrepareBeforeStationarySurgery(OperatorDecisionSnapshot snapshot, DateTimeOffset now, out string reason)
     {
         reason = "none";

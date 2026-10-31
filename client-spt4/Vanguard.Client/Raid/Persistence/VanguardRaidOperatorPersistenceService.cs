@@ -18,10 +18,10 @@ using EFT;
 using EFT.InventoryLogic;
 #endif
 
-// Responsibility: Builds the client end-of-raid persistence request from live Operator truth and sends it once to the server persistence transaction.
-// Flow: Raid stop boundaries are deduplicated, runtime Operators are snapshotted with health/inventory/Career evidence, the request is posted, and success/readback diagnostics close the client lifecycle.
-// Authority boundary: The client may observe and package raid truth; the server remains the only durable Operator/Career persistence authority.
-// Invariant: One raid outcome must not be committed twice, missing Operators/facts are reported rather than synthesized, and client cleanup cannot run as proof of server commit.
+// Responsibility: Builds the client end-of-raid persistence request from final Operator truth, including exact-incarnation snapshots captured before a living runtime presence is definitively removed.
+// Flow: Living definitive despawn seals capture an immutable local snapshot only; the raid-stop boundary later resolves live, corpse, or exact detached-living truth and submits one cross-Operator server transaction.
+// Authority boundary: Mid-raid capture is read-only and never durable; the server remains the only durable Operator/Career persistence authority and is contacted only by the raid-end commit path.
+// Invariant: Detached-living truth must match raid + persistent identities + RuntimeIncarnation exactly, death keeps corpse semantics, and no presence-loss callback may create a second durable transaction.
 namespace Vanguard.Client.Raid.Persistence;
 
 internal static class VanguardRaidOperatorPersistenceService
@@ -31,6 +31,22 @@ internal static class VanguardRaidOperatorPersistenceService
     private static string armedRaidSessionId = string.Empty;
     private static bool armed;
     private static bool finalCommitAttempted;
+    private static readonly Dictionary<string, DetachedLivingPersistenceSnapshot> DetachedLivingSnapshotsByBotProfileId = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly Dictionary<string, string> DetachedLivingSnapshotFailuresByBotProfileId = new(StringComparer.OrdinalIgnoreCase);
+
+    private sealed record DetachedLivingPersistenceSnapshot(
+        string RaidSessionId,
+        string OperatorId,
+        string OwnerProfileId,
+        string BotProfileId,
+        long RuntimeIncarnation,
+        DateTimeOffset CapturedAtUtc,
+        string ProfileDescriptorJson,
+        int ClientItemCount,
+        int EquipmentItemCount,
+        double HealthRatio,
+        string StatisticsManagerType,
+        string PresenceSource);
 
     public static bool IsArmedForOperatorCorpseTransactions
     {
@@ -54,10 +70,12 @@ internal static class VanguardRaidOperatorPersistenceService
             armedRaidSessionId = string.Empty;
             armed = false;
             finalCommitAttempted = false;
+            DetachedLivingSnapshotsByBotProfileId.Clear();
+            DetachedLivingSnapshotFailuresByBotProfileId.Clear();
         }
 
         VanguardClientDiagnosticsLog.Info(StatusTag,
-            $"VANGUARD_RAID_PERSISTENCE_RESET reason={Safe(reason)}; armed=false; finalCommit=false; operatorCorpseTransactions=false");
+            $"VANGUARD_RAID_PERSISTENCE_RESET reason={Safe(reason)}; armed=false; finalCommit=false; operatorCorpseTransactions=false; detachedLivingSnapshots=cleared");
     }
 
     public static void ArmFromManifest(VanguardRaidOperatorManifestForProfilesResponseDto response, string source)
@@ -83,6 +101,153 @@ internal static class VanguardRaidOperatorPersistenceService
     }
 
 #if SPT_CLIENT
+    public static string CaptureLivingDefinitivePresenceLossSnapshot(
+        VanguardRaidOperatorRuntimeRecord record,
+        BotOwner exactBotOwner,
+        Player? exactPlayer,
+        string source)
+    {
+        if (exactBotOwner.IsDead)
+        {
+            return "captured=false;reason=bot_owner_dead;death_semantics_deferred_to_corpse=true";
+        }
+
+        string key = record.BotProfileId?.Trim() ?? string.Empty;
+        string raidSessionId = VanguardRaidOperatorRuntimeRegistry.ActiveRaidSessionId ?? string.Empty;
+        long incarnation = record.RuntimeIncarnation;
+        if (string.IsNullOrWhiteSpace(key)
+            || string.IsNullOrWhiteSpace(raidSessionId)
+            || !record.IsRuntimePresent
+            || !ReferenceEquals(record.BotOwner, exactBotOwner))
+        {
+            return RecordDetachedLivingCaptureFailure(
+                key,
+                incarnation,
+                "exact_runtime_identity_not_present",
+                source,
+                raidSessionId);
+        }
+
+        if (exactPlayer == null || !ReferenceEquals(exactBotOwner.GetPlayer, exactPlayer))
+        {
+            return RecordDetachedLivingCaptureFailure(
+                key,
+                incarnation,
+                "exact_player_missing_or_changed",
+                source,
+                raidSessionId);
+        }
+
+        if (!TryBuildProfileDescriptorSnapshot(
+                exactPlayer,
+                out string descriptorJson,
+                out int itemCount,
+                out HashSet<string> equipmentIds,
+                out string descriptorReason))
+        {
+            return RecordDetachedLivingCaptureFailure(
+                key,
+                incarnation,
+                "descriptor_" + descriptorReason,
+                source,
+                raidSessionId);
+        }
+
+        double healthRatio = ReadHealthRatio(exactPlayer);
+        string statisticsManagerType = exactPlayer.StatisticsManager?.GetType().FullName
+            ?? exactPlayer.StatisticsManager?.GetType().Name
+            ?? "none";
+        var snapshot = new DetachedLivingPersistenceSnapshot(
+            raidSessionId,
+            record.OperatorId,
+            record.OwnerProfileId,
+            key,
+            incarnation,
+            DateTimeOffset.UtcNow,
+            descriptorJson,
+            itemCount,
+            equipmentIds.Count,
+            healthRatio,
+            statisticsManagerType,
+            source ?? string.Empty);
+
+        bool idempotent = false;
+        long? supersededPriorIncarnation = null;
+        lock (Sync)
+        {
+            if (DetachedLivingSnapshotsByBotProfileId.TryGetValue(key, out DetachedLivingPersistenceSnapshot? existing))
+            {
+                bool samePersistentIdentity = string.Equals(existing.RaidSessionId, raidSessionId, StringComparison.OrdinalIgnoreCase)
+                    && string.Equals(existing.OperatorId, record.OperatorId, StringComparison.OrdinalIgnoreCase)
+                    && string.Equals(existing.OwnerProfileId, record.OwnerProfileId, StringComparison.OrdinalIgnoreCase)
+                    && string.Equals(existing.BotProfileId, key, StringComparison.OrdinalIgnoreCase);
+                if (!samePersistentIdentity)
+                {
+                    DetachedLivingSnapshotFailuresByBotProfileId[key] =
+                        $"snapshot_persistent_identity_conflict_existing_incarnation_{existing.RuntimeIncarnation}_new_{incarnation}";
+                    VanguardClientDiagnosticsLog.Warning(
+                        StatusTag,
+                        $"VANGUARD_DETACHED_LIVING_SNAPSHOT_REJECTED operator={Safe(record.OperatorId)}; owner={Safe(record.OwnerProfileId)}; bot={Safe(key)}; incarnation={incarnation}; existingIncarnation={existing.RuntimeIncarnation}; raid={Safe(raidSessionId)}; source={Safe(source)}; reason=persistent_identity_or_raid_conflict; persistentMutation=false; serverCommit=false; explicitReplacementOnly=true");
+                    return "captured=false;reason=snapshot_persistent_identity_or_raid_conflict;explicitReplacementOnly=true";
+                }
+
+                if (existing.RuntimeIncarnation > incarnation)
+                {
+                    DetachedLivingSnapshotFailuresByBotProfileId[key] =
+                        $"snapshot_stale_incarnation_existing_{existing.RuntimeIncarnation}_new_{incarnation}";
+                    VanguardClientDiagnosticsLog.Warning(
+                        StatusTag,
+                        $"VANGUARD_DETACHED_LIVING_SNAPSHOT_REJECTED operator={Safe(record.OperatorId)}; owner={Safe(record.OwnerProfileId)}; bot={Safe(key)}; incarnation={incarnation}; existingIncarnation={existing.RuntimeIncarnation}; raid={Safe(raidSessionId)}; source={Safe(source)}; reason=stale_lower_incarnation; persistentMutation=false; serverCommit=false; explicitReplacementOnly=true");
+                    return "captured=false;reason=snapshot_stale_lower_incarnation;explicitReplacementOnly=true";
+                }
+
+                if (existing.RuntimeIncarnation == incarnation)
+                {
+                    idempotent = true;
+                }
+                else
+                {
+                    supersededPriorIncarnation = existing.RuntimeIncarnation;
+                    DetachedLivingSnapshotsByBotProfileId[key] = snapshot;
+                }
+            }
+            else
+            {
+                DetachedLivingSnapshotsByBotProfileId[key] = snapshot;
+            }
+
+            DetachedLivingSnapshotFailuresByBotProfileId.Remove(key);
+        }
+
+        bool healthControllerAlive = exactPlayer.HealthController?.IsAlive == true;
+        VanguardClientDiagnosticsLog.Info(
+            StatusTag,
+            $"VANGUARD_DETACHED_LIVING_SNAPSHOT_CAPTURED operator={Safe(record.OperatorId)}; owner={Safe(record.OwnerProfileId)}; bot={Safe(key)}; incarnation={incarnation}; raid={Safe(raidSessionId)}; hp={healthRatio:0.000}; descriptorItems={itemCount}; equipmentItems={equipmentIds.Count}; statisticsManager={Safe(statisticsManagerType)}; healthControllerAlive={Bool(healthControllerAlive)}; botOwnerDead=false; source={Safe(source)}; idempotent={Bool(idempotent)}; supersededPriorIncarnation={(supersededPriorIncarnation?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "none")}; persistentMutation=false; serverCommit=false; exactIncarnation=true; explicitReplacementOnly=true; healthAliveFlagIsNotDeathAuthority=true");
+        return $"captured=true;incarnation={incarnation};items={itemCount};hp={healthRatio:0.000};idempotent={Bool(idempotent)};supersededPriorIncarnation={(supersededPriorIncarnation?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "none")}";
+    }
+
+    private static string RecordDetachedLivingCaptureFailure(
+        string botProfileId,
+        long incarnation,
+        string reason,
+        string source,
+        string raidSessionId)
+    {
+        string key = botProfileId?.Trim() ?? string.Empty;
+        if (!string.IsNullOrWhiteSpace(key))
+        {
+            lock (Sync)
+            {
+                DetachedLivingSnapshotFailuresByBotProfileId[key] = reason;
+            }
+        }
+
+        VanguardClientDiagnosticsLog.Warning(
+            StatusTag,
+            $"VANGUARD_DETACHED_LIVING_SNAPSHOT_REJECTED bot={Safe(key)}; incarnation={incarnation}; raid={Safe(raidSessionId)}; source={Safe(source)}; reason={Safe(reason)}; persistentMutation=false; serverCommit=false; removalBlocked=false");
+        return "captured=false;reason=" + Safe(reason) + ";removalBlocked=false";
+    }
+
     public static void CommitAtRaidEnd(string source)
     {
         string raidSessionId;
@@ -178,6 +343,39 @@ internal static class VanguardRaidOperatorPersistenceService
             {
                 Player? player = record.BotOwner?.GetPlayer;
                 corpseByVictim.TryGetValue(record.BotProfileId, out VanguardCorpseRegistryEntry? corpseEntry);
+                if (player == null && corpseEntry == null && record.RuntimeDetachedAtUtc.HasValue)
+                {
+                    if (TryResolveDetachedLivingSnapshot(record, raidSessionId, out DetachedLivingPersistenceSnapshot? detachedSnapshot, out string detachedReason))
+                    {
+                        entries.Add(new VanguardRaidOperatorPersistenceEntryRequestDto
+                        {
+                            OperatorId = detachedSnapshot!.OperatorId,
+                            OwnerProfileId = detachedSnapshot.OwnerProfileId,
+                            BotProfileId = detachedSnapshot.BotProfileId,
+                            Died = false,
+                            HealthRatio = detachedSnapshot.HealthRatio,
+                            ProfileDescriptorJson = detachedSnapshot.ProfileDescriptorJson,
+                            SnapshotSource = "detached_living_presence_seal",
+                            ClientItemCount = detachedSnapshot.ClientItemCount,
+                            CorpseId = null,
+                            CorpseEquipmentItemCount = -1,
+                            CorpseEquipmentItemIds = null,
+                            StatisticsManagerType = detachedSnapshot.StatisticsManagerType
+                        });
+
+                        VanguardClientDiagnosticsLog.Info(
+                            StatusTag,
+                            $"VANGUARD_RAID_OPERATOR_SNAPSHOT operator={Safe(record.OperatorId)}; owner={Safe(record.OwnerProfileId)}; bot={Safe(record.BotProfileId)}; died=false; hp={detachedSnapshot.HealthRatio:0.000}; descriptorItems={detachedSnapshot.ClientItemCount}; equipmentItems={detachedSnapshot.EquipmentItemCount}; corpseEquipmentItems=-1; source=detached_living_presence_seal; presenceSource={Safe(detachedSnapshot.PresenceSource)}; capturedAt={detachedSnapshot.CapturedAtUtc:O}; incarnation={detachedSnapshot.RuntimeIncarnation}; raid={Safe(raidSessionId)}; exactIncarnation=true; serverCommitDeferredUntilRaidEnd=true");
+                        continue;
+                    }
+
+                    FailAttempt(
+                        "operator_player_missing_" + record.OperatorId + "_detached_snapshot_" + detachedReason,
+                        source,
+                        raidSessionId);
+                    return;
+                }
+
                 player ??= corpseEntry?.Victim;
                 if (player == null)
                 {
@@ -388,6 +586,52 @@ internal static class VanguardRaidOperatorPersistenceService
 
     private static string NullableLong(long? value) => value.HasValue ? value.Value.ToString(System.Globalization.CultureInfo.InvariantCulture) : "none";
     private static string InvariantDouble(double value, string format) => value.ToString(format, System.Globalization.CultureInfo.InvariantCulture);
+
+    private static bool TryResolveDetachedLivingSnapshot(
+        VanguardRaidOperatorRuntimeRecord record,
+        string raidSessionId,
+        out DetachedLivingPersistenceSnapshot? snapshot,
+        out string reason)
+    {
+        snapshot = null;
+        reason = "not_found";
+        string key = record.BotProfileId?.Trim() ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(key) || record.BotOwner != null || !record.RuntimeDetachedAtUtc.HasValue)
+        {
+            reason = "record_not_detached";
+            return false;
+        }
+
+        lock (Sync)
+        {
+            if (!DetachedLivingSnapshotsByBotProfileId.TryGetValue(key, out DetachedLivingPersistenceSnapshot? candidate))
+            {
+                reason = DetachedLivingSnapshotFailuresByBotProfileId.TryGetValue(key, out string? failure)
+                    ? "capture_failed_" + Safe(failure)
+                    : "not_captured";
+                return false;
+            }
+
+            if (candidate.RuntimeIncarnation != record.RuntimeIncarnation)
+            {
+                reason = $"incarnation_mismatch_expected_{record.RuntimeIncarnation}_captured_{candidate.RuntimeIncarnation}";
+                return false;
+            }
+
+            if (!string.Equals(candidate.RaidSessionId, raidSessionId, StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(candidate.OperatorId, record.OperatorId, StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(candidate.OwnerProfileId, record.OwnerProfileId, StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(candidate.BotProfileId, record.BotProfileId, StringComparison.OrdinalIgnoreCase))
+            {
+                reason = "persistent_identity_or_raid_mismatch";
+                return false;
+            }
+
+            snapshot = candidate;
+            reason = "ok";
+            return true;
+        }
+    }
 
     private static bool TryBuildProfileDescriptorSnapshot(
         Player player,

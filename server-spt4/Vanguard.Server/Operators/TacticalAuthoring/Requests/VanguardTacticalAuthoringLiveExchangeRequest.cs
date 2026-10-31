@@ -17,6 +17,18 @@ public sealed record VanguardTacticalAuthoringLiveAuthorSnapshot(
     DateTimeOffset UpdatedAtUtc = default,
     string ClientBuild = "");
 
+
+public sealed record VanguardTacticalCoordinationTopologySnapshot(
+    string OwnerProfileId = "",
+    string RaidSessionId = "",
+    string MapId = "",
+    bool Active = false,
+    long Revision = 0,
+    string ContentHash = "",
+    string MapJson = "",
+    DateTimeOffset UpdatedAtUtc = default,
+    string ClientBuild = "");
+
 public sealed record VanguardTacticalAuthoringLiveHeadlessResult(
     string OwnerProfileId = "",
     string LiveSessionId = "",
@@ -32,4 +44,5 @@ public sealed record VanguardTacticalAuthoringLiveExchangeRequest(
     string ClientLabel = "",
     List<string>? KnownOwnerProfileIds = null,
     VanguardTacticalAuthoringLiveAuthorSnapshot? Author = null,
+    VanguardTacticalCoordinationTopologySnapshot? Topology = null,
     List<VanguardTacticalAuthoringLiveHeadlessResult>? HeadlessResults = null) : IRequestData;

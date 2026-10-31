@@ -181,7 +181,7 @@ public sealed class VanguardRaidOperatorManifestService(
         else
         {
             // Presentation-only/HUD manifest reads must not turn a selected Operator into a durable
-            // deployed reservation. Runtime 20260910_155248 proved that the old observer read did so.
+            // deployed reservation. Earlier runtime evidence showed that the observer read could create one.
             reservation = new VanguardDeploymentReservationResult(
                 true,
                 "observer_read_no_deployment_reservation",

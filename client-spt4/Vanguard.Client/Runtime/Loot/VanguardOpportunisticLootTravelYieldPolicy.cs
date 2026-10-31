@@ -52,7 +52,7 @@ internal static class VanguardOpportunisticLootTravelYieldPolicy
             return false;
         }
 
-        float ownerDistanceLimit = Math.Min(MaximumOperatorOwnerDistanceMeters, VanguardMovementAuthorityDoctrine.ActionRallyPreferredMeters);
+        float ownerDistanceLimit = Math.Min(MaximumOperatorOwnerDistanceMeters, VanguardMovementAuthorityDoctrine.ForOwner(snapshot.OwnerProfileId).ActionRallyPreferredMeters);
         if (!snapshot.SquadCohesion.OwnerKnown
             || !snapshot.SquadCohesion.OwnerReliableForActiveMovement
             || snapshot.SquadCohesion.OperatorDistanceToOwner > ownerDistanceLimit)

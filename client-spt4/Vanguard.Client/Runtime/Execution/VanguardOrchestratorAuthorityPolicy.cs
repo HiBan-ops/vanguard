@@ -12,6 +12,7 @@ using Vanguard.Client.Runtime.Movement;
 // Flow: Normalized snapshots/configuration enter as inputs, pure rule evaluation selects a bounded outcome, and an executor/service consumes that outcome.
 // Authority boundary: Policy decides eligibility/priority only; physical EFT actions and persisted state changes belong to their dedicated executors/services.
 // Invariant: The same evidence yields the same decision, and safety/authority gates are never bypassed by policy convenience.
+using Vanguard.Client.Runtime.Medical.Support;
 namespace Vanguard.Client.Runtime.Execution;
 
 /// <summary>
@@ -247,6 +248,16 @@ internal static class VanguardOrchestratorAuthorityPolicy
         }
 
         string domain = SelectPrimaryDomain(snapshot, out _);
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        bool corpseLootCandidate = IsCorpseLootApproachCandidate(candidate);
+        bool potentialSelfCareCandidate = candidate.Domain == "Medical"
+            && (string.Equals(candidate.IntentKey, "MobileMedicalStabilize", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(candidate.IntentKey, "StationaryMedicalStabilize", StringComparison.OrdinalIgnoreCase));
+        bool actionableSelfCare = corpseLootCandidate
+            && VanguardEffectiveMedicalExecutionPolicy.HasActionableSelfCareOpportunity(snapshot, now, out _);
+        bool actionableSelfCareCandidate = potentialSelfCareCandidate
+            && VanguardEffectiveMedicalExecutionPolicy.IsActionableSelfCareCandidate(snapshot, candidate, now, out _);
+        bool catastrophicCohesionRecovery = IsCatastrophicCohesionRecovery(snapshot);
         if (domain == DomainDead)
         {
             return string.Equals(candidate.IntentKey, "ObserveDeadOperator", StringComparison.OrdinalIgnoreCase) ? 10.0f : 0.01f;
@@ -284,6 +295,24 @@ internal static class VanguardOrchestratorAuthorityPolicy
 
         if (domain == DomainCohesion)
         {
+            if (actionableSelfCareCandidate && !catastrophicCohesionRecovery)
+            {
+                return 3.40f;
+            }
+
+            if (actionableSelfCare && IsCorpseLootApproachCandidate(candidate))
+            {
+                return 0.0f;
+            }
+
+            // A fully-qualified M3 supply handoff is a short medical-support contribution that is
+            // already inside native partner range and requires no movement. It may outrank a stable
+            // cohesion hold, but never combat or an active self-medical authority.
+            if (IsMedicSupportSupplyDropCandidate(candidate))
+            {
+                return 5.20f;
+            }
+
             if (string.Equals(candidate.IntentKey, "ExclusiveCohesionStableHold", StringComparison.OrdinalIgnoreCase))
             {
                 return 5.0f;
@@ -306,6 +335,16 @@ internal static class VanguardOrchestratorAuthorityPolicy
                 return 1.90f;
             }
 
+            return 0.0f;
+        }
+
+        if (actionableSelfCareCandidate)
+        {
+            return 2.60f;
+        }
+
+        if (actionableSelfCare && IsCorpseLootApproachCandidate(candidate))
+        {
             return 0.0f;
         }
 
@@ -370,6 +409,13 @@ internal static class VanguardOrchestratorAuthorityPolicy
             return deploymentSupport;
         }
 
+        if (VanguardEffectiveMedicalExecutionPolicy.HasActionableSelfCareOpportunity(snapshot, now, out var actionableMedicalReason)
+            && !IsCatastrophicCohesionRecovery(snapshot))
+        {
+            reason = "actionable_self_care_preempts_generic_stable_hold:" + actionableMedicalReason;
+            return false;
+        }
+
         bool nearOwner = snapshot.SquadCohesion.OperatorDistanceToOwner <= 10.5f;
         bool stableSupport = snapshot.SquadCohesion.InBubble
             && nearOwner
@@ -424,23 +470,37 @@ internal static class VanguardOrchestratorAuthorityPolicy
             {
                 bool allowedStable = string.Equals(candidate.IntentKey, "ExclusiveCohesionStableHold", StringComparison.OrdinalIgnoreCase);
                 bool allowedCorpseLoot = IsCorpseLootApproachCandidate(candidate);
+                bool allowedStableMedicSupply = IsMedicSupportSupplyDropCandidate(candidate);
                 reason = allowedStable
                     ? "exclusive_stable_hold_allowed:" + stableReason
-                    : allowedCorpseLoot
-                        ? "stable_hold_yields_to_bounded_corpse_loot:" + stableReason
-                        : "exclusive_stable_hold_blocks:" + stableReason;
-                return allowedStable || allowedCorpseLoot;
+                    : allowedStableMedicSupply
+                        ? "stable_hold_yields_to_immediate_medic_supply_drop:" + stableReason
+                        : allowedCorpseLoot
+                            ? "stable_hold_yields_to_bounded_corpse_loot:" + stableReason
+                            : "exclusive_stable_hold_blocks:" + stableReason;
+                return allowedStable || allowedCorpseLoot || allowedStableMedicSupply;
             }
 
+            bool allowedMedicSupply = IsMedicSupportSupplyDropCandidate(candidate);
+            bool potentialActionableSelfCare = candidate.Domain == "Medical"
+                && (string.Equals(candidate.IntentKey, "MobileMedicalStabilize", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(candidate.IntentKey, "StationaryMedicalStabilize", StringComparison.OrdinalIgnoreCase));
+            bool allowedActionableSelfCare = potentialActionableSelfCare
+                && !IsCatastrophicCohesionRecovery(snapshot)
+                && VanguardEffectiveMedicalExecutionPolicy.IsActionableSelfCareCandidate(snapshot, candidate, DateTimeOffset.UtcNow, out _);
             bool allowed = candidate.Domain == "MovementAuthority"
                 || candidate.Domain == "SquadCohesion"
                 || candidate.Domain == "Follow"
                 || IsCorpseLootApproachCandidate(candidate)
+                || allowedMedicSupply
+                || allowedActionableSelfCare
                 || VanguardEffectiveMedicalExecutionPolicy.IsUrgentMobileSidecarCandidate(snapshot, candidate);
             reason = allowed
-                ? (VanguardEffectiveMedicalExecutionPolicy.IsUrgentMobileSidecarCandidate(snapshot, candidate)
-                    ? "exclusive_cohesion_allows_urgent_mobile_medical_sidecar:" + domainReason
-                    : "exclusive_cohesion_allowed:" + domainReason)
+                ? (allowedMedicSupply
+                    ? "exclusive_cohesion_allows_immediate_medic_supply_drop:" + domainReason
+                    : VanguardEffectiveMedicalExecutionPolicy.IsUrgentMobileSidecarCandidate(snapshot, candidate)
+                        ? "exclusive_cohesion_allows_urgent_mobile_medical_sidecar:" + domainReason
+                        : "exclusive_cohesion_allowed:" + domainReason)
                 : "exclusive_cohesion_blocks:" + domainReason;
             return allowed;
         }
@@ -448,6 +508,17 @@ internal static class VanguardOrchestratorAuthorityPolicy
         reason = "exclusive_recovery_allows_readonly";
         return candidate.Domain != "MovementAuthority" || string.Equals(candidate.IntentKey, "RecoveryObserveOnly", StringComparison.OrdinalIgnoreCase);
     }
+
+    private static bool IsCatastrophicCohesionRecovery(OperatorDecisionSnapshot snapshot)
+        => snapshot != null
+            && (snapshot.MovementAuthority.HardOutsideBubble
+                || snapshot.SquadCohesion.OperatorDistanceToOwner >= VanguardMovementAuthorityDoctrine.CombatCohesionEmergencyReturnMeters);
+
+    private static bool IsMedicSupportSupplyDropCandidate(VanguardIntentCandidate candidate)
+        => candidate != null
+            && candidate.Valid
+            && string.Equals(candidate.Domain, "Medical", StringComparison.OrdinalIgnoreCase)
+            && string.Equals(candidate.IntentKey, VanguardMedicSupportDoctrine.SupplyDropIntentKey, StringComparison.OrdinalIgnoreCase);
 
     private static bool IsCorpseLootApproachCandidate(VanguardIntentCandidate candidate)
         => candidate != null

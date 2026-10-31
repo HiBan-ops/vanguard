@@ -14,6 +14,7 @@ internal sealed class VanguardTacticalAuthoringLiveExchangeRequestDto
     public string ClientLabel { get; set; } = string.Empty;
     public List<string> KnownOwnerProfileIds { get; set; } = new();
     public VanguardTacticalAuthoringLiveAuthorSnapshotDto? Author { get; set; }
+    public VanguardTacticalCoordinationTopologySnapshotDto? Topology { get; set; }
     public List<VanguardTacticalAuthoringLiveHeadlessResultDto> HeadlessResults { get; set; } = new();
 }
 
@@ -22,6 +23,7 @@ internal sealed class VanguardTacticalAuthoringLiveExchangeResponseDto
     public bool Success { get; set; }
     public string Reason { get; set; } = string.Empty;
     public List<VanguardTacticalAuthoringLiveAuthorSnapshotDto> Authors { get; set; } = new();
+    public List<VanguardTacticalCoordinationTopologySnapshotDto> Topologies { get; set; } = new();
     public List<VanguardTacticalAuthoringLiveHeadlessResultDto> HeadlessResults { get; set; } = new();
     public DateTimeOffset ServerTimeUtc { get; set; }
 }
@@ -34,6 +36,20 @@ internal sealed class VanguardTacticalAuthoringLiveAuthorSnapshotDto
     public bool Active { get; set; }
     public long Revision { get; set; }
     public string SelectedZoneId { get; set; } = string.Empty;
+    public string MapJson { get; set; } = string.Empty;
+    public DateTimeOffset UpdatedAtUtc { get; set; }
+    public string ClientBuild { get; set; } = string.Empty;
+}
+
+
+internal sealed class VanguardTacticalCoordinationTopologySnapshotDto
+{
+    public string OwnerProfileId { get; set; } = string.Empty;
+    public string RaidSessionId { get; set; } = string.Empty;
+    public string MapId { get; set; } = string.Empty;
+    public bool Active { get; set; }
+    public long Revision { get; set; }
+    public string ContentHash { get; set; } = string.Empty;
     public string MapJson { get; set; } = string.Empty;
     public DateTimeOffset UpdatedAtUtc { get; set; }
     public string ClientBuild { get; set; } = string.Empty;

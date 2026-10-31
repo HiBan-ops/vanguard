@@ -303,7 +303,10 @@ internal static class VanguardOperatorRuntimeAuditProbe
         string sprint = VanguardOperatorRuntimeAuditReflection.BoolText(VanguardOperatorRuntimeAuditReflection.GetPropertyOrField(mover, "Sprinting", "Sprint", "IsSprint", "IsSprinting"));
         string playerSprint = VanguardOperatorRuntimeAuditReflection.BoolText(VanguardOperatorRuntimeAuditReflection.GetPropertyOrField(player, "IsSprintEnabled"));
         string pose = VanguardOperatorRuntimeAuditReflection.FloatText(VanguardOperatorRuntimeAuditReflection.GetPropertyOrField(mover, "TargetPose", "Pose", "PoseLevel"));
+        string moverPause = VanguardOperatorRuntimeAuditReflection.BoolText(VanguardOperatorRuntimeAuditReflection.GetPropertyOrField(mover, "Pause", "Paused"));
+        string moverPauseEnd = VanguardOperatorRuntimeAuditReflection.FloatText(VanguardOperatorRuntimeAuditReflection.GetPropertyOrField(mover, "PauseEndTime"));
         string patrolPaused = VanguardOperatorRuntimeAuditReflection.BoolText(VanguardOperatorRuntimeAuditReflection.GetPropertyOrField(patrol, "Paused", "IsPaused"));
+        string patrolStatus = VanguardOperatorRuntimeAuditReflection.Text(VanguardOperatorRuntimeAuditReflection.GetPropertyOrField(patrol, "Status", "Status_1"));
         string hasPath = VanguardOperatorRuntimeAuditReflection.BoolText(VanguardOperatorRuntimeAuditReflection.GetPropertyOrField(mover, "HasPathAndNoComplete", "HasPathAndNotComplete"));
         string targetPoint = VanguardOperatorRuntimeAuditReflection.VectorText(VanguardOperatorRuntimeAuditReflection.GetPropertyOrField(mover, "TargetPoint"));
         string realDest = VanguardOperatorRuntimeAuditReflection.VectorText(VanguardOperatorRuntimeAuditReflection.GetPropertyOrField(mover, "RealDestPoint", "CurrentTargetPoint"));
@@ -321,7 +324,10 @@ internal static class VanguardOperatorRuntimeAuditProbe
             $"sprint={sprint}",
             $"playerSprint={playerSprint}",
             $"pose={pose}",
+            $"moverPause={moverPause}",
+            $"moverPauseEnd={moverPauseEnd}",
             $"patrolPaused={patrolPaused}",
+            $"patrolStatus={patrolStatus}",
             $"hasPath={hasPath}",
             $"dist={dist}",
             $"target={targetPoint}",

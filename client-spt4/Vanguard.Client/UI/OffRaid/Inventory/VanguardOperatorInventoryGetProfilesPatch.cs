@@ -42,7 +42,7 @@ internal sealed class VanguardOperatorInventoryGetProfilesPatch : ModulePatch
 
         Type? sessionInterface = FindLoadedTypeByName("ISession");
 
-        // SPT 4 / EFT builds can rename the concrete session backend. Resolve by shape
+        // SPT / EFT builds can rename the concrete session backend. Resolve by shape
         // instead of relying only on SessionBackendClass, but only patch concrete methods
         // with a body. Interface-only GetProfiles targets are diagnostic noise, not safe.
         MethodInfo? concreteSessionMethod = AppDomain.CurrentDomain.GetAssemblies()

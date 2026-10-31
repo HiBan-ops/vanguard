@@ -3,10 +3,11 @@ using System;
 using Vanguard.Client.Runtime.Decision;
 using Vanguard.Client.Raid.Runtime.Fika;
 
-// Responsibility: Provides Raid Fixed Operator Hud Semantic Resolver support for the raid Operator HUD.
-// Flow: The file encapsulates one bounded piece of the subsystem and exchanges explicit inputs/results with neighboring services instead of relying on hidden cross-system state.
-// Authority boundary: Authority remains with the owning subsystem and any external EFT/SPT/Fika/SAIN component explicitly referenced by its call path.
-// Invariant: Behavior stays scoped to the current profile/raid/process contract and preserves existing safety and compatibility boundaries.
+// Responsibility: Resolve raid Operator HUD activity and alerts from local decisions and received Fika telemetry.
+// Flow: Prefer fresh local projection, then fresh remote telemetry, and expose stale or unavailable states explicitly.
+// Authority boundary: This is a read-only presentation resolver; it cannot issue Operator gameplay commands.
+// Invariant: Unavailable or stale authoritative data is visible instead of being silently treated as a live decision.
+
 namespace Vanguard.Client.Raid.Hud;
 
 /// <summary>

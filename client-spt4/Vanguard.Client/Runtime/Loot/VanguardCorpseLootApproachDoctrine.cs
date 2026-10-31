@@ -52,7 +52,7 @@ internal static class VanguardCorpseLootApproachDoctrine
     public const float MaximumStartOwnerDistanceMeters = 80.0f;
     public const float MaximumActiveOwnerDistanceMeters = 80.0f;
     public const float MaximumOwnerAnchorDistanceMeters = 80.0f;
-    public static float MaximumDirectCorpseDistanceMeters => VanguardMovementAuthorityDoctrine.OpportunisticLootMaxDistanceMeters;
+    public const float MaximumDirectCorpseDistanceMeters = 42.0f; // Legacy/default diagnostic fallback; runtime admission uses owner-scoped method below.
     public static float MaximumDirectCorpseDistanceMetersForOwner(string? ownerProfileId)
         => VanguardRuntimeSettingsAuthorityResolver.ResolvePlayerScoped(ownerProfileId, "loot_direct_distance_fallback").MovementOpportunisticLootMaxDistanceMeters;
     public const float MaximumPathDistanceMeters = 42.0f;
@@ -65,8 +65,10 @@ internal static class VanguardCorpseLootApproachDoctrine
     public const float PhysicalRestartAfterSeconds = 1.25f;
     public const float PhysicalFailAfterRestartSeconds = 4.00f;
 
-    public static int MaximumCommittedItemsPerCorpseSession => VanguardOperatorRuntimeAuditOptions.GetLootMaximumTransactionsPerCorpse();
-    public static float MaximumOperationalSessionSeconds => VanguardOperatorRuntimeAuditOptions.GetLootMaximumSessionSeconds();
+    public static int MaximumCommittedItemsPerCorpseSessionForOwner(string? ownerProfileId)
+        => VanguardRuntimeSettingsAuthorityResolver.ResolvePlayerScoped(ownerProfileId, "loot_transaction_limit").LootMaximumTransactionsPerCorpse;
+    public static float MaximumOperationalSessionSecondsForOwner(string? ownerProfileId)
+        => VanguardRuntimeSettingsAuthorityResolver.ResolvePlayerScoped(ownerProfileId, "loot_session_duration").LootMaximumSessionSeconds;
     public static TimeSpan TickInterval => TimeSpan.FromSeconds(TickSeconds);
     public static TimeSpan PreflightSettleDuration => TimeSpan.FromSeconds(PreflightSettleSeconds);
     public static TimeSpan SequentialRescanDelay => TimeSpan.FromSeconds(SequentialRescanDelaySeconds);

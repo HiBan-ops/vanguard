@@ -6,10 +6,10 @@ using Newtonsoft.Json.Linq;
 using SPT.Common.Http;
 using Vanguard.Client.Diagnostics;
 
-// Responsibility: Provides Handbook Price Cache support for the external AI integration.
-// Flow: The file encapsulates one bounded piece of the subsystem and exchanges explicit inputs/results with neighboring services instead of relying on hidden cross-system state.
-// Authority boundary: Authority remains with the owning subsystem and any external EFT/SPT/Fika/SAIN component explicitly referenced by its call path.
-// Invariant: Behavior stays scoped to the current profile/raid/process contract and preserves existing safety and compatibility boundaries.
+// Responsibility: Cache positive base prices by item template from the SPT handbook for headless-safe loot valuation.
+// Flow: Tick schedules and drains a background handbook fetch; TryGetPrice serves synchronized cached lookups.
+// Authority boundary: The SPT handbook supplies pricing data; this cache does not modify item values or own loot decisions.
+// Invariant: Missing or failed loads retain a retry window, and unresolved or nonpositive prices are not reported as hits.
 namespace Vanguard.Client.Runtime.Integrations.Looting;
 
 /// <summary>

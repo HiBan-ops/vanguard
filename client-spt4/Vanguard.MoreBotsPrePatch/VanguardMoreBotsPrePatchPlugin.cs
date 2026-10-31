@@ -15,6 +15,6 @@ public sealed class VanguardMoreBotsPrePatchPlugin : BaseUnityPlugin
 
     private void Awake()
     {
-        Logger.LogInfo($"[VANGUARD_STARTUP] MoreBots prepatch loaded; version={VanguardBuildVersion.Value}");
+        Logger.LogInfo($"[VANGUARD_STARTUP] MoreBots prepatch loaded; developmentLine={VanguardBuildVersion.DevelopmentLine}; runtimeVersion={VanguardBuildVersion.Value}");
     }
 }

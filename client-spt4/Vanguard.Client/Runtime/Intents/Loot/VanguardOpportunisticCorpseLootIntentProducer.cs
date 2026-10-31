@@ -1,11 +1,13 @@
 #if SPT_CLIENT
+using System;
 using System.Collections.Generic;
 using Vanguard.Client.Runtime.Decision;
+using Vanguard.Client.Runtime.Execution;
 
-// Responsibility: Provides Opportunistic Corpse Loot Intent Producer support for the intent production pipeline.
-// Flow: The file encapsulates one bounded piece of the subsystem and exchanges explicit inputs/results with neighboring services instead of relying on hidden cross-system state.
-// Authority boundary: Authority remains with the owning subsystem and any external EFT/SPT/Fika/SAIN component explicitly referenced by its call path.
-// Invariant: Behavior stays scoped to the current profile/raid/process contract and preserves existing safety and compatibility boundaries.
+// Responsibility: Propose an opportunistic corpse-loot claim-and-approach intent from a snapshot.
+// Flow: Inspect corpse candidates and actionable self-care, then emit a bounded-score approach candidate with an explicit gate.
+// Authority boundary: The loot execution subsystem owns claims and transactions; this producer does not transfer inventory.
+// Invariant: No candidate is emitted without a corpse target, and actionable self-care invalidates the proposed approach.
 namespace Vanguard.Client.Runtime.Intents;
 
 /// <summary>
@@ -23,15 +25,18 @@ internal sealed class VanguardOpportunisticCorpseLootIntentProducer : IVanguardI
             yield break;
         }
 
+        bool yieldToSelfCare = VanguardEffectiveMedicalExecutionPolicy.HasActionableSelfCareOpportunity(
+            snapshot, DateTimeOffset.UtcNow, out string selfCareReason);
+
         yield return new VanguardIntentCandidate
         {
             IntentKey = "ApproachNearbyCorpse",
             Domain = "CorpseLoot",
-            Valid = loot.ExecutionEnabled && loot.EligibleIfActivated,
+            Valid = loot.ExecutionEnabled && loot.EligibleIfActivated && !yieldToSelfCare,
             BaseScore = ActiveScore(loot.UtilityScore),
             FinalScore = 0f,
-            Reason = loot.Reason + ";plan=" + loot.Plan.CompactSummary,
-            Gate = loot.Gate,
+            Reason = loot.Reason + ";plan=" + loot.Plan.CompactSummary + (yieldToSelfCare ? ";yield=actionable_self_care:" + selfCareReason : string.Empty),
+            Gate = yieldToSelfCare ? "blocked_actionable_self_care:" + selfCareReason : loot.Gate,
             TargetKey = loot.CandidateCorpseId,
             PlanKey = "corpse_loot_claim_and_approach_no_transaction",
             NextStep = "claim_corpse_and_approach_interaction_anchor_only"

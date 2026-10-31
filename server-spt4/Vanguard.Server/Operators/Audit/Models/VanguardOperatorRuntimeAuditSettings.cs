@@ -54,6 +54,21 @@ public sealed class VanguardOperatorRuntimeAuditSettings
     public float MovementOpportunisticLootMaxDistanceMeters { get; set; } = 38.0f;
     public float MovementOpportunisticLootScanCooldownSeconds { get; set; } = 18.0f;
     public float MovementOpportunisticLootGrantSeconds { get; set; } = 8.0f;
+    public float TacticalCoordinationDangerCloseWeaponMeters { get; set; } = 15.0f;
+    public float TacticalCoordinationProactiveWeaponMeters { get; set; } = 25.0f;
+    public float TacticalCoordinationOverwatchMinimumThreatMeters { get; set; } = 35.0f;
+    public float TacticalCoordinationOverwatchStandoffMeters { get; set; } = 32.0f;
+    public float TacticalCoordinationBuddyIsolationMeters { get; set; } = 26.0f;
+    public float TacticalCoordinationBuddyHelperMaxMeters { get; set; } = 42.0f;
+    public float TacticalCoordinationFlankLeadCloseMeters { get; set; } = 20.0f;
+    public float TacticalCoordinationFlankLeadFarMeters { get; set; } = 60.0f;
+    public float TacticalCoordinationBoundAdvanceDistanceMeters { get; set; } = 7.0f;
+    public bool TacticalSearchShadowComparisonEnabled { get; set; }
+    public float TacticalSearchShadowOwnerLimitMeters { get; set; } = 60.0f;
+    public bool TacticalSearchShadowRequireOwnerDistanceImprovement { get; set; } = true;
+    public float TacticalSearchShadowRetreatStepMeters { get; set; } = 22.0f;
+    public float TacticalSearchShadowLateralOffsetMeters { get; set; } = 12.0f;
+    public float TacticalSearchShadowMaxPathMeters { get; set; } = 55.0f;
     public bool LootOperationalSessionEnabled { get; set; } = true;
     public bool LootBackupLongWeaponEnabled { get; set; } = true;
     public bool LootBackupPistolEnabled { get; set; } = true;

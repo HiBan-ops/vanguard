@@ -84,6 +84,22 @@ internal static class VanguardCanonicalMedicalStateService
             $"VANGUARD_MEDICAL_CANONICAL_STATE_RESET reason={Safe(reason)}; authority=single_shared_snapshot; primary=controller_List_1; typed=fallback_and_divergence_probe; maxEffects={MaxEffects}; budgetMs={EnumerationBudgetMilliseconds:0.00}; tag={StatusTag}");
     }
 
+    public static int ForgetRuntimePresence(string? botProfileId, string reason)
+    {
+        string key = string.IsNullOrWhiteSpace(botProfileId) ? "none" : botProfileId.Trim();
+        if (string.Equals(key, "none", StringComparison.OrdinalIgnoreCase))
+        {
+            return 0;
+        }
+
+        lock (Sync)
+        {
+            int removed = CacheByBotProfile.Remove(key) ? 1 : 0;
+            if (LastBudgetLogAt.Remove(key)) removed++;
+            return removed;
+        }
+    }
+
     public static void RequestForceRefresh(string botProfileId, string reason)
     {
         if (string.IsNullOrWhiteSpace(botProfileId)) return;

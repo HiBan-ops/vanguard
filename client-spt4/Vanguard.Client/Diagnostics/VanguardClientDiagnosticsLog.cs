@@ -1,4 +1,5 @@
-using System;
+﻿using System;
+using System.Collections.Generic;
 
 #if SPT_CLIENT
 using BepInEx.Logging;
@@ -21,6 +22,10 @@ internal static class VanguardClientDiagnosticsLog
     private static readonly object AuditProfileSync = new();
     private static string lastAuditProfileSignature = "none";
     private static DateTimeOffset lastAuditProfileLogAtUtc = DateTimeOffset.MinValue;
+    private static readonly object DiagnosticSummarySync = new();
+    private static readonly Dictionary<string, string> DiagnosticSummaryMessageByFamily = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly Dictionary<string, DateTimeOffset> DiagnosticSummaryEmittedAtByFamily = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly TimeSpan DiagnosticSummaryHeartbeat = TimeSpan.FromSeconds(60.0d);
 
 #if SPT_CLIENT
     private static readonly ManualLogSource LogSource = Logger.CreateLogSource("Vanguard.Client");
@@ -63,6 +68,8 @@ internal static class VanguardClientDiagnosticsLog
 
     public static void ResetAuditSession(string source)
     {
+        ResetDiagnosticSummaryGates();
+
         if (VanguardDiagnosticsPolicy.DrainSuppressionSummary(source, out string summary))
         {
             WriteRaw(AuditProfileTag, summary);
@@ -101,6 +108,56 @@ internal static class VanguardClientDiagnosticsLog
 
     public static void Trace(string tag, Func<string> messageFactory) =>
         WriteLazy(tag, VanguardAuditLevel.Trace, messageFactory, warningOrError: false, force: false);
+
+    /// <summary>
+    /// Emits diagnostic summaries on semantic transition and otherwise only as a rare heartbeat.
+    /// The full message is compared exactly, so every counter/state change is still visible at the
+    /// producer's existing summary cadence. This is observability-only and never feeds gameplay.
+    /// </summary>
+    public static void DiagnosticSummary(string tag, string family, Func<string> messageFactory)
+    {
+        if (messageFactory == null || !VanguardDiagnosticsPolicy.ShouldEmit(tag, VanguardAuditLevel.Diagnostic))
+        {
+            return;
+        }
+
+        string message;
+        try
+        {
+            message = messageFactory() ?? string.Empty;
+        }
+        catch (Exception exception)
+        {
+            WriteRaw(tag, $"ERROR: diagnostic_summary_factory_failed type={exception.GetType().Name}; reason={Safe(exception.Message)}");
+            TryWriteSuppressionSummary(tag);
+            return;
+        }
+
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        string key = Safe(tag) + "|" + Safe(family);
+        bool emit;
+        lock (DiagnosticSummarySync)
+        {
+            bool changed = !DiagnosticSummaryMessageByFamily.TryGetValue(key, out string previous)
+                || !string.Equals(previous, message, StringComparison.Ordinal);
+            bool heartbeatDue = !DiagnosticSummaryEmittedAtByFamily.TryGetValue(key, out DateTimeOffset lastEmitted)
+                || now - lastEmitted >= DiagnosticSummaryHeartbeat;
+            emit = changed || heartbeatDue;
+            if (emit)
+            {
+                DiagnosticSummaryMessageByFamily[key] = message;
+                DiagnosticSummaryEmittedAtByFamily[key] = now;
+            }
+        }
+
+        if (!emit)
+        {
+            return;
+        }
+
+        WriteRaw(tag, message);
+        TryWriteSuppressionSummary(tag);
+    }
 
     public static void Warning(string tag, string message)
     {
@@ -220,6 +277,15 @@ internal static class VanguardClientDiagnosticsLog
 
         WriteRaw(tag, message);
         TryWriteSuppressionSummary(tag);
+    }
+
+    private static void ResetDiagnosticSummaryGates()
+    {
+        lock (DiagnosticSummarySync)
+        {
+            DiagnosticSummaryMessageByFamily.Clear();
+            DiagnosticSummaryEmittedAtByFamily.Clear();
+        }
     }
 
     private static void TryWriteSuppressionSummary(string tag)

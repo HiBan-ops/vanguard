@@ -800,7 +800,7 @@ internal static partial class VanguardCombatAwarenessBridge
                 || closeReachable
                 || (visible && direct <= 20f);
 
-            float pursuitThreshold = VanguardMovementAuthorityDoctrine.StaleSearchDistanceMeters;
+            float pursuitThreshold = VanguardMovementAuthorityDoctrine.ForOwner(snapshot.OwnerProfileId).StaleSearchDistanceMeters;
             bool qualifiedPursuitEvidence = seed.IncomingFire
                 || seed.ThreatenedOwner
                 || seed.OwnerHitReceipt
@@ -813,7 +813,7 @@ internal static partial class VanguardCombatAwarenessBridge
                 && snapshot.SquadCohesion.OwnerReliableForActiveMovement
                 && snapshot.SquadCohesion.OwnerPosition.HasValue;
             float cohesionDistance = snapshot.SquadCohesion.OperatorDistanceToOwner;
-            float cohesionThreshold = VanguardMovementAuthorityDoctrine.CombatCohesionForcedCatchupMeters;
+            float cohesionThreshold = VanguardMovementAuthorityDoctrine.ForOwner(snapshot.OwnerProfileId).CombatCohesionForcedCatchupMeters;
             bool formationDetached = ownerAnchorReliable && cohesionDistance >= cohesionThreshold;
 
             bool distantByTargetGeometry = direct >= pursuitThreshold

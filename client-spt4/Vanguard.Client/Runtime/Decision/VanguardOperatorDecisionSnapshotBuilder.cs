@@ -51,6 +51,7 @@ internal sealed partial class VanguardOperatorDecisionSnapshotBuilder
         public bool ShotMeRecently;
         public bool ShotAtMeRecently;
         public float? Distance;
+        public Vector3? Position;
         public float? TimeSinceSeen;
         public float? AngleDegrees;
         public string Arc = "none";
@@ -72,6 +73,18 @@ internal sealed partial class VanguardOperatorDecisionSnapshotBuilder
         medicalFullRefreshesSinceSummary = 0;
         medicalSafetyOnlyRefreshesSinceSummary = 0;
         VanguardOwnerAnchorResolver.ResetForRaidLifecycle("decision_snapshot_builder_reset");
+    }
+
+    public void ForgetRuntimePresence(string? botProfileId)
+    {
+        if (string.IsNullOrWhiteSpace(botProfileId))
+        {
+            return;
+        }
+
+        string key = botProfileId.Trim();
+        lastPositionsByBotProfileId.Remove(key);
+        extendedByBotProfileId.Remove(key);
     }
 
     public OperatorDecisionSnapshot Capture(VanguardRaidOperatorRuntimeRecord record)

@@ -674,6 +674,9 @@ internal static class VanguardUnifiedOpportunisticLootReadModelService
     public static void ResetForRaidLifecycle(string source)
     {
         lock (LogSync) { LastLogSignature.Clear(); LastLogAt.Clear(); WeaponContextByBot.Clear(); }
+        VanguardMagazineLogisticsAuditService.ResetForRaidLifecycle();
+        VanguardBetterMagazineReplacementPreflightShadowService.ResetForRaidLifecycle();
+        VanguardMagazineDiscardPreflightShadowService.ResetForRaidLifecycle();
         VanguardOperatorRaidLoadoutRegistry.ResetForRaidLifecycle(source);
         VanguardCorpseLootManifestService.ResetForRaidLifecycle(source);
         VanguardSquadLootAssignmentService.ResetForRaidLifecycle(source);
@@ -770,6 +773,15 @@ internal static class VanguardUnifiedOpportunisticLootReadModelService
         IReadOnlyList<EftWeapon> currentWeapons = weaponContext.CurrentWeapons;
         VanguardWeaponQualitySnapshot currentMutableQuality = weaponContext.CurrentMutableQuality;
 
+        VanguardMagazineLogisticsAuditService.Observe(
+            record,
+            targetKind,
+            targetId,
+            manifest,
+            currentWeapons,
+            weaponContext.OperatorInventorySupport,
+            now);
+
         var utilities = new List<VanguardLootItemUtility>();
         foreach (VanguardCorpseLootManifestItem item in manifest.Items)
         {
@@ -794,6 +806,8 @@ internal static class VanguardUnifiedOpportunisticLootReadModelService
             Utilities = utilities
         };
         VanguardSquadLootAssignmentService.Observe(observation, directDistanceMeters, now);
+        VanguardBetterMagazineReplacementPreflightShadowService.Observe(record, observation, currentWeapons, now);
+        VanguardMagazineDiscardPreflightShadowService.Observe(record, observation, currentWeapons, now);
         LogBounded(observation, manifest, interest, weaponContext.CurrentMutableWeaponItemId, currentMutableQuality, now);
         return observation;
     }
@@ -934,7 +948,14 @@ internal static class VanguardUnifiedOpportunisticLootReadModelService
             };
             bool stocked = HasUsableCapability(inventory, capability.Need);
             if (active && !stocked) return (VanguardLootUtilityTier.Critical, 220f + resourceFraction * 30f, "active_medical_need_uncovered_" + capability.Need);
-            if (active && stocked && bestTier < VanguardLootUtilityTier.Combat) { bestTier = VanguardLootUtilityTier.Combat; bestScore = Math.Max(bestScore, 130f); reason = "active_medical_need_resupply_" + capability.Need; }
+            if (active && stocked && bestTier < VanguardLootUtilityTier.Combat)
+            {
+                // Once the current injury already has a usable treatment in the Operator inventory,
+                // the injury itself must not promote a second copy to combat-tier loot priority.
+                // Reserve/economic utility may still exist, but medical resupply is no longer the reason
+                // to leave a ready self-care window.
+                reason = "active_medical_need_already_covered_" + capability.Need;
+            }
             if (!stocked) { bestTier = Max(bestTier, VanguardLootUtilityTier.Reserve); bestScore = Math.Max(bestScore, 90f); reason = "missing_medical_reserve_" + capability.Need; }
         }
         return (bestTier, bestScore, reason);
